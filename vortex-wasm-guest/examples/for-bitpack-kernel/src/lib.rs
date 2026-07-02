@@ -9,6 +9,12 @@
 //! bit-packed deltas (`ceil(len * bit_width / 8)` bytes). Output: `reference + delta[i]` as an
 //! `i32` array.
 
+#![no_std]
+
+extern crate alloc;
+
+use alloc::vec::Vec;
+
 use vortex_wasm_guest::GuestResult;
 use vortex_wasm_guest::WasmEncoding;
 use vortex_wasm_guest::abi::PType;

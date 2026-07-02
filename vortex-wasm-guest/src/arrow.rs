@@ -8,6 +8,8 @@
 //! structs the SDK reads back ([`read_child`]). The layouts are plain bytes (see [`crate::abi`]),
 //! so no Arrow library is needed.
 
+use alloc::vec::Vec;
+
 use crate::abi::ARRAY_SIZE;
 use crate::abi::ARROW_FLAG_NULLABLE;
 use crate::abi::PType;

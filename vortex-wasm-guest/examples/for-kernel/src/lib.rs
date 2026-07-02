@@ -10,6 +10,12 @@
 //! Demonstrates the dependency-free guest SDK: read a child via [`host::decode_child`], return a
 //! [`Decoded`], and wire it up with [`export_wasm_encoding!`].
 
+#![no_std]
+
+extern crate alloc;
+
+use alloc::vec::Vec;
+
 use vortex_wasm_guest::GuestResult;
 use vortex_wasm_guest::WasmEncoding;
 use vortex_wasm_guest::abi::PType;

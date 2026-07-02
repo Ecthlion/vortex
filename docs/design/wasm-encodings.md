@@ -89,19 +89,25 @@ Two new crates, kept out of the core dependency graph so that `wasmtime` never l
 ### `vortex-wasm-guest` (the guest SDK)
 
 A small crate that an encoding author links against when building their decoder to
-`wasm32-unknown-unknown`. It is **dependency-free** — `core`/`alloc`/`std` only, never any Vortex
-crate (not even `vortex-error`) and no Arrow library — which is what keeps a compiled kernel to
-~16 KB (see [Binary size](#binary-size)). It provides:
+`wasm32-unknown-unknown`. It is **`#![no_std]` and dependency-free** — `core`/`alloc` only, never
+any Vortex crate (not even `vortex-error`) and no Arrow library — which is what keeps a compiled
+kernel to ~4 KB (see [Binary size](#binary-size)). It provides:
 
 - the host/guest ABI (exported entrypoints, imported host functions) and the Arrow C struct field
   offsets, in `abi`;
+- the guest **runtime** (behind the default `runtime` feature): a grow-only bump
+  `#[global_allocator]` over linear memory and a trap-on-panic `#[panic_handler]`, replacing
+  `std`'s dlmalloc and panic machinery — the bulk of a `std` kernel's size;
+- the **allocator API**: `host::alloc`/`host::alloc_bytes` for kernel scratch/output buffers, and
+  the `vx_alloc` export the host calls to place data into guest memory;
 - `arrow`: build a decoded primitive output (`Decoded` → Arrow C structs) and read a host-supplied
   child (`ChildView`) — all as plain byte layout, no Arrow library;
 - `host::decode_child`, the safe wrapper over the `vx_decode_child` host import;
 - a minimal, formatting-free `GuestError` (a `&'static str`, no `format!`);
 - `bitpack`, shared LSB-first bit pack/unpack helpers;
 - a `WasmEncoding` trait plus an `export_wasm_encoding!` macro that wires up the `vx_alloc` and
-  `vx_decode` exports around a user-supplied `decode` function.
+  `vx_decode` exports around a user-supplied `decode` function (see
+  [The encoding trait](#the-encoding-trait)).
 
 ### `vortex-wasm` (the host)
 
@@ -166,11 +172,19 @@ All integers little-endian. The single shared linear memory is exported by the g
 
 ### Memory
 
-Kernels keep `std` and their own Rust allocator: the guest exports `vx_alloc`, which the host calls
-to place inputs and host-decoded children into guest memory, and which the guest also uses for its
-own scratch/output buffers. (Moving allocation to the host to drop the guest allocator was
-considered; we keep `std` for simplicity — the kept allocator is the bulk of a kernel's ~16 KB,
-which is acceptable since kernels are read once per file and cached.)
+Kernels are **`#![no_std]`**, and the SDK provides the allocator: a grow-only **bump allocator**
+over linear memory (starting at the linker-provided `__heap_base`, growing memory on demand),
+installed as the `#[global_allocator]` behind the SDK's default `runtime` feature. `Vec` et al.
+work normally via `alloc`. The guest exports `vx_alloc`, backed by the same allocator; the host
+calls it to place inputs and host-decoded children into guest memory, and kernels use
+`host::alloc`/`host::alloc_bytes` for their own scratch/output buffers.
+
+There is deliberately **no free/dealloc in the ABI** and the bump allocator's `dealloc` is a no-op:
+a kernel instance decodes exactly once, and its entire linear memory is reclaimed when the host
+drops the per-decode store — so per-allocation bookkeeping would be dead weight. Dropping `std`
+(dlmalloc + panic machinery) took kernels from ~16 KB to ~4 KB. Panics become wasm traps, which the
+host surfaces as decode errors. A kernel that wants `std` or its own allocator disables the
+`runtime` feature.
 
 ### Guest exports (host calls these)
 
@@ -213,6 +227,86 @@ when clear the validity pointer is null. The values buffer always holds an entry
 null slots may contain arbitrary bytes. The host turns a present bitmap into a `Validity::Array`.
 
 [Arrow C Data Interface]: https://arrow.apache.org/docs/format/CDataInterface.html
+
+## The encoding trait
+
+The Rust surface an encoding author implements over the ABI above.
+
+### Today (transitional payload+child model)
+
+```rust
+/// A decoder for a single WASM-embedded Vortex encoding.
+pub trait WasmEncoding {
+    /// Decode `input` (the encoding-specific bytes the host passes to `vx_decode`).
+    fn decode(input: &[u8]) -> GuestResult<Decoded>;
+}
+
+export_wasm_encoding!(MyEncoding); // defines the `vx_alloc` + `vx_decode` exports
+```
+
+`input` is the opaque payload the write-side [`WasmEncoder`](#write-side-wasmencoder) produced;
+child inputs are fetched by index with `host::decode_child(i) -> ChildView` (an Arrow view over
+guest memory); the returned [`Decoded`] is laid out as Arrow C structs by the SDK. The trait is
+static (no `&self`): a kernel is a decoder for exactly one encoding, and the macro monomorphises
+the exports around it.
+
+### Target (phase 5: decode the serialized array itself)
+
+Once a `WasmLayout` embeds *only* the decoder and the data stays in the existing serialized array
+format, the trait's input becomes a parsed view of the **serialized array node** rather than a
+bespoke payload — the wasm mirror of a native `VTable::deserialize`:
+
+```rust
+pub trait WasmEncoding {
+    /// Stable encoding id; must match `WasmLayoutMetadata.encoding_id` so the host can pair the
+    /// blob with the layout (and dedup kernels).
+    const ID: &'static str;
+
+    /// Decode one serialized array node into canonical output.
+    fn decode(array: &ArrayView<'_>) -> GuestResult<Decoded>;
+}
+```
+
+where `ArrayView` wraps the `ArrayNode` flatbuffer the guest parses itself (generated code is pure
+`flatbuffers` + `alloc`):
+
+```rust
+impl ArrayView<'_> {
+    /// Logical element count of this node.
+    pub fn len(&self) -> usize;
+    /// This encoding's own metadata bytes from the `ArrayNode` (e.g. FoR's reference, a
+    /// bit-packer's bit width) — the same bytes a native `VTable::deserialize` would read.
+    pub fn metadata(&self) -> &[u8];
+    /// This node's raw data buffers (e.g. the packed bitstream).
+    pub fn nbuffers(&self) -> usize;
+    pub fn buffer(&self, i: usize) -> &[u8];
+    /// Child nodes: decoded *by the host* through `vx_decode_child` (native encodings decode
+    /// natively; nested wasm encodings recurse), returned as an Arrow view.
+    pub fn nchildren(&self) -> usize;
+    pub fn child(&self, i: usize) -> GuestResult<ChildView>;
+}
+```
+
+The split mirrors native decoding exactly: **metadata + own buffers** are interpreted by the
+kernel; **children** are delegated back to the host session. `export_wasm_encoding!` stays the
+same glue, with `vx_decode` receiving the serialized bytes instead of a payload.
+
+On the host side the write-time counterpart shrinks accordingly: today's `WasmEncoder`
+(payload + child) disappears, and a native encoding that wants a portable fallback just registers
+its kernel —
+
+```rust
+/// Host-side: pairs a native encoding with the embedded decoder able to read its serialized form.
+pub trait WasmDecodeFallback: Send + Sync {
+    /// Must equal the guest kernel's `WasmEncoding::ID`.
+    fn encoding_id(&self) -> &str;
+    /// The compiled `.wasm` decoder blob to embed (content-addressed for dedup).
+    fn kernel(&self) -> ByteBuffer;
+}
+```
+
+— and `WasmLayoutStrategy` writes the already-encoded array through the normal serialized format,
+attaching the kernel segment.
 
 ## Reader flow (`WasmReader`)
 
@@ -306,14 +400,15 @@ guest's `vortex` dependencies, not Rust `std`**:
 |---|---|
 | zero-dependency (core + std + alloc only) | **~5.9 KB** |
 | prototype kernel (via `vortex-error` + `vortex-flatbuffers` + `vortex-buffer`) | ~74 KB |
-| dependency-free SDK, `std` (Arrow C structs + `GuestError`) | **~16 KB** |
+| dependency-free SDK, `std` (Arrow C structs + `GuestError`) | ~16 KB |
+| dependency-free SDK, **`#![no_std]` + SDK bump allocator** (current) | **~3.9–4.3 KB** |
 
 `vortex-error` is the dominant cost: it pulls in `jiff`, `prost`, and `arrow-schema` as
 non-optional dependencies, none of which a kernel needs. `vortex-flatbuffers` then drags
 `vortex-error` in transitively. Dropping all vortex deps got kernels from ~74 KB to ~16 KB; the
-remaining bulk is the guest's `std` Rust allocator. **Kernels keep `std`** — the ~16 KB is
-acceptable since a kernel is read once per file and cached. (A `#![no_std]`, host-owned-allocation
-guest could reach ~6 KB but adds complexity we are not taking on.)
+remaining bulk was `std`'s dlmalloc allocator and panic machinery. **Kernels are now `#![no_std]`**
+with the SDK's grow-only bump allocator and trap-on-panic handler (see [Memory](#memory)), taking
+the three example kernels to **3.9–4.3 KB**.
 
 **The guest SDK must therefore avoid `vortex-error` entirely** and use a minimal, formatting-free
 error type (a `GuestError` carrying a `&'static str`, no `format!`). Two facts make this clean:
@@ -326,8 +421,9 @@ error type (a `GuestError` carrying a `&'static str`, no `format!`). Two facts m
   (either by depending on `vortex-flatbuffers` with its trait helpers feature-gated off, or by
   `include!`-ing the generated modules directly).
 
-Target guest dependency set: `flatbuffers` + `core`/`alloc` only. Expected kernel size: low
-single-digit to low-tens of KB rather than ~70 KB.
+Current guest dependency set: `core`/`alloc` only (~4 KB kernels). The phase-5 target adds
+`flatbuffers` for parsing the serialized array header — expected to stay in the single-digit to
+low-tens of KB.
 
 ## Output format
 
@@ -397,8 +493,9 @@ on-disk change so the embedded blob is *only* the decoder over an otherwise-norm
    writes host-decoded children as Arrow C structs into guest memory; `vx_decode` returns Arrow C
    structs; `CanonicalMessage` removed.
 4. **Dependency-free Rust guest SDK (done):** `vortex-wasm-guest` builds/reads the C structs as
-   plain bytes (no Arrow library, no nanoarrow, no Vortex crates); ~16 KB kernels. End-to-end tested
-   against compiled fixtures in [`kernel_roundtrip.rs`](../../vortex-wasm/tests/kernel_roundtrip.rs).
+   plain bytes (no Arrow library, no nanoarrow, no Vortex crates), `#![no_std]` with an SDK-provided
+   bump allocator; ~4 KB kernels. End-to-end tested against compiled fixtures in
+   [`kernel_roundtrip.rs`](../../vortex-wasm/tests/kernel_roundtrip.rs).
 5. **`WasmLayout` embeds only the decoder (next):** the strategy writes the encoded array in the
    existing serialized format (so a native VTable reads the same bytes without the blob) and embeds
    only the `.wasm`; the guest decodes from the serialized array flatbuffer it parses itself with

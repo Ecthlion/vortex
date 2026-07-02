@@ -5,6 +5,10 @@
 //! kernel — it sources its data from the host via `decode_child` and re-emits it as Arrow C Data
 //! Interface structs.
 
+#![no_std]
+
+extern crate alloc;
+
 use vortex_wasm_guest::GuestResult;
 use vortex_wasm_guest::WasmEncoding;
 use vortex_wasm_guest::arrow::Decoded;

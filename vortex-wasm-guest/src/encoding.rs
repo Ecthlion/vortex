@@ -48,7 +48,7 @@ macro_rules! export_wasm_encoding {
         /// Guest allocator export required by the host ABI.
         #[unsafe(no_mangle)]
         pub extern "C" fn vx_alloc(len: i32) -> i32 {
-            $crate::host::__alloc(len.max(0) as usize) as i32
+            $crate::host::alloc(len.max(0) as usize) as i32
         }
 
         /// Decode entrypoint export required by the host ABI.

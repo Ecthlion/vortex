@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-//! Guest allocator and access to host imports (the `vortex_host` module).
+//! Guest allocator API and access to host imports (the `vortex_host` module).
+
+use alloc::vec::Vec;
 
 use crate::arrow::ChildView;
 use crate::error::GuestError;
@@ -41,10 +43,11 @@ pub fn decode_child(_node_index: usize) -> GuestResult<ChildView> {
 
 /// Allocate `len` bytes in linear memory and return the offset.
 ///
-/// The allocation is leaked: the host reads any returned data before the kernel's store (and thus
-/// its entire linear memory) is dropped after the decode call.
-#[doc(hidden)]
-pub fn __alloc(len: usize) -> *mut u8 {
+/// Backs the `vx_alloc` export the host calls to place inputs and child arrays into guest memory,
+/// and is available to kernels for their own scratch/output buffers. The allocation is
+/// deliberately leaked — with the SDK's grow-only bump allocator (the `runtime` feature) nothing
+/// is ever freed; the whole linear memory is reclaimed when the per-decode instance is dropped.
+pub fn alloc(len: usize) -> *mut u8 {
     let mut buf = Vec::<u8>::with_capacity(len.max(1));
     let ptr = buf.as_mut_ptr();
     core::mem::forget(buf);
@@ -52,8 +55,8 @@ pub fn __alloc(len: usize) -> *mut u8 {
 }
 
 /// Allocate `bytes.len()` bytes, copy `bytes` in, and return the offset.
-pub(crate) fn alloc_bytes(bytes: &[u8]) -> u32 {
-    let ptr = __alloc(bytes.len().max(1));
+pub fn alloc_bytes(bytes: &[u8]) -> u32 {
+    let ptr = alloc(bytes.len().max(1));
     unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len()) };
     ptr as u32
 }

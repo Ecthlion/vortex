@@ -8,6 +8,9 @@
 //! least-significant-bit first. It is not the fastlanes layout Vortex uses natively — it is kept
 //! deliberately simple so a kernel can unpack it in a few lines.
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 /// The number of bits needed to represent every value up to and including `max` (0 for `max == 0`).
 pub fn bit_width(max: u32) -> u8 {
     if max == 0 {
@@ -70,6 +73,8 @@ pub fn unpack(packed: &[u8], len: usize, bit_width: u8) -> Vec<u32> {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
 
     #[test]

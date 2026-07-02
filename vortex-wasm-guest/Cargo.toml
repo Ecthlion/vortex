@@ -19,11 +19,17 @@ version = { workspace = true }
 [package.metadata.docs.rs]
 all-features = true
 
-# Intentionally dependency-free (core + alloc only). A kernel produces/consumes the Arrow C Data
-# Interface, which is plain byte layout, so the guest needs no Vortex crates — keeping the compiled
-# `.wasm` small. In particular it does NOT depend on `vortex-error` (which pulls in jiff/prost/
-# arrow-schema) and uses a minimal [`GuestError`](crate::GuestError) instead.
+# Intentionally `no_std` and dependency-free (core + alloc only). A kernel produces/consumes the
+# Arrow C Data Interface, which is plain byte layout, so the guest needs no Vortex crates — keeping
+# the compiled `.wasm` small. In particular it does NOT depend on `vortex-error` (which pulls in
+# jiff/prost/arrow-schema) and uses a minimal [`GuestError`](crate::GuestError) instead.
 [dependencies]
+
+[features]
+default = ["runtime"]
+# On wasm32, provide the guest runtime: a bump `#[global_allocator]` over linear memory and a
+# trap-on-panic `#[panic_handler]`. Disable to bring your own `std`, allocator, or panic handler.
+runtime = []
 
 [lints]
 workspace = true
