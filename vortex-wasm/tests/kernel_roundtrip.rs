@@ -43,14 +43,16 @@ use vortex_wasm::IdentityEncoder;
 use vortex_wasm::WasmEncoded;
 use vortex_wasm::WasmEncoder;
 use vortex_wasm::WasmLayoutStrategy;
-use vortex_wasm_guest::bitpack;
+use vortex_fastlanes::BitPackedArray;
+use vortex_fastlanes::BitPackedArrayExt;
+use vortex_fastlanes::BitPackedData;
 
 /// The identity kernel: returns child 0 unchanged (`examples/identity-kernel`).
 const IDENTITY_KERNEL: &[u8] = include_bytes!("fixtures/identity_kernel.wasm");
 /// The Frame-of-Reference kernel for `i32` (`examples/for-kernel`).
 const FOR_KERNEL: &[u8] = include_bytes!("fixtures/for_kernel.wasm");
-/// The FoR + bit-packing kernel for `i32` (`examples/for-bitpack-kernel`).
-const FOR_BITPACK_KERNEL: &[u8] = include_bytes!("fixtures/for_bitpack_kernel.wasm");
+/// The `vortex.fastlanes.bitpacked` kernel for `i32` (`examples/bitpacked-kernel`).
+const BITPACKED_KERNEL: &[u8] = include_bytes!("fixtures/bitpacked_kernel.wasm");
 /// The FSST string decoder kernel (`examples/fsst-kernel`).
 const FSST_KERNEL: &[u8] = include_bytes!("fixtures/fsst_kernel.wasm");
 
@@ -192,54 +194,132 @@ fn for_round_trips() {
     assert_eq!(out.buffers()[0].as_ref(), expected.as_slice());
 }
 
-/// FoR + bit-packing encoder for `i32`: the entire encoded form is the opaque payload
-/// `[i32 reference][u8 bit_width][u32 len][packed deltas…]`, so there is **no child**.
-struct ForBitpackEncoder;
-
-impl ForBitpackEncoder {
-    fn encode_i32(values: &[i32]) -> ByteBuffer {
-        let reference = values.iter().copied().min().unwrap_or(0);
-        let deltas: Vec<u32> = values
-            .iter()
-            .map(|v| v.wrapping_sub(reference) as u32)
-            .collect();
-        let bw = bitpack::bit_width(deltas.iter().copied().max().unwrap_or(0));
-        let packed = bitpack::pack(&deltas, bw);
-
-        let mut payload = Vec::with_capacity(9 + packed.len());
-        payload.extend_from_slice(&reference.to_le_bytes());
-        payload.push(bw);
-        payload.extend_from_slice(&(values.len() as u32).to_le_bytes());
-        payload.extend_from_slice(&packed);
-        ByteBuffer::from(payload)
-    }
+/// Encoder for the real `vortex.fastlanes.bitpacked` encoding: packs with the native
+/// [`BitPackedData::encode`] (the same code the `BitPacked` VTable runs), then serializes the
+/// resulting parts — bit width, offset, patches, and the FastLanes-packed buffer — into the
+/// payload the kernel consumes. The kernel decodes those bytes with the same `fastlanes` crate,
+/// so the two sides share semantics by construction.
+struct BitPackedEncoder {
+    bit_width: u8,
 }
 
-impl WasmEncoder for ForBitpackEncoder {
+/// Serialize an encoded [`BitPackedArray`]'s parts into the kernel payload.
+fn bitpacked_payload(bp: &BitPackedArray, ctx: &mut ExecutionCtx) -> VortexResult<ByteBuffer> {
+    let packed = bp.packed().clone().try_to_host_sync()?;
+    let (positions, patch_values): (Vec<u32>, Vec<i32>) = match bp.patches() {
+        Some(patches) => {
+            let indices = patches
+                .indices()
+                .clone()
+                .execute::<Canonical>(ctx)?
+                .into_primitive();
+            let values = patches
+                .values()
+                .clone()
+                .execute::<Canonical>(ctx)?
+                .into_primitive();
+            let positions = match indices.ptype() {
+                PType::U8 => indices
+                    .as_slice::<u8>()
+                    .iter()
+                    .map(|&i| i as usize)
+                    .collect::<Vec<_>>(),
+                PType::U16 => indices
+                    .as_slice::<u16>()
+                    .iter()
+                    .map(|&i| i as usize)
+                    .collect(),
+                PType::U32 => indices
+                    .as_slice::<u32>()
+                    .iter()
+                    .map(|&i| i as usize)
+                    .collect(),
+                PType::U64 => indices
+                    .as_slice::<u64>()
+                    .iter()
+                    .map(|&i| usize::try_from(i).expect("patch index fits usize"))
+                    .collect(),
+                other => vortex_bail!("unexpected patch index ptype {other}"),
+            };
+            let positions = positions
+                .into_iter()
+                .map(|i| u32::try_from(i - patches.offset()).expect("patch position fits u32"))
+                .collect();
+            (positions, values.as_slice::<i32>().to_vec())
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+
+    let mut payload = Vec::with_capacity(12 + positions.len() * 8 + packed.len());
+    payload.push(bp.bit_width());
+    payload.push(0);
+    payload.extend_from_slice(&bp.offset().to_le_bytes());
+    payload.extend_from_slice(&(bp.as_ref().len() as u32).to_le_bytes());
+    payload.extend_from_slice(&(positions.len() as u32).to_le_bytes());
+    for position in &positions {
+        payload.extend_from_slice(&position.to_le_bytes());
+    }
+    for value in &patch_values {
+        payload.extend_from_slice(&value.to_le_bytes());
+    }
+    payload.extend_from_slice(packed.as_slice());
+    Ok(ByteBuffer::from(payload))
+}
+
+impl WasmEncoder for BitPackedEncoder {
     fn encode(&self, chunk: ArrayRef, ctx: &mut ExecutionCtx) -> VortexResult<WasmEncoded> {
         let primitive = chunk.execute::<Canonical>(ctx)?.into_primitive();
         if primitive.ptype() != PType::I32 {
-            vortex_bail!("ForBitpackEncoder only supports i32");
+            vortex_bail!("BitPackedEncoder example only supports i32");
         }
+        let bp = BitPackedData::encode(&primitive.into_array(), self.bit_width, ctx)?;
         Ok(WasmEncoded {
-            payload: Self::encode_i32(primitive.as_slice::<i32>()),
+            payload: bitpacked_payload(&bp, ctx)?,
             child: None,
         })
     }
 }
 
 #[test]
-fn for_bitpack_reduces_size() {
-    // 1024 values within a 6-bit window of the reference => 6 bits each instead of 32.
-    let values: Vec<i32> = (0..1024).map(|i| 10_000 + (i % 64)).collect();
-    let payload = ForBitpackEncoder::encode_i32(&values);
-    let packed_bytes = payload.len() - 9; // minus the [i32 ref][u8 bw][u32 len] header
-    assert_eq!(packed_bytes, bitpack::packed_len(values.len(), 6));
-    assert!(
-        packed_bytes * 4 < values.len() * 4,
-        "expected >4x reduction: packed={packed_bytes} raw={}",
-        values.len() * 4
+fn bitpacked_round_trips() {
+    // 3000 values within 6 bits: two full FastLanes chunks plus a partial trailer.
+    let values: Vec<i32> = (0..3000).map(|i| i % 64).collect();
+    let array = PrimitiveArray::new(Buffer::copy_from(&values), Validity::NonNullable).into_array();
+    let out = round_trip(
+        BITPACKED_KERNEL,
+        "vortex.fastlanes.bitpacked",
+        Arc::new(BitPackedEncoder { bit_width: 6 }),
+        array,
     );
+
+    assert_eq!(out.len(), values.len());
+    let expected: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+    assert_eq!(out.buffers()[0].as_ref(), expected.as_slice());
+}
+
+#[test]
+fn bitpacked_with_patches_round_trips() {
+    // 1% of values exceed the 6-bit budget, so the native encoder emits patches.
+    let values: Vec<i32> = (0..3000)
+        .map(|i| if i % 100 == 0 { 1_000_000 + i } else { i % 64 })
+        .collect();
+    let array = PrimitiveArray::new(Buffer::copy_from(&values), Validity::NonNullable).into_array();
+
+    // Prove this data actually exercises the patch path in the native encoding.
+    let mut ctx = array_session().create_execution_ctx();
+    let bp = BitPackedData::encode(&array, 6, &mut ctx).expect("encode");
+    assert!(bp.patches().is_some(), "expected patches for the outliers");
+
+    let out = round_trip(
+        BITPACKED_KERNEL,
+        "vortex.fastlanes.bitpacked",
+        Arc::new(BitPackedEncoder { bit_width: 6 }),
+        array,
+    );
+
+    assert_eq!(out.len(), values.len());
+    let expected: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+    assert_eq!(out.buffers()[0].as_ref(), expected.as_slice());
 }
 
 /// FSST encoder for utf8 strings: train a symbol table with the `fsst` crate, compress every
@@ -320,18 +400,3 @@ fn fsst_reduces_size() {
     );
 }
 
-#[test]
-fn for_bitpack_round_trips() {
-    let values: Vec<i32> = (0..1024).map(|i| 10_000 + (i % 64)).collect();
-    let array = PrimitiveArray::new(Buffer::copy_from(&values), Validity::NonNullable).into_array();
-    let out = round_trip(
-        FOR_BITPACK_KERNEL,
-        "test.for-bitpack",
-        Arc::new(ForBitpackEncoder),
-        array,
-    );
-
-    assert_eq!(out.len(), values.len());
-    let expected: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-    assert_eq!(out.buffers()[0].as_ref(), expected.as_slice());
-}

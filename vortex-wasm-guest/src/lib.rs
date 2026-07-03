@@ -24,7 +24,6 @@ extern crate alloc;
 
 pub mod abi;
 pub mod arrow;
-pub mod bitpack;
 mod encoding;
 mod error;
 pub mod host;

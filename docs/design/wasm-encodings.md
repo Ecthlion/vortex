@@ -104,7 +104,6 @@ kernel to ~4 KB (see [Binary size](#binary-size)). It provides:
   child (`ChildView`) — all as plain byte layout, no Arrow library;
 - `host::decode_child`, the safe wrapper over the `vx_decode_child` host import;
 - a minimal, formatting-free `GuestError` (a `&'static str`, no `format!`);
-- `bitpack`, shared LSB-first bit pack/unpack helpers;
 - a `WasmEncoding` trait plus an `export_wasm_encoding!` macro that wires up the `vx_alloc` and
   `vx_decode` exports around a user-supplied `decode` function (see
   [The encoding trait](#the-encoding-trait)).
@@ -369,28 +368,36 @@ Both halves live as runnable code:
   (committed under `tests/fixtures/`, `include_bytes!`-ed), writing and reading a FoR `WasmLayout`
   end to end through real layout machinery and the real guest.
 
-## Worked example: FoR + bit packing (real size reduction)
+## Worked example: `vortex.fastlanes.bitpacked` (native-parity semantics)
 
-`for-bitpack-kernel` composes FoR with bit packing in a single kernel and shows genuine on-disk
-savings:
+`bitpacked-kernel` decodes the **real** FastLanes bit-packed encoding — not a simplified stand-in.
+The kernel links the same [`fastlanes`] crate the native `BitPacked` VTable uses, so the packed
+layout (1024-element chunks of `128 * bit_width` bytes in the transposed lane order) is decoded
+bit-for-bit identically, and it honours the encoding's full semantics:
 
-- **Write** (`ForBitpackEncoder`): `delta = value - reference`, then pack the deltas into the
-  minimum number of bits (`bit_width(max_delta)`). The whole encoded form fits in the opaque
-  payload — `[i32 reference][u8 bit_width][u32 len][packed deltas…]` — so this encoding has **no
-  child**.
-- **Read** (the kernel): read the payload header, then unpack `bit_width` bits per element
-  (`vortex_wasm_guest::bitpack::unpack`) directly from the payload bytes before adding the
-  reference. No `vx_decode_child` call.
+- **`offset`** — a slice into the first chunk (from array slicing);
+- a **partial final chunk** — unpacked into scratch and truncated;
+- **patches** — values wider than `bit_width`, stored separately by the encoder and overwriting the
+  unpacked output at their positions.
 
-For 1024 `i32` values within a 6-bit window, the packed deltas occupy **768 bytes vs 4096 raw
-(5.3×)**. The pack/unpack routine lives once in `vortex_wasm_guest::bitpack` and is used by both the
-kernel and the host encoder (in tests).
+The round-trip test packs with the native `BitPackedData::encode` (the exact code the real encoding
+runs, including automatic patch extraction for outliers) and asserts the kernel reproduces the
+original values — with and without patches.
 
-This shows the two shapes an encoding can take. FoR keeps a **child** (the deltas, in the output
-dtype) decoded via `vx_decode_child`; FoR+bit-packing folds its entire encoded form into the
+Semantic parity has a size cost: the compiled kernel is **~44 KB**, vs ~4 KB for the simple
+kernels. About 28 KB is the `fastlanes` crate's unrolled per-width unpack kernels (all 33 widths
+stay reachable because `bit_width` is a runtime value), and ~12 KB is `std` linked back in because
+`fastlanes`' `num-traits` dependency does not set `default-features = false` — fixing that upstream
+in `fastlanes-rs` would drop the kernel to ~32 KB. Kernels are read once per file and cached, so
+this remains acceptable.
+
+This also shows the two shapes an encoding can take. FoR keeps a **child** (the deltas, in the
+output dtype) decoded via `vx_decode_child`; bitpacked folds its entire encoded form into the
 **payload** and has no child. Because a child always carries the layout's output dtype, child dtypes
 are never stored in the metadata — an encoding that needs a differently-typed buffer carries it in
 the payload instead.
+
+[`fastlanes`]: https://crates.io/crates/fastlanes
 
 ## Worked example: FSST (a real string encoding)
 
@@ -424,13 +431,15 @@ guest's `vortex` dependencies, not Rust `std`**:
 | prototype kernel (via `vortex-error` + `vortex-flatbuffers` + `vortex-buffer`) | ~74 KB |
 | dependency-free SDK, `std` (Arrow C structs + `GuestError`) | ~16 KB |
 | dependency-free SDK, **`#![no_std]` + SDK bump allocator** (current) | **~3.9–4.3 KB** |
+| bitpacked kernel (real `fastlanes` unpack kernels + `std` via `num-traits`) | ~44 KB |
 
 `vortex-error` is the dominant cost: it pulls in `jiff`, `prost`, and `arrow-schema` as
 non-optional dependencies, none of which a kernel needs. `vortex-flatbuffers` then drags
 `vortex-error` in transitively. Dropping all vortex deps got kernels from ~74 KB to ~16 KB; the
 remaining bulk was `std`'s dlmalloc allocator and panic machinery. **Kernels are now `#![no_std]`**
 with the SDK's grow-only bump allocator and trap-on-panic handler (see [Memory](#memory)), taking
-the three example kernels to **3.9–4.3 KB**.
+the simple example kernels to **3.9–4.3 KB**. Kernels that reuse real encoding libraries pay for
+what they use — see the [bitpacked example](#worked-example-vortexfastlanesbitpacked-native-parity-semantics).
 
 **The guest SDK must therefore avoid `vortex-error` entirely** and use a minimal, formatting-free
 error type (a `GuestError` carrying a `&'static str`, no `format!`). Two facts make this clean:
