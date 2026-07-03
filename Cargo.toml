@@ -80,6 +80,7 @@ exclude = [
     "vortex-wasm-guest/examples/identity-kernel",
     "vortex-wasm-guest/examples/for-kernel",
     "vortex-wasm-guest/examples/for-bitpack-kernel",
+    "vortex-wasm-guest/examples/fsst-kernel",
 ]
 resolver = "3"
 

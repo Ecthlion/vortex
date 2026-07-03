@@ -15,6 +15,7 @@ full host/guest pipeline with real kernels (via `include_bytes!`) without buildi
 | `identity_kernel.wasm` | `examples/identity-kernel` |
 | `for_kernel.wasm` | `examples/for-kernel` |
 | `for_bitpack_kernel.wasm` | `examples/for-bitpack-kernel` |
+| `fsst_kernel.wasm` | `examples/fsst-kernel` |
 
 ## Rebuilding
 
@@ -22,7 +23,7 @@ After changing the guest SDK or an example kernel, rebuild and copy the fixtures
 
 ```bash
 cd vortex-wasm-guest/examples
-for k in identity-kernel for-kernel for-bitpack-kernel; do
+for k in identity-kernel for-kernel for-bitpack-kernel fsst-kernel; do
   (cd "$k" && cargo build --target wasm32-unknown-unknown --release)
 done
 cp identity-kernel/target/wasm32-unknown-unknown/release/identity_kernel.wasm \
@@ -30,5 +31,7 @@ cp identity-kernel/target/wasm32-unknown-unknown/release/identity_kernel.wasm \
 cp for-kernel/target/wasm32-unknown-unknown/release/for_kernel.wasm \
    ../../vortex-wasm/tests/fixtures/
 cp for-bitpack-kernel/target/wasm32-unknown-unknown/release/for_bitpack_kernel.wasm \
+   ../../vortex-wasm/tests/fixtures/
+cp fsst-kernel/target/wasm32-unknown-unknown/release/fsst_kernel.wasm \
    ../../vortex-wasm/tests/fixtures/
 ```

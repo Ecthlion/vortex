@@ -217,9 +217,11 @@ module and the host's `arrow_ffi`. The `ArrowArray.buffers` pointer addresses a 
 - `vx_decode`'s return value points at an 8-byte `(array_ptr: u32, schema_ptr: u32)` pair; each
   `vx_decode_child` call writes the same pair at its `out_ptr`.
 - The host allocates space in guest memory for child structs/buffers via the guest's `vx_alloc`.
-- Scope today is **primitive and boolean** arrays. A primitive/bool array always exposes two
-  buffers in Arrow order — buffer 0 the validity bitmap, buffer 1 the values — matching Arrow's own
-  layout.
+- Scope today: **primitive and boolean** arrays in both directions, plus **utf8 strings** for
+  kernel *output* (guest write + host import; string children are not yet exported to guests). A
+  primitive/bool array exposes two buffers in Arrow order — buffer 0 the validity bitmap, buffer 1
+  the values; utf8 exposes three — validity, `i32` offsets (`len + 1`), and the concatenated data —
+  matching Arrow's own layouts.
 
 **Nullability.** The schema's `flags` carries `ARROW_FLAG_NULLABLE` (2). When set, buffer 0 is a
 validity bitmap (`ceil(len / 8)` bytes, LSB-first, 1 = valid) and `null_count` is `-1` (unknown);
@@ -389,6 +391,26 @@ dtype) decoded via `vx_decode_child`; FoR+bit-packing folds its entire encoded f
 **payload** and has no child. Because a child always carries the layout's output dtype, child dtypes
 are never stored in the metadata — an encoding that needs a differently-typed buffer carries it in
 the payload instead.
+
+## Worked example: FSST (a real string encoding)
+
+FSST replaces frequent 1-8 byte substrings with 1-byte codes from a table of up to 255 symbols;
+code 255 escapes a literal byte. It is the ideal wasm-encoding shape: **training and compression
+are complex and stay on the write side** (the `fsst` crate on the host), while **decompression is a
+trivial table walk** — so the decoder that ships in the file is tiny.
+
+- **Write** (`FsstEncoder`, host): train a `fsst::Compressor` over the chunk's strings, compress
+  each, and pack everything into the payload:
+  `[u32 n_symbols][symbols as u64 LE][symbol lengths][u32 n_strings][(n+1) u32 code offsets][codes]`.
+  No child.
+- **Read** (`examples/fsst-kernel`, guest, ~40 lines): walk the codes — escape → literal byte,
+  else copy `symbol_lengths[code]` bytes of `symbols[code]` — building the Arrow utf8 offsets +
+  data buffers directly. Output is a `Decoded::Utf8`.
+
+The compiled kernel is **~4.1 KB**, and the payload lands well under the raw string bytes on
+repetitive data (>2× on URL-like strings in the test). FSST is also what drove the first
+non-primitive output type across the Arrow boundary (`DecodedUtf8` guest-side, `Utf8` import
+host-side); Vortex's native reader canonicalizes the imported utf8 to `VarBinView` as usual.
 
 ## Binary size
 

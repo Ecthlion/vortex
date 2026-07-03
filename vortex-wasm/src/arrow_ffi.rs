@@ -14,8 +14,8 @@
 //! so we cannot hand Arrow a borrowed `FFI_ArrowArray`: we copy buffers out and build
 //! [`arrow_data::ArrayData`] ourselves (Arrow's `from_ffi` is for same-address-space hand-off).
 //!
-//! Scope: primitive and boolean arrays, including a validity bitmap. Nested types (struct, list,
-//! varbin/view) follow.
+//! Scope: primitive, boolean, and (import-only) utf8 arrays, including a validity bitmap. Nested
+//! types (struct, list, view layouts) follow.
 //!
 //! [Arrow C Data Interface]: https://arrow.apache.org/docs/format/CDataInterface.html
 
@@ -125,22 +125,51 @@ pub fn import(mem: &[u8], array_ptr: u32, schema_ptr: u32) -> VortexResult<Array
     let buffers_ptr = read_u32(mem, array_ptr + array::BUFFERS as u32)?;
     let _ = read_i64(mem, array_ptr + array::NULL_COUNT as u32)?;
 
-    vortex_ensure!(
-        n_buffers == 2,
-        "arrow-ffi: primitive/bool expects 2 buffers (validity, values), got {n_buffers}"
-    );
     let validity_ptr = read_u32(mem, buffers_ptr)?;
-    let values_ptr = read_u32(mem, buffers_ptr + 4)?;
 
-    let arrow = if format == "b" {
-        // Boolean: values are a bitmap of (len + offset) bits.
-        let nbytes = (len + offset).div_ceil(8);
-        let values = copy_bytes(mem, values_ptr, nbytes)?;
-        build_array(DataType::Boolean, len, offset, values, validity_ptr, mem)?
+    let arrow = if format == "u" {
+        // Utf8: [validity, offsets (i32, len + 1), data]; the data length is the last offset.
+        vortex_ensure!(
+            n_buffers == 3,
+            "arrow-ffi: utf8 expects 3 buffers (validity, offsets, data), got {n_buffers}"
+        );
+        let offsets_ptr = read_u32(mem, buffers_ptr + 4)?;
+        let values_ptr = read_u32(mem, buffers_ptr + 8)?;
+
+        let offsets = copy_bytes(mem, offsets_ptr, (len + offset + 1) * 4)?;
+        let last = i32::from_le_bytes(
+            offsets.as_slice()[(len + offset) * 4..][..4]
+                .try_into()
+                .expect("4 bytes"),
+        );
+        let values = copy_bytes(mem, values_ptr, usize::try_from(last)?)?;
+        let null_bit_buffer = copy_validity(mem, validity_ptr, len, offset)?;
+        let data = ArrayData::try_new(
+            DataType::Utf8,
+            len,
+            null_bit_buffer,
+            offset,
+            vec![offsets, values],
+            vec![],
+        )
+        .map_err(|e| vortex_error::vortex_err!("arrow-ffi: invalid utf8 array data: {e}"))?;
+        make_array(data)
     } else {
-        let (dtype, width) = primitive_layout(format)?;
-        let values = copy_bytes(mem, values_ptr, (len + offset) * width)?;
-        build_array(dtype, len, offset, values, validity_ptr, mem)?
+        vortex_ensure!(
+            n_buffers == 2,
+            "arrow-ffi: primitive/bool expects 2 buffers (validity, values), got {n_buffers}"
+        );
+        let values_ptr = read_u32(mem, buffers_ptr + 4)?;
+        if format == "b" {
+            // Boolean: values are a bitmap of (len + offset) bits.
+            let nbytes = (len + offset).div_ceil(8);
+            let values = copy_bytes(mem, values_ptr, nbytes)?;
+            build_array(DataType::Boolean, len, offset, values, validity_ptr, mem)?
+        } else {
+            let (dtype, width) = primitive_layout(format)?;
+            let values = copy_bytes(mem, values_ptr, (len + offset) * width)?;
+            build_array(dtype, len, offset, values, validity_ptr, mem)?
+        }
     };
 
     ArrayRef::from_arrow(arrow.as_ref(), nullable)
@@ -242,6 +271,24 @@ pub fn export(
     Ok((array_ptr, schema_ptr))
 }
 
+/// Copy the validity bitmap out of guest memory; a null pointer means "no bitmap".
+fn copy_validity(
+    mem: &[u8],
+    validity_ptr: u32,
+    len: usize,
+    offset: usize,
+) -> VortexResult<Option<ArrowBuffer>> {
+    if validity_ptr != 0 {
+        Ok(Some(copy_bytes(
+            mem,
+            validity_ptr,
+            (len + offset).div_ceil(8),
+        )?))
+    } else {
+        Ok(None)
+    }
+}
+
 fn build_array(
     dtype: DataType,
     len: usize,
@@ -250,11 +297,7 @@ fn build_array(
     validity_ptr: u32,
     mem: &[u8],
 ) -> VortexResult<ArrowArrayRef> {
-    let null_bit_buffer = if validity_ptr != 0 {
-        Some(copy_bytes(mem, validity_ptr, (len + offset).div_ceil(8))?)
-    } else {
-        None
-    };
+    let null_bit_buffer = copy_validity(mem, validity_ptr, len, offset)?;
     let data = ArrayData::try_new(dtype, len, null_bit_buffer, offset, vec![values], vec![])
         .map_err(|e| vortex_error::vortex_err!("arrow-ffi: invalid array data: {e}"))?;
     Ok(make_array(data))

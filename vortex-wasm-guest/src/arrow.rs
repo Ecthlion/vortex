@@ -4,9 +4,9 @@
 //! Building and reading Arrow C Data Interface structs in the guest's own linear memory.
 //!
 //! Decoded arrays cross the boundary as Arrow C structs. A kernel returns its result as a
-//! [`Decoded`] and the SDK lays out the structs ([`write_primitive`]); child inputs arrive as
-//! structs the SDK reads back ([`read_child`]). The layouts are plain bytes (see [`crate::abi`]),
-//! so no Arrow library is needed.
+//! [`Decoded`] and the SDK lays out the structs ([`write`]); child inputs arrive as structs the
+//! SDK reads back ([`read_child`]). The layouts are plain bytes (see [`crate::abi`]), so no Arrow
+//! library is needed.
 
 use alloc::vec::Vec;
 
@@ -20,10 +20,18 @@ use crate::error::GuestError;
 use crate::error::GuestResult;
 use crate::host::alloc_bytes;
 
-/// A decoded primitive array a kernel returns. The values buffer must hold an entry at every
-/// position; null positions may contain any bytes. `validity` is an LSB-first bitmap
-/// (`ceil(len / 8)` bytes, 1 = valid); `None` means non-nullable.
-pub struct Decoded {
+/// A decoded array a kernel returns.
+pub enum Decoded {
+    /// A primitive array.
+    Primitive(DecodedPrimitive),
+    /// A utf8 string array.
+    Utf8(DecodedUtf8),
+}
+
+/// A decoded primitive array. The values buffer must hold an entry at every position; null
+/// positions may contain any bytes. `validity` is an LSB-first bitmap (`ceil(len / 8)` bytes,
+/// 1 = valid); `None` means non-nullable.
+pub struct DecodedPrimitive {
     /// Element type.
     pub ptype: PType,
     /// Logical element count.
@@ -34,43 +42,83 @@ pub struct Decoded {
     pub validity: Option<Vec<u8>>,
 }
 
-/// Write a primitive [`Decoded`] as Arrow C Data Interface structs in linear memory.
+/// A decoded utf8 string array in Arrow's variable-size layout: `len + 1` byte offsets into a
+/// concatenated values buffer, so string `i` is `values[offsets[i]..offsets[i + 1]]`.
+pub struct DecodedUtf8 {
+    /// Logical element count.
+    pub len: usize,
+    /// `len + 1` monotonically non-decreasing byte offsets into `values`.
+    pub offsets: Vec<i32>,
+    /// Concatenated utf8 bytes.
+    pub values: Vec<u8>,
+    /// Optional validity bitmap (LSB-first, 1 = valid); `None` means non-nullable.
+    pub validity: Option<Vec<u8>>,
+}
+
+/// Write a [`Decoded`] as Arrow C Data Interface structs in linear memory.
 ///
 /// Returns a pointer to an 8-byte pair `[array_ptr: u32, schema_ptr: u32]` — the value a kernel's
 /// `vx_decode` returns to the host.
-pub fn write_primitive(decoded: &Decoded) -> i32 {
-    let mut format = Vec::with_capacity(2);
-    format.extend_from_slice(decoded.ptype.format_code().as_bytes());
-    format.push(0);
-    let format_ptr = alloc_bytes(&format);
-    let values_ptr = alloc_bytes(&decoded.values);
-    let validity_ptr = decoded
-        .validity
-        .as_ref()
-        .map(|v| alloc_bytes(v))
-        .unwrap_or(0);
+pub fn write(decoded: &Decoded) -> i32 {
+    match decoded {
+        Decoded::Primitive(primitive) => {
+            let values_ptr = alloc_bytes(&primitive.values);
+            let validity_ptr = primitive
+                .validity
+                .as_ref()
+                .map(|v| alloc_bytes(v))
+                .unwrap_or(0);
+            write_structs(
+                primitive.ptype.format_code(),
+                primitive.len,
+                primitive.validity.is_some(),
+                &[validity_ptr, values_ptr],
+            )
+        }
+        Decoded::Utf8(utf8) => {
+            let mut offset_bytes = Vec::with_capacity(utf8.offsets.len() * 4);
+            for offset in &utf8.offsets {
+                offset_bytes.extend_from_slice(&offset.to_le_bytes());
+            }
+            let offsets_ptr = alloc_bytes(&offset_bytes);
+            let values_ptr = alloc_bytes(&utf8.values);
+            let validity_ptr = utf8.validity.as_ref().map(|v| alloc_bytes(v)).unwrap_or(0);
+            write_structs(
+                "u",
+                utf8.len,
+                utf8.validity.is_some(),
+                &[validity_ptr, offsets_ptr, values_ptr],
+            )
+        }
+    }
+}
 
-    let mut buffers = [0u8; 8];
-    buffers[0..4].copy_from_slice(&validity_ptr.to_le_bytes());
-    buffers[4..8].copy_from_slice(&values_ptr.to_le_bytes());
+/// Lay out the `ArrowSchema`/`ArrowArray` structs (plus the buffer-pointer table and the result
+/// pair) for an array whose buffers are already in linear memory.
+fn write_structs(format: &str, len: usize, nullable: bool, buffer_ptrs: &[u32]) -> i32 {
+    let mut format_bytes = Vec::with_capacity(format.len() + 1);
+    format_bytes.extend_from_slice(format.as_bytes());
+    format_bytes.push(0);
+    let format_ptr = alloc_bytes(&format_bytes);
+
+    let mut buffers = Vec::with_capacity(buffer_ptrs.len() * 4);
+    for ptr in buffer_ptrs {
+        buffers.extend_from_slice(&ptr.to_le_bytes());
+    }
     let buffers_ptr = alloc_bytes(&buffers);
 
     let mut schema_buf = [0u8; SCHEMA_SIZE];
     schema_buf[schema::FORMAT..schema::FORMAT + 4].copy_from_slice(&format_ptr.to_le_bytes());
-    let flags: i64 = if decoded.validity.is_some() {
-        ARROW_FLAG_NULLABLE
-    } else {
-        0
-    };
+    let flags: i64 = if nullable { ARROW_FLAG_NULLABLE } else { 0 };
     schema_buf[schema::FLAGS..schema::FLAGS + 8].copy_from_slice(&flags.to_le_bytes());
     let schema_ptr = alloc_bytes(&schema_buf);
 
     let mut array_buf = [0u8; ARRAY_SIZE];
-    array_buf[array::LENGTH..array::LENGTH + 8]
-        .copy_from_slice(&(decoded.len as i64).to_le_bytes());
-    let null_count: i64 = if decoded.validity.is_some() { -1 } else { 0 };
+    array_buf[array::LENGTH..array::LENGTH + 8].copy_from_slice(&(len as i64).to_le_bytes());
+    let null_count: i64 = if nullable { -1 } else { 0 };
     array_buf[array::NULL_COUNT..array::NULL_COUNT + 8].copy_from_slice(&null_count.to_le_bytes());
-    array_buf[array::N_BUFFERS..array::N_BUFFERS + 8].copy_from_slice(&2i64.to_le_bytes());
+    array_buf[array::N_BUFFERS..array::N_BUFFERS + 8]
+        .copy_from_slice(&(buffer_ptrs.len() as i64).to_le_bytes());
     array_buf[array::BUFFERS..array::BUFFERS + 4].copy_from_slice(&buffers_ptr.to_le_bytes());
     let array_ptr = alloc_bytes(&array_buf);
 

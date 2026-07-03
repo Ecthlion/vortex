@@ -4,14 +4,14 @@
 //! The [`WasmEncoding`] trait an encoding author implements, and the glue that exports it.
 
 use crate::arrow::Decoded;
-use crate::arrow::write_primitive;
+use crate::arrow::write;
 use crate::error::GuestResult;
 
 /// A decoder for a single WASM-embedded Vortex encoding.
 ///
 /// Implementors read the encoding-specific input, fetch any child arrays via
 /// [`host::decode_child`](crate::host::decode_child), and return the decoded result as a
-/// [`Decoded`] primitive. The SDK lays it out as Arrow C Data Interface structs for the host.
+/// [`Decoded`] array. The SDK lays it out as Arrow C Data Interface structs for the host.
 ///
 /// Wire it up with [`export_wasm_encoding!`](crate::export_wasm_encoding).
 pub trait WasmEncoding {
@@ -28,7 +28,7 @@ pub fn __run_decode<E: WasmEncoding>(in_ptr: i32, in_len: i32) -> i32 {
         unsafe { core::slice::from_raw_parts(in_ptr as *const u8, in_len as usize) }
     };
     match E::decode(input) {
-        Ok(decoded) => write_primitive(&decoded),
+        Ok(decoded) => write(&decoded),
         Err(_) => -1,
     }
 }

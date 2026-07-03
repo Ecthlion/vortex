@@ -20,6 +20,7 @@ use vortex_array::MaskFuture;
 use vortex_array::VortexSessionExecute;
 use vortex_array::array_session;
 use vortex_array::arrays::PrimitiveArray;
+use vortex_array::arrays::VarBinViewArray;
 use vortex_array::dtype::PType;
 use vortex_array::expr::root;
 use vortex_array::validity::Validity;
@@ -50,6 +51,8 @@ const IDENTITY_KERNEL: &[u8] = include_bytes!("fixtures/identity_kernel.wasm");
 const FOR_KERNEL: &[u8] = include_bytes!("fixtures/for_kernel.wasm");
 /// The FoR + bit-packing kernel for `i32` (`examples/for-bitpack-kernel`).
 const FOR_BITPACK_KERNEL: &[u8] = include_bytes!("fixtures/for_bitpack_kernel.wasm");
+/// The FSST string decoder kernel (`examples/fsst-kernel`).
+const FSST_KERNEL: &[u8] = include_bytes!("fixtures/fsst_kernel.wasm");
 
 /// Write `array` through a [`WasmLayoutStrategy`] with `kernel`/`encoder`, then decode the whole
 /// column back through a [`WasmReader`].
@@ -236,6 +239,84 @@ fn for_bitpack_reduces_size() {
         packed_bytes * 4 < values.len() * 4,
         "expected >4x reduction: packed={packed_bytes} raw={}",
         values.len() * 4
+    );
+}
+
+/// FSST encoder for utf8 strings: train a symbol table with the `fsst` crate, compress every
+/// string, and pack the whole encoded form into the payload (see the kernel's doc for the layout).
+/// The compressor stays host-side; only the tiny table-walk decoder ships in the file.
+struct FsstEncoder;
+
+impl FsstEncoder {
+    fn encode_strings(strings: &[&[u8]]) -> ByteBuffer {
+        let compressor = fsst::Compressor::train(&strings.to_vec());
+        let symbols = compressor.symbol_table();
+        let lengths = compressor.symbol_lengths();
+
+        let mut codes = Vec::new();
+        let mut code_offsets: Vec<u32> = Vec::with_capacity(strings.len() + 1);
+        code_offsets.push(0);
+        for string in strings {
+            codes.extend_from_slice(&compressor.compress(string));
+            code_offsets.push(u32::try_from(codes.len()).expect("codes fit in u32"));
+        }
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(symbols.len() as u32).to_le_bytes());
+        for symbol in symbols {
+            payload.extend_from_slice(&symbol.to_u64().to_le_bytes());
+        }
+        payload.extend_from_slice(lengths);
+        payload.extend_from_slice(&(strings.len() as u32).to_le_bytes());
+        for offset in &code_offsets {
+            payload.extend_from_slice(&offset.to_le_bytes());
+        }
+        payload.extend_from_slice(&codes);
+        ByteBuffer::from(payload)
+    }
+}
+
+impl WasmEncoder for FsstEncoder {
+    fn encode(&self, chunk: ArrayRef, ctx: &mut ExecutionCtx) -> VortexResult<WasmEncoded> {
+        let strings = chunk.execute::<Canonical>(ctx)?.into_varbinview();
+        let buffers: Vec<_> = (0..strings.len()).map(|i| strings.bytes_at(i)).collect();
+        let lines: Vec<&[u8]> = buffers.iter().map(|b| b.as_slice()).collect();
+        Ok(WasmEncoded {
+            payload: Self::encode_strings(&lines),
+            child: None,
+        })
+    }
+}
+
+#[test]
+fn fsst_round_trips() {
+    let strings: Vec<String> = (0..512)
+        .map(|i| format!("https://vortex.dev/docs/page-{}?ref=benchmark", i % 100))
+        .collect();
+    let array = VarBinViewArray::from_iter_str(strings.iter()).into_array();
+    let out = round_trip(FSST_KERNEL, "test.fsst", Arc::new(FsstEncoder), array);
+
+    assert_eq!(out.len(), strings.len());
+    let mut ctx = array_session().create_execution_ctx();
+    let decoded = out.execute::<Canonical>(&mut ctx).expect("canonical");
+    let decoded = decoded.into_varbinview();
+    for (i, expected) in strings.iter().enumerate() {
+        assert_eq!(decoded.bytes_at(i).as_slice(), expected.as_bytes());
+    }
+}
+
+#[test]
+fn fsst_reduces_size() {
+    let strings: Vec<String> = (0..512)
+        .map(|i| format!("https://vortex.dev/docs/page-{}?ref=benchmark", i % 100))
+        .collect();
+    let lines: Vec<&[u8]> = strings.iter().map(|s| s.as_bytes()).collect();
+    let raw: usize = lines.iter().map(|l| l.len()).sum();
+    let payload = FsstEncoder::encode_strings(&lines);
+    assert!(
+        payload.len() * 2 < raw,
+        "expected >2x reduction: payload={} raw={raw}",
+        payload.len()
     );
 }
 

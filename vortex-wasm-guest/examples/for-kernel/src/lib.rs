@@ -20,6 +20,7 @@ use vortex_wasm_guest::GuestResult;
 use vortex_wasm_guest::WasmEncoding;
 use vortex_wasm_guest::abi::PType;
 use vortex_wasm_guest::arrow::Decoded;
+use vortex_wasm_guest::arrow::DecodedPrimitive;
 use vortex_wasm_guest::export_wasm_encoding;
 use vortex_wasm_guest::guest_ensure;
 use vortex_wasm_guest::host;
@@ -48,12 +49,12 @@ impl WasmEncoding for FrameOfReference {
             values.extend_from_slice(&reference.wrapping_add(delta).to_le_bytes());
         }
 
-        Ok(Decoded {
+        Ok(Decoded::Primitive(DecodedPrimitive {
             ptype: PType::I32,
             len: child.len,
             values,
             validity: None,
-        })
+        }))
     }
 }
 
