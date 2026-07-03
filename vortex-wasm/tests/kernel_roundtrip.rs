@@ -28,6 +28,9 @@ use vortex_buffer::Buffer;
 use vortex_buffer::ByteBuffer;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
+use vortex_fastlanes::BitPackedArray;
+use vortex_fastlanes::BitPackedArrayExt;
+use vortex_fastlanes::BitPackedData;
 use vortex_io::runtime::single::block_on;
 use vortex_io::session::RuntimeSession;
 use vortex_io::session::RuntimeSessionExt;
@@ -43,9 +46,6 @@ use vortex_wasm::IdentityEncoder;
 use vortex_wasm::WasmEncoded;
 use vortex_wasm::WasmEncoder;
 use vortex_wasm::WasmLayoutStrategy;
-use vortex_fastlanes::BitPackedArray;
-use vortex_fastlanes::BitPackedArrayExt;
-use vortex_fastlanes::BitPackedData;
 
 /// The identity kernel: returns child 0 unchanged (`examples/identity-kernel`).
 const IDENTITY_KERNEL: &[u8] = include_bytes!("fixtures/identity_kernel.wasm");
@@ -399,4 +399,3 @@ fn fsst_reduces_size() {
         payload.len()
     );
 }
-

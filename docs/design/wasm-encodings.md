@@ -216,11 +216,25 @@ module and the host's `arrow_ffi`. The `ArrowArray.buffers` pointer addresses a 
 - `vx_decode`'s return value points at an 8-byte `(array_ptr: u32, schema_ptr: u32)` pair; each
   `vx_decode_child` call writes the same pair at its `out_ptr`.
 - The host allocates space in guest memory for child structs/buffers via the guest's `vx_alloc`.
-- Scope today: **primitive and boolean** arrays in both directions, plus **utf8 strings** for
-  kernel *output* (guest write + host import; string children are not yet exported to guests). A
-  primitive/bool array exposes two buffers in Arrow order — buffer 0 the validity bitmap, buffer 1
-  the values; utf8 exposes three — validity, `i32` offsets (`len + 1`), and the concatenated data —
-  matching Arrow's own layouts.
+
+The host side (`arrow_ffi`) implements the **complete interface**, not per-type special cases —
+both directions are driven by Arrow's own machinery:
+
+- **Import** parses the guest's recursive `ArrowSchema` (format strings, names, flags, key/value
+  metadata, children, dictionaries) into a native `FFI_ArrowSchema` and lets `arrow-schema`'s own
+  parser produce the `Field` — so every format the spec defines is understood. Array buffers are
+  sized by `arrow_data::layout()` per `DataType` (validity/bitmap/fixed-width/offsets+data/view
+  variadic buffers), children and dictionary values recurse, and the result is validated by
+  `ArrayData::try_new` — untrusted guest data gets Arrow's full validation (offset monotonicity,
+  bounds, utf8) before any host code consumes it. Depth and child/buffer counts are capped.
+- **Export** converts any decoded child through the session's Arrow export (`execute_arrow`, any
+  Vortex dtype), builds the `FFI_ArrowSchema` from the field, and serializes schema + `ArrayData`
+  recursively into guest memory — including nested children, dictionaries, and view types (with
+  the spec's trailing `int64` variadic-lengths buffer).
+
+The guest SDK's *typed helpers* are a deliberate subset (primitive [`DecodedPrimitive`] / utf8
+[`DecodedUtf8`] outputs, primitive `ChildView`s) — a kernel that needs more parses the raw structs,
+whose offsets are all in `abi`.
 
 **Nullability.** The schema's `flags` carries `ARROW_FLAG_NULLABLE` (2). When set, buffer 0 is a
 validity bitmap (`ceil(len / 8)` bytes, LSB-first, 1 = valid) and `null_count` is `-1` (unknown);
@@ -532,9 +546,12 @@ on-disk change so the embedded blob is *only* the decoder over an otherwise-norm
    only the `.wasm`; the guest decodes from the serialized array flatbuffer it parses itself with
    `vortex-flatbuffers` (the generated code is pure `flatbuffers` + `alloc`). This replaces the
    current payload+child write model.
-6. **Breadth (later):** `VarBinView`/`Struct`/`List` across the Arrow boundary, kernel dedup +
-   caching, CPU-time limits (wasmtime fuel/epoch), and the `wasm32` fallback runtime if the browser
-   reader needs WASM encodings.
+6. **Full Arrow C Data Interface on the host (done):** import/export are generic over every
+   `DataType` via `FFI_ArrowSchema` + `arrow_data::layout()` (nested children, dictionaries, view
+   types, metadata), with `ArrayData::try_new` validating untrusted guest data.
+7. **Breadth (later):** richer guest-SDK typed helpers (struct/list `Decoded` and `ChildView`
+   variants over the raw structs), kernel dedup + caching, CPU-time limits (wasmtime fuel/epoch),
+   and the `wasm32` fallback runtime if the browser reader needs WASM encodings.
 
 Pushdown (filter/pruning into the kernel) is explicitly **out of scope** — WASM encodings only
 decompress; the engine filters on the decoded output.
