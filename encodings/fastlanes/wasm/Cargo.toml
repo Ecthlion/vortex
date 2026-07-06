@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright the Vortex contributors
+
+# The embeddable WASM decoder kernel for `vortex.fastlanes.bitpacked`, living alongside the
+# native encoding in `encodings/fastlanes`. It links the same `fastlanes` crate the native
+# VTable uses, so the packed layout decodes bit-for-bit identically. Build with:
+#   cargo build --target wasm32-unknown-unknown --release
+#
+# Excluded from the main workspace (see the root Cargo.toml `exclude`) so it can carry its own
+# size-optimized release profile and build standalone; only meaningful for wasm32.
+
+[workspace]
+
+[package]
+name = "vortex-fastlanes-wasm"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+fastlanes = "0.5"
+# `runtime` off: fastlanes' num-traits dependency links `std` (it does not set
+# `default-features = false`), so the SDK's allocator/panic handler would collide with std's.
+vortex-wasm-guest = { path = "../../../vortex-wasm-guest", default-features = false }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

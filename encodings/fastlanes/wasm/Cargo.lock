@@ -9,18 +9,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
-name = "bitpacked-kernel"
-version = "0.1.0"
-dependencies = [
- "fastlanes",
- "vortex-wasm-guest",
-]
-
-[[package]]
 name = "const_for"
-version = "0.1.5"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9c50fcfdf972929aff202c16b80086aa3cfc6a3a820af714096c58c7c1d0582"
+checksum = "988d3bd6bf67b6d7ae2b519c55296fa57411c27c312575e47b2975f8d1d8590b"
 
 [[package]]
 name = "core_detect"
@@ -61,6 +53,14 @@ name = "seq-macro"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1bc711410fbe7399f390ca1c3b60ad0f53f80e95c5eb935e52268a0e2cd49acc"
+
+[[package]]
+name = "vortex-fastlanes-wasm"
+version = "0.1.0"
+dependencies = [
+ "fastlanes",
+ "vortex-wasm-guest",
+]
 
 [[package]]
 name = "vortex-wasm-guest"

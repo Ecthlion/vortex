@@ -4,9 +4,9 @@
 //! Building and reading Arrow C Data Interface structs in the guest's own linear memory.
 //!
 //! Decoded arrays cross the boundary as Arrow C structs. A kernel returns its result as a
-//! [`Decoded`] and the SDK lays out the structs ([`write`]); child inputs arrive as structs the
-//! SDK reads back ([`read_child`]). The layouts are plain bytes (see [`crate::abi`]), so no Arrow
-//! library is needed.
+//! [`Decoded`] and the SDK lays out the structs ([`write`]); host-decoded child arrays arrive as
+//! structs the SDK reads back ([`read_child`]). The layouts are plain bytes (see [`crate::abi`]),
+//! so no Arrow library is needed.
 
 use alloc::vec::Vec;
 
@@ -30,12 +30,14 @@ pub enum Decoded {
 
 /// A decoded primitive array. The values buffer must hold an entry at every position; null
 /// positions may contain any bytes. `validity` is an LSB-first bitmap (`ceil(len / 8)` bytes,
-/// 1 = valid); `None` means non-nullable.
+/// 1 = valid); it may be `None` even when `nullable` (meaning all-valid).
 pub struct DecodedPrimitive {
     /// Element type.
     pub ptype: PType,
     /// Logical element count.
     pub len: usize,
+    /// Whether the output dtype is nullable.
+    pub nullable: bool,
     /// Little-endian values, `len * ptype.byte_width()` bytes.
     pub values: Vec<u8>,
     /// Optional validity bitmap.
@@ -47,11 +49,13 @@ pub struct DecodedPrimitive {
 pub struct DecodedUtf8 {
     /// Logical element count.
     pub len: usize,
+    /// Whether the output dtype is nullable.
+    pub nullable: bool,
     /// `len + 1` monotonically non-decreasing byte offsets into `values`.
     pub offsets: Vec<i32>,
     /// Concatenated utf8 bytes.
     pub values: Vec<u8>,
-    /// Optional validity bitmap (LSB-first, 1 = valid); `None` means non-nullable.
+    /// Optional validity bitmap (LSB-first, 1 = valid).
     pub validity: Option<Vec<u8>>,
 }
 
@@ -71,7 +75,7 @@ pub fn write(decoded: &Decoded) -> i32 {
             write_structs(
                 primitive.ptype.format_code(),
                 primitive.len,
-                primitive.validity.is_some(),
+                primitive.nullable,
                 &[validity_ptr, values_ptr],
             )
         }
@@ -86,7 +90,7 @@ pub fn write(decoded: &Decoded) -> i32 {
             write_structs(
                 "u",
                 utf8.len,
-                utf8.validity.is_some(),
+                utf8.nullable,
                 &[validity_ptr, offsets_ptr, values_ptr],
             )
         }
@@ -113,9 +117,10 @@ fn write_structs(format: &str, len: usize, nullable: bool, buffer_ptrs: &[u32]) 
     schema_buf[schema::FLAGS..schema::FLAGS + 8].copy_from_slice(&flags.to_le_bytes());
     let schema_ptr = alloc_bytes(&schema_buf);
 
+    let has_bitmap = buffer_ptrs.first().is_some_and(|&v| v != 0);
     let mut array_buf = [0u8; ARRAY_SIZE];
     array_buf[array::LENGTH..array::LENGTH + 8].copy_from_slice(&(len as i64).to_le_bytes());
-    let null_count: i64 = if nullable { -1 } else { 0 };
+    let null_count: i64 = if has_bitmap { -1 } else { 0 };
     array_buf[array::NULL_COUNT..array::NULL_COUNT + 8].copy_from_slice(&null_count.to_le_bytes());
     array_buf[array::N_BUFFERS..array::N_BUFFERS + 8]
         .copy_from_slice(&(buffer_ptrs.len() as i64).to_le_bytes());
@@ -128,15 +133,44 @@ fn write_structs(format: &str, len: usize, nullable: bool, buffer_ptrs: &[u32]) 
     alloc_bytes(&pair) as i32
 }
 
-/// A read-only view of a child primitive array delivered by the host as Arrow C structs.
-pub struct ChildView {
+/// A read-only view of a host-decoded child array delivered as Arrow C structs.
+pub enum ChildView {
+    /// A primitive child.
+    Primitive(PrimitiveView),
+    /// A boolean child (e.g. a validity bitmap).
+    Bool(BoolView),
+}
+
+/// A primitive child array.
+pub struct PrimitiveView {
     /// Element type.
     pub ptype: PType,
     /// Logical element count.
     pub len: usize,
     /// Little-endian values (`len * ptype.byte_width()` bytes).
     pub values: &'static [u8],
-    /// Validity bitmap, if the child is nullable.
+    /// Validity bitmap, if the child carries one.
+    pub validity: Option<&'static [u8]>,
+}
+
+impl PrimitiveView {
+    /// Read element `i` widened to `u64` (values are unsigned-reinterpreted).
+    pub fn value_u64(&self, i: usize) -> u64 {
+        let w = self.ptype.byte_width();
+        let bytes = &self.values[i * w..(i + 1) * w];
+        let mut buf = [0u8; 8];
+        buf[..w].copy_from_slice(bytes);
+        u64::from_le_bytes(buf)
+    }
+}
+
+/// A boolean child array; values are an LSB-first bitmap.
+pub struct BoolView {
+    /// Logical element count.
+    pub len: usize,
+    /// The values bitmap (`ceil(len / 8)` bytes).
+    pub bits: &'static [u8],
+    /// Validity bitmap, if the child carries one.
     pub validity: Option<&'static [u8]>,
 }
 
@@ -151,14 +185,15 @@ pub fn read_child(array_ptr: u32, schema_ptr: u32) -> GuestResult<ChildView> {
     unsafe {
         let format_ptr = load_u32(schema_ptr + schema::FORMAT as u32);
         let format = load_cstr(format_ptr)?;
-        let ptype = PType::from_format(format)
-            .ok_or(GuestError::new("child has unsupported Arrow format"))?;
         let len = load_i64(array_ptr + array::LENGTH as u32) as usize;
+        let offset = load_i64(array_ptr + array::OFFSET as u32) as usize;
+        if offset != 0 {
+            return Err(GuestError::new("child arrays must have offset 0"));
+        }
         let buffers_ptr = load_u32(array_ptr + array::BUFFERS as u32);
         let validity_ptr = load_u32(buffers_ptr);
         let values_ptr = load_u32(buffers_ptr + 4);
 
-        let values = core::slice::from_raw_parts(values_ptr as *const u8, len * ptype.byte_width());
         let validity = if validity_ptr != 0 {
             Some(core::slice::from_raw_parts(
                 validity_ptr as *const u8,
@@ -167,12 +202,25 @@ pub fn read_child(array_ptr: u32, schema_ptr: u32) -> GuestResult<ChildView> {
         } else {
             None
         };
-        Ok(ChildView {
+
+        if format == "b" {
+            let bits = core::slice::from_raw_parts(values_ptr as *const u8, len.div_ceil(8));
+            return Ok(ChildView::Bool(BoolView {
+                len,
+                bits,
+                validity,
+            }));
+        }
+
+        let ptype = PType::from_format(format)
+            .ok_or(GuestError::new("child has unsupported Arrow format"))?;
+        let values = core::slice::from_raw_parts(values_ptr as *const u8, len * ptype.byte_width());
+        Ok(ChildView::Primitive(PrimitiveView {
             ptype,
             len,
             values,
             validity,
-        })
+        }))
     }
 }
 

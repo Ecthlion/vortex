@@ -3,30 +3,38 @@
 
 //! The embedded WebAssembly decode runtime.
 //!
-//! [`WasmKernel`] wraps a compiled `wasmtime` module and drives the host/guest ABI: it copies the
-//! kernel input into guest memory, calls the guest's `vx_decode` export, services `vx_decode_child`
-//! callbacks from a [`HostDecoder`], and reconstructs a Vortex array from the Arrow C Data
-//! Interface structs the guest returns (see [`crate::arrow_ffi`]).
+//! [`WasmKernel`] wraps a compiled `wasmtime` module and drives the host/guest ABI. A kernel is
+//! the portable decoder for one array encoding and receives the encoding's **real serialized
+//! parts** — the same `(len, metadata, buffers, children)` a native `VTable::deserialize` gets:
+//!
+//! 1. `vx_children` tells the host each serialized child's dtype and length (only the encoding
+//!    knows them);
+//! 2. the host decodes those children (natively or through other kernels), copies the node's raw
+//!    buffers into guest memory, exports the children as Arrow C Data Interface structs, and calls
+//!    `vx_decode` with everything in one frame;
+//! 3. the guest returns its decoded output as Arrow C structs, which the host imports back into a
+//!    Vortex array (see [`crate::arrow_ffi`]).
 //!
 //! Kernels are untrusted file data. The runtime is `wasmtime` with its default Cranelift backend
 //! (not Winch/Pulley, which are less battle-tested); each decode runs in a fresh [`Store`] whose
 //! linear memory growth is capped via [`StoreLimits`]. CPU-time bounding (fuel / epoch
 //! interruption) is a planned follow-up — see `docs/design/wasm-encodings.md`.
 
-use std::sync::Arc;
-
 use vortex_array::ArrayRef;
 use vortex_array::Canonical;
 use vortex_array::ExecutionCtx;
-use vortex_array::VortexSessionExecute;
+use vortex_array::dtype::DType;
+use vortex_array::dtype::Nullability;
+use vortex_array::dtype::PType;
+use vortex_buffer::ByteBuffer;
 use vortex_error::VortexError;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 use vortex_error::vortex_err;
-use vortex_session::VortexSession;
 use wasmtime::Caller;
 use wasmtime::Engine;
 use wasmtime::Extern;
+use wasmtime::Instance;
 use wasmtime::Linker;
 use wasmtime::Memory;
 use wasmtime::Module;
@@ -37,7 +45,7 @@ use wasmtime::StoreLimitsBuilder;
 use wasmtime::TypedFunc;
 
 use crate::abi::ALLOC_EXPORT;
-use crate::abi::DECODE_CHILD_IMPORT;
+use crate::abi::CHILDREN_EXPORT;
 use crate::abi::DECODE_EXPORT;
 use crate::abi::HOST_LOG_IMPORT;
 use crate::abi::HOST_MODULE;
@@ -50,42 +58,74 @@ use crate::arrow_ffi::GuestMem;
 /// starting value, not a tuned one.
 const MAX_GUEST_MEMORY_BYTES: usize = 1 << 30;
 
-/// Host-side callback used by a kernel to decode child arrays.
-///
-/// When a guest needs a decoded child it calls the `vx_decode_child` host import. The kernel
-/// forwards that here; the implementation decodes the child through the
-/// [`VortexSession`](vortex_session::VortexSession) and returns it as a canonical array, which the
-/// kernel then hands to the guest as Arrow C Data Interface structs.
-///
-/// `Send + Sync` so it can live in a `wasmtime::Store`, whose data must be `'static`.
-pub trait HostDecoder: Send + Sync {
-    /// Decode the child array at `node_index` and return it in canonical form.
-    fn decode_child(&self, node_index: usize) -> VortexResult<Canonical>;
+/// Cap on the number of children a kernel may declare.
+const MAX_CHILDREN: usize = 4096;
+
+/// Frame flag bit 0: the parent dtype is nullable.
+const FLAG_NULLABLE: u32 = 1;
+/// Frame flags bits 8-15: the parent dtype's kind (0 other, 1 primitive, 2 bool, 3 utf8).
+const PARENT_KIND_SHIFT: u32 = 8;
+/// Frame flags bits 16-23: the parent's `PType` prost discriminant (when primitive).
+const PARENT_PTYPE_SHIFT: u32 = 16;
+
+/// Encode the frame flags word for a node dtype.
+fn frame_flags(dtype: &DType) -> u32 {
+    let mut flags = if dtype.is_nullable() {
+        FLAG_NULLABLE
+    } else {
+        0
+    };
+    match dtype {
+        DType::Primitive(ptype, _) => {
+            flags |= 1 << PARENT_KIND_SHIFT;
+            flags |= (*ptype as u32) << PARENT_PTYPE_SHIFT;
+        }
+        DType::Bool(_) => flags |= 2 << PARENT_KIND_SHIFT,
+        DType::Utf8(_) => flags |= 3 << PARENT_KIND_SHIFT,
+        _ => {}
+    }
+    flags
 }
 
-/// Host state threaded through a single `decode` call.
-///
-/// `wasmtime::Store` requires its data to be `'static`, so this owns the decoder and session rather
-/// than borrowing them (unlike the previous `wasmi` runtime, which allowed borrowed store data).
+/// Child descriptor tags (see the guest SDK's `abi::child_descriptor`).
+const TAG_PARENT: u8 = 0;
+const TAG_PRIMITIVE: u8 = 1;
+const TAG_BOOL: u8 = 2;
+const TAG_UTF8: u8 = 3;
+const DESCRIPTOR_SIZE: usize = 16;
+
+/// The dtype and length of one serialized child, as declared by the kernel.
+#[derive(Debug, Clone)]
+pub struct ChildDescriptor {
+    /// The child's dtype.
+    pub dtype: DType,
+    /// The child's logical element count.
+    pub len: usize,
+}
+
+/// Store state for a single decode: only the resource limiter (the v2 ABI has no host callbacks
+/// that carry state).
 struct HostState {
-    decoder: Arc<dyn HostDecoder>,
-    session: VortexSession,
-    /// Captures a host-side error raised inside an import so it can surface as the decode error
-    /// rather than an opaque wasm trap.
-    error: Option<VortexError>,
-    /// Caps the guest's linear-memory growth for this decode.
     limits: StoreLimits,
 }
 
 /// A compiled, reusable WebAssembly decoder kernel.
 ///
-/// Compilation (the expensive step) happens once in [`WasmKernel::new`]. Each [`decode`] call
-/// instantiates a fresh store and memory so that decodes are independent.
-///
-/// [`decode`]: WasmKernel::decode
+/// Compilation (the expensive step) happens once in [`WasmKernel::new`]. Each
+/// [`decoder`](WasmKernel::decoder) call instantiates a fresh store and memory so that node
+/// decodes are independent.
 pub struct WasmKernel {
     engine: Engine,
     module: Module,
+}
+
+/// A live instance of a kernel for one decode call.
+struct KernelInstance {
+    store: Store<HostState>,
+    memory: Memory,
+    alloc: TypedFunc<i32, i32>,
+    children: TypedFunc<(i32, i32), i32>,
+    decode: TypedFunc<(i32, i32), i32>,
 }
 
 impl WasmKernel {
@@ -97,23 +137,10 @@ impl WasmKernel {
         Ok(Self { engine, module })
     }
 
-    /// Decode `input`, servicing child decodes through `decoder`.
-    ///
-    /// `input` is the encoding-specific bytes the kernel consumes. Child decodes and the kernel's
-    /// result cross the boundary as Arrow C Data Interface structs; `session` is used to encode the
-    /// host-decoded children.
-    pub fn decode(
-        &self,
-        input: &[u8],
-        decoder: Arc<dyn HostDecoder>,
-        session: &VortexSession,
-    ) -> VortexResult<ArrayRef> {
+    fn instantiate(&self) -> VortexResult<KernelInstance> {
         let mut store = Store::new(
             &self.engine,
             HostState {
-                decoder,
-                session: session.clone(),
-                error: None,
                 limits: StoreLimitsBuilder::new()
                     .memory_size(MAX_GUEST_MEMORY_BYTES)
                     .build(),
@@ -122,23 +149,6 @@ impl WasmKernel {
         store.limiter(|state| &mut state.limits as &mut dyn ResourceLimiter);
 
         let mut linker = Linker::<HostState>::new(&self.engine);
-
-        linker
-            .func_wrap(
-                HOST_MODULE,
-                DECODE_CHILD_IMPORT,
-                |mut caller: Caller<'_, HostState>, node_index: i32, out_ptr: i32| -> i32 {
-                    match host_decode_child(&mut caller, node_index, out_ptr) {
-                        Ok(()) => 0,
-                        Err(e) => {
-                            caller.data_mut().error = Some(e);
-                            -1
-                        }
-                    }
-                },
-            )
-            .map_err(|e| vortex_err!("failed to link {DECODE_CHILD_IMPORT}: {e}"))?;
-
         linker
             .func_wrap(
                 HOST_MODULE,
@@ -159,7 +169,7 @@ impl WasmKernel {
             )
             .map_err(|e| vortex_err!("failed to link {HOST_LOG_IMPORT}: {e}"))?;
 
-        let instance = linker
+        let instance: Instance = linker
             .instantiate(&mut store, &self.module)
             .map_err(|e| vortex_err!("failed to instantiate wasm kernel: {e}"))?;
 
@@ -169,114 +179,229 @@ impl WasmKernel {
         let alloc = instance
             .get_typed_func::<i32, i32>(&mut store, ALLOC_EXPORT)
             .map_err(|e| vortex_err!("wasm kernel missing {ALLOC_EXPORT}: {e}"))?;
-
-        let input_len = i32::try_from(input.len())?;
-        let input_ptr = if input.is_empty() {
-            0
-        } else {
-            let ptr = alloc
-                .call(&mut store, input_len)
-                .map_err(|e| map_trap(&mut store, e))?;
-            memory
-                .write(&mut store, ptr.max(0) as usize, input)
-                .map_err(|e| vortex_err!("failed to write input to guest memory: {e}"))?;
-            ptr
-        };
-
+        let children = instance
+            .get_typed_func::<(i32, i32), i32>(&mut store, CHILDREN_EXPORT)
+            .map_err(|e| vortex_err!("wasm kernel missing {CHILDREN_EXPORT}: {e}"))?;
         let decode = instance
             .get_typed_func::<(i32, i32), i32>(&mut store, DECODE_EXPORT)
             .map_err(|e| vortex_err!("wasm kernel missing {DECODE_EXPORT}: {e}"))?;
 
-        let result_ptr = decode
-            .call(&mut store, (input_ptr, input_len))
-            .map_err(|e| map_trap(&mut store, e))?;
+        Ok(KernelInstance {
+            store,
+            memory,
+            alloc,
+            children,
+            decode,
+        })
+    }
+
+    /// Instantiate the kernel for one node decode.
+    pub fn decoder(&self) -> VortexResult<WasmDecoder> {
+        Ok(WasmDecoder {
+            instance: self.instantiate()?,
+        })
+    }
+}
+
+/// A live kernel instance for decoding one serialized array node: first ask it which children the
+/// node has ([`children`](Self::children)), decode them, then run [`decode`](Self::decode).
+pub struct WasmDecoder {
+    instance: KernelInstance,
+}
+
+impl WasmDecoder {
+    /// Ask the kernel for the dtype and length of each of the node's `n_children` serialized
+    /// children, given the encoding `metadata`.
+    pub fn children(
+        &mut self,
+        dtype: &DType,
+        len: usize,
+        n_children: usize,
+        metadata: &[u8],
+    ) -> VortexResult<Vec<ChildDescriptor>> {
+        let mut frame = Vec::with_capacity(20 + metadata.len());
+        frame.extend_from_slice(&(len as u64).to_le_bytes());
+        frame.extend_from_slice(&frame_flags(dtype).to_le_bytes());
+        frame.extend_from_slice(&(u32::try_from(n_children)?).to_le_bytes());
+        frame.extend_from_slice(&(u32::try_from(metadata.len())?).to_le_bytes());
+        frame.extend_from_slice(metadata);
+
+        let frame_ptr = self.instance.upload(&frame)?;
+        let result_ptr = self
+            .instance
+            .children
+            .call(
+                &mut self.instance.store,
+                (frame_ptr as i32, i32::try_from(frame.len())?),
+            )
+            .map_err(map_trap)?;
         if result_ptr < 0 {
-            if let Some(err) = store.data_mut().error.take() {
-                return Err(err);
-            }
+            vortex_bail!("wasm kernel {CHILDREN_EXPORT} returned error code {result_ptr}");
+        }
+        let descriptors = self.instance.read_descriptors(result_ptr as u32, dtype)?;
+        if descriptors.len() != n_children {
+            vortex_bail!(
+                "wasm kernel declared {} children but the node has {n_children}",
+                descriptors.len()
+            );
+        }
+        Ok(descriptors)
+    }
+
+    /// Decode the node: `metadata` and `buffers` are its serialized parts, `children` the decoded
+    /// child arrays (in the order declared by [`children`](Self::children)).
+    pub fn decode(
+        &mut self,
+        dtype: &DType,
+        len: usize,
+        metadata: &[u8],
+        buffers: &[ByteBuffer],
+        children: &[Canonical],
+        ctx: &mut ExecutionCtx,
+    ) -> VortexResult<ArrayRef> {
+        // Export the decoded children into guest memory as Arrow C structs.
+        let mut child_pairs = Vec::with_capacity(children.len());
+        for canonical in children {
+            let pair = {
+                let mut guest = InstanceGuestMem {
+                    instance: &mut self.instance,
+                };
+                arrow_ffi::export(canonical, ctx, &mut guest)?
+            };
+            child_pairs.push(pair);
+        }
+
+        // Copy the raw buffers into guest memory.
+        let mut buffer_entries = Vec::with_capacity(buffers.len());
+        for buffer in buffers {
+            let ptr = self.instance.upload(buffer.as_slice())?;
+            buffer_entries.push((ptr, u32::try_from(buffer.len())?));
+        }
+
+        // Build the decode frame and run the kernel.
+        let mut frame =
+            Vec::with_capacity(24 + metadata.len() + buffers.len() * 8 + child_pairs.len() * 8);
+        frame.extend_from_slice(&(len as u64).to_le_bytes());
+        frame.extend_from_slice(&frame_flags(dtype).to_le_bytes());
+        frame.extend_from_slice(&(u32::try_from(metadata.len())?).to_le_bytes());
+        frame.extend_from_slice(&(u32::try_from(buffers.len())?).to_le_bytes());
+        frame.extend_from_slice(&(u32::try_from(child_pairs.len())?).to_le_bytes());
+        frame.extend_from_slice(metadata);
+        for (ptr, buffer_len) in &buffer_entries {
+            frame.extend_from_slice(&ptr.to_le_bytes());
+            frame.extend_from_slice(&buffer_len.to_le_bytes());
+        }
+        for (array_ptr, schema_ptr) in &child_pairs {
+            frame.extend_from_slice(&array_ptr.to_le_bytes());
+            frame.extend_from_slice(&schema_ptr.to_le_bytes());
+        }
+
+        let frame_ptr = self.instance.upload(&frame)?;
+        let result_ptr = self
+            .instance
+            .decode
+            .call(
+                &mut self.instance.store,
+                (frame_ptr as i32, i32::try_from(frame.len())?),
+            )
+            .map_err(map_trap)?;
+        if result_ptr < 0 {
             vortex_bail!("wasm kernel {DECODE_EXPORT} returned error code {result_ptr}");
         }
 
         // The result is a pointer to an (array_ptr: u32, schema_ptr: u32) pair.
         let mut pair = [0u8; 8];
-        memory
-            .read(&store, result_ptr as usize, &mut pair)
+        self.instance
+            .memory
+            .read(&self.instance.store, result_ptr as usize, &mut pair)
             .map_err(|e| vortex_err!("failed to read result pair: {e}"))?;
         let array_ptr = u32::from_le_bytes(pair[0..4].try_into().expect("4 bytes"));
         let schema_ptr = u32::from_le_bytes(pair[4..8].try_into().expect("4 bytes"));
 
-        arrow_ffi::import(memory.data(&store), array_ptr, schema_ptr)
+        arrow_ffi::import(
+            self.instance.memory.data(&self.instance.store),
+            array_ptr,
+            schema_ptr,
+        )
     }
 }
 
-/// A [`GuestMem`] that allocates via the guest's exported `vx_alloc` and writes through `wasmtime`.
-struct CallerGuestMem<'c, 'b> {
-    caller: &'c mut Caller<'b, HostState>,
-    memory: Memory,
-    alloc: TypedFunc<i32, i32>,
-}
-
-impl GuestMem for CallerGuestMem<'_, '_> {
-    fn alloc(&mut self, len: u32) -> VortexResult<u32> {
+impl KernelInstance {
+    /// Allocate guest memory via `vx_alloc` and copy `bytes` in, returning the guest offset.
+    fn upload(&mut self, bytes: &[u8]) -> VortexResult<u32> {
         let ptr = self
             .alloc
-            .call(&mut *self.caller, i32::try_from(len)?)
+            .call(&mut self.store, i32::try_from(bytes.len().max(1))?)
             .map_err(|e| vortex_err!("guest {ALLOC_EXPORT} trapped: {e}"))?;
-        Ok(ptr.max(0) as u32)
+        let ptr = u32::try_from(ptr).map_err(|_| vortex_err!("guest returned bad pointer"))?;
+        self.memory
+            .write(&mut self.store, ptr as usize, bytes)
+            .map_err(|e| vortex_err!("failed to write guest memory: {e}"))?;
+        Ok(ptr)
+    }
+
+    /// Parse the `vx_children` result: `[u32 n][16-byte descriptors…]`.
+    fn read_descriptors(&mut self, ptr: u32, parent: &DType) -> VortexResult<Vec<ChildDescriptor>> {
+        let mut count = [0u8; 4];
+        self.memory
+            .read(&self.store, ptr as usize, &mut count)
+            .map_err(|e| vortex_err!("failed to read child descriptors: {e}"))?;
+        let n = u32::from_le_bytes(count) as usize;
+        if n > MAX_CHILDREN {
+            vortex_bail!("wasm kernel declared too many children: {n}");
+        }
+
+        let mut bytes = vec![0u8; n * DESCRIPTOR_SIZE];
+        self.memory
+            .read(&self.store, ptr as usize + 4, &mut bytes)
+            .map_err(|e| vortex_err!("failed to read child descriptors: {e}"))?;
+
+        (0..n)
+            .map(|i| {
+                let d = &bytes[i * DESCRIPTOR_SIZE..(i + 1) * DESCRIPTOR_SIZE];
+                let nullability = Nullability::from(d[2] != 0);
+                let dtype = match d[0] {
+                    TAG_PARENT => parent.clone(),
+                    TAG_PRIMITIVE => {
+                        let ptype = PType::try_from(d[1] as i32)
+                            .map_err(|_| vortex_err!("bad child ptype {}", d[1]))?;
+                        DType::Primitive(ptype, nullability)
+                    }
+                    TAG_BOOL => DType::Bool(nullability),
+                    TAG_UTF8 => DType::Utf8(nullability),
+                    other => vortex_bail!("bad child descriptor tag {other}"),
+                };
+                let len =
+                    usize::try_from(u64::from_le_bytes(d[8..16].try_into().expect("8 bytes")))?;
+                Ok(ChildDescriptor { dtype, len })
+            })
+            .collect()
+    }
+}
+
+/// A [`GuestMem`] over a live kernel instance.
+struct InstanceGuestMem<'a> {
+    instance: &'a mut KernelInstance,
+}
+
+impl GuestMem for InstanceGuestMem<'_> {
+    fn alloc(&mut self, len: u32) -> VortexResult<u32> {
+        let ptr = self
+            .instance
+            .alloc
+            .call(&mut self.instance.store, i32::try_from(len)?)
+            .map_err(|e| vortex_err!("guest {ALLOC_EXPORT} trapped: {e}"))?;
+        u32::try_from(ptr).map_err(|_| vortex_err!("guest returned bad pointer"))
     }
 
     fn write(&mut self, off: u32, bytes: &[u8]) -> VortexResult<()> {
-        self.memory
-            .write(&mut *self.caller, off as usize, bytes)
+        self.instance
+            .memory
+            .write(&mut self.instance.store, off as usize, bytes)
             .map_err(|e| vortex_err!("failed to write guest memory: {e}"))
     }
 }
 
-/// Service a `vx_decode_child` import call: decode the child, export it as Arrow C structs into
-/// guest memory, and write the resulting `(array_ptr, schema_ptr)` pair at `out_ptr`.
-fn host_decode_child(
-    caller: &mut Caller<'_, HostState>,
-    node_index: i32,
-    out_ptr: i32,
-) -> VortexResult<()> {
-    let node_index = usize::try_from(node_index)?;
-    let canonical = caller.data().decoder.decode_child(node_index)?;
-    let mut ctx: ExecutionCtx = caller.data().session.create_execution_ctx();
-
-    let memory = caller
-        .get_export(MEMORY_EXPORT)
-        .and_then(Extern::into_memory)
-        .ok_or_else(|| vortex_err!("guest missing memory export"))?;
-    let alloc = caller
-        .get_export(ALLOC_EXPORT)
-        .and_then(Extern::into_func)
-        .ok_or_else(|| vortex_err!("guest missing {ALLOC_EXPORT} export"))?
-        .typed::<i32, i32>(&*caller)
-        .map_err(|e| vortex_err!("guest {ALLOC_EXPORT} has wrong signature: {e}"))?;
-
-    let (array_ptr, schema_ptr) = {
-        let mut guest_mem = CallerGuestMem {
-            caller,
-            memory,
-            alloc,
-        };
-        arrow_ffi::export(&canonical, &mut ctx, &mut guest_mem)?
-    };
-
-    let mut out = [0u8; 8];
-    out[0..4].copy_from_slice(&array_ptr.to_le_bytes());
-    out[4..8].copy_from_slice(&schema_ptr.to_le_bytes());
-    memory
-        .write(&mut *caller, out_ptr.max(0) as usize, &out)
-        .map_err(|e| vortex_err!("failed to write decode_child out-params: {e}"))?;
-    Ok(())
-}
-
-/// Prefer a host-side error stashed during an import over an opaque wasm trap.
-fn map_trap(store: &mut Store<HostState>, err: impl std::fmt::Display) -> VortexError {
-    store
-        .data_mut()
-        .error
-        .take()
-        .unwrap_or_else(|| vortex_err!("wasm kernel trapped: {err}"))
+fn map_trap(err: impl std::fmt::Display) -> VortexError {
+    vortex_err!("wasm kernel trapped: {err}")
 }

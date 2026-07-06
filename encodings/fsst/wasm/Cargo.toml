@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright the Vortex contributors
+
+# The embeddable WASM decoder kernel for `vortex.fsst`, living alongside the native encoding in
+# `encodings/fsst`. It links the same `fsst` crate (fsst-rs) the native VTable uses, so
+# decompression semantics are identical by construction. Build with:
+#   cargo build --target wasm32-unknown-unknown --release
+#
+# Excluded from the main workspace (see the root Cargo.toml `exclude`) so it can carry its own
+# size-optimized release profile and build standalone; only meaningful for wasm32.
+
+[workspace]
+
+[package]
+name = "vortex-fsst-wasm"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+fsst = { package = "fsst-rs", version = "0.5.11" }
+# `runtime` off: fsst-rs links `std`, so the SDK's allocator/panic handler would collide.
+vortex-wasm-guest = { path = "../../../vortex-wasm-guest", default-features = false }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
