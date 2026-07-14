@@ -19,7 +19,9 @@ pub const HOST_MODULE: &str = "vortex_host";
 /// Name of the guest's exported linear memory.
 pub const MEMORY_EXPORT: &str = "memory";
 
-/// Guest export: `vx_alloc(len: i32) -> i32`. Allocates `len` bytes, returns the offset.
+/// Guest export: `vx_alloc(len: i32) -> i32`. Allocates `len` bytes and returns the offset.
+/// The returned offset is guaranteed 8-byte aligned (part of the ABI), so kernels can view
+/// host-uploaded buffers as typed slices in place.
 pub const ALLOC_EXPORT: &str = "vx_alloc";
 
 /// Guest export: `vx_children(input_ptr: i32, input_len: i32) -> i32`. Given the node header

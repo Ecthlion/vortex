@@ -24,6 +24,8 @@ crate-type = ["cdylib"]
 fastlanes = "0.5"
 # `runtime` off: fastlanes' num-traits dependency links `std` (it does not set
 # `default-features = false`), so the SDK's allocator/panic handler would collide with std's.
+# Fixing that one line upstream lets this kernel build fully no_std with the SDK runtime,
+# shrinking the blob from ~53 KB to ~37 KB (measured against a patched fastlanes).
 vortex-wasm-guest = { path = "../../../vortex-wasm-guest", default-features = false }
 
 [profile.release]

@@ -166,9 +166,21 @@ the session's Arrow export (any Vortex dtype); guest-side typed helpers are a de
 Kernels are `#![no_std]`; the SDK provides a grow-only bump `#[global_allocator]` over linear
 memory and a trap-on-panic handler behind the default `runtime` feature. A kernel instance
 decodes exactly once and its whole memory is reclaimed when the host drops the per-decode store,
-so `dealloc` is a no-op and there is no free in the ABI. Kernels whose dependencies link `std`
-(fsst-rs; fastlanes via `num-traits`) disable the `runtime` feature and use `std`'s
-allocator/panic handler instead.
+so `dealloc` is a no-op and there is no free in the ABI.
+
+**`vx_alloc` returns 8-byte-aligned offsets — this is part of the ABI.** Every host upload (the
+frames, the raw buffers, the child structs) lands aligned, so kernels view typed data **in
+place**: wasm32 is little-endian, matching the serialized format, so e.g. the bitpacked kernel
+casts its packed buffer to `&[u32]` (`align_to`, checked) instead of copying words out, and Arrow
+`int64` struct fields are naturally aligned.
+
+Today the two shipped kernels disable the `runtime` feature because a dependency links `std`
+(fastlanes' `num-traits` edge lacks `default-features = false`; fsst-rs is not `#![no_std]`) —
+`std`'s dlmalloc/panic machinery then costs ~16 KB per blob. Both are one-PR fixes in
+SpiralDB-owned crates; with the fastlanes fix applied locally, the identical kernel source builds
+fully `no_std` (SDK runtime on) at **37 KB instead of 53 KB** and passes the whole round-trip
+suite. Once upstreamed, kernels are no_std by default and the feature remains only as an escape
+hatch.
 
 ## Worked kernels
 
@@ -177,11 +189,13 @@ allocator/panic handler instead.
 Parses the real prost `BitPackedMetadata` (bit width, offset, optional `PatchesMetadata`) with
 the SDK's proto reader; declares `[patch indices, patch values(parent dtype), (chunk offsets),
 validity]` children; unpacks 1024-element FastLanes chunks with the **same [`fastlanes`] crate
-kernels the native encoding uses** (honouring the offset into the first chunk and a partial final
-chunk); overwrites patch positions (`index - patches.offset`); carries the validity child through.
-Scope: 4-byte primitives — other widths are pure monomorphization at ~25 KB of unrolled unpack
-code per width family. Blob: **~52 KB** (fastlanes unpack kernels dominate; `num-traits` drags in
-`std` — fixing `default-features` upstream in fastlanes-rs would shrink it).
+kernels the native encoding uses**. The packed buffer is **cast, not copied** (`vx_alloc`'s
+alignment guarantee + wasm32's little-endianness), and full in-range chunks unpack directly into
+the output — mirroring the native `decode_into` fast path — with scratch only for a sliced first
+chunk and a partial trailer. Patches overwrite `index - patches.offset`; the validity child
+carries through. Scope: 4-byte primitives — other widths are pure monomorphization at ~25 KB of
+unrolled unpack code per width family. Blob: **~53 KB** (**37 KB** once fastlanes-rs's
+`num-traits` edge stops linking `std`; the unpack kernels dominate the rest).
 
 ### `vortex.fsst` (`encodings/fsst/wasm`)
 
@@ -233,8 +247,9 @@ Compiled `wasm32-unknown-unknown`, size-optimized (`opt-level = "z"`, `lto`, `pa
 | kernel | size | notes |
 |---|---|---|
 | minimal SDK kernel (no_std, no deps) | ~4 KB | the SDK floor: allocator + Arrow glue |
-| `vortex.fsst` | ~27 KB | fsst-rs `Decompressor` + `std` |
-| `fastlanes.bitpacked` | ~52 KB | fastlanes unrolled unpack kernels + `std` via num-traits |
+| `vortex.fsst` | ~28 KB | fsst-rs `Decompressor` + `std` (fsst-rs is not yet no_std) |
+| `fastlanes.bitpacked` | ~53 KB | fastlanes unrolled unpack kernels + `std` via num-traits |
+| `fastlanes.bitpacked`, fully no_std | **~37 KB** | measured with num-traits `default-features = false` patched into fastlanes-rs |
 
 The early prototype showed why the SDK avoids Vortex crates entirely: pulling `vortex-error`
 (which drags `jiff`/`prost`/`arrow-schema`) put kernels at ~74 KB before any real decode logic.

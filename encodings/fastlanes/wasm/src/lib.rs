@@ -167,43 +167,46 @@ impl WasmEncoding for BitPacked {
         let total = offset + node.len;
         let num_chunks = total.div_ceil(CHUNK);
         let bytes_per_chunk = 128 * bit_width;
+        let words_per_chunk = bytes_per_chunk / 4;
         guest_ensure!(
             packed.len() >= num_chunks * bytes_per_chunk,
             "bitpacked buffer too short for packed chunks"
         );
 
-        // Unpack chunk by chunk with the same fastlanes kernels the native encoding uses. The
-        // packed words are copied out per chunk because the buffer slice is neither
-        // alignment-guaranteed nor endianness-agnostic.
-        let mut values = Vec::with_capacity(node.len * 4);
-        let words_per_chunk = bytes_per_chunk / 4;
-        let mut words = Vec::with_capacity(words_per_chunk);
+        // `vx_alloc` 8-aligns every host upload and wasm32 is little-endian (matching the
+        // serialized format), so the packed buffer is viewed in place — no copy.
+        // SAFETY: alignment is checked via the empty head; the length is checked above.
+        let (head, words, _) = unsafe { packed.align_to::<u32>() };
+        guest_ensure!(head.is_empty(), "packed buffer must be 4-byte aligned");
+
+        // Unpack with the same fastlanes kernels the native encoding uses: full in-range chunks
+        // decode directly into the output (mirroring the native `decode_into` fast path); only a
+        // sliced first chunk and a partial trailer go through scratch.
+        let mut out = alloc::vec![0u32; node.len];
         let mut scratch = [0u32; CHUNK];
         for chunk in 0..num_chunks {
-            words.clear();
-            let base = chunk * bytes_per_chunk;
-            for word in 0..words_per_chunk {
-                let o = base + word * 4;
-                words.push(u32::from_le_bytes([
-                    packed[o],
-                    packed[o + 1],
-                    packed[o + 2],
-                    packed[o + 3],
-                ]));
-            }
-            if bit_width == 0 {
-                scratch.fill(0);
-            } else {
-                // SAFETY: `words` holds exactly `128 * bit_width / 4` words and `scratch` exactly
-                // 1024 elements, as `unchecked_unpack` requires.
-                unsafe { BitPacking::unchecked_unpack(bit_width, &words, &mut scratch) };
-            }
-
             let start = chunk * CHUNK;
             let lo = offset.saturating_sub(start).min(CHUNK);
             let hi = (total - start).min(CHUNK);
-            for value in &scratch[lo..hi] {
-                values.extend_from_slice(&value.to_le_bytes());
+            let chunk_words = &words[chunk * words_per_chunk..(chunk + 1) * words_per_chunk];
+
+            let dst_start = start + lo - offset;
+            if bit_width == 0 {
+                out[dst_start..dst_start + (hi - lo)].fill(0);
+            } else if lo == 0 && hi == CHUNK {
+                // SAFETY: `chunk_words` holds exactly `128 * bit_width / 4` words and the
+                // destination exactly 1024 elements, as `unchecked_unpack` requires.
+                unsafe {
+                    BitPacking::unchecked_unpack(
+                        bit_width,
+                        chunk_words,
+                        &mut out[dst_start..dst_start + CHUNK],
+                    )
+                };
+            } else {
+                // SAFETY: as above, with a full-size scratch destination.
+                unsafe { BitPacking::unchecked_unpack(bit_width, chunk_words, &mut scratch) };
+                out[dst_start..dst_start + (hi - lo)].copy_from_slice(&scratch[lo..hi]);
             }
         }
 
@@ -232,10 +235,19 @@ impl WasmEncoding for BitPacked {
                 let position = usize::try_from(position)
                     .map_err(|_| GuestError::new("patch position overflow"))?;
                 guest_ensure!(position < node.len, "patch position out of bounds");
-                values[position * 4..position * 4 + 4]
-                    .copy_from_slice(&patch_values.values[i * 4..i * 4 + 4]);
+                out[position] = u32::from_le_bytes(
+                    patch_values.values[i * 4..i * 4 + 4]
+                        .try_into()
+                        .expect("4 bytes"),
+                );
             }
         }
+
+        // One cast, one copy: the u32 output reinterprets as little-endian bytes.
+        // SAFETY: u8 has no alignment requirement and the byte length matches.
+        let values =
+            unsafe { core::slice::from_raw_parts(out.as_ptr() as *const u8, out.len() * 4) }
+                .to_vec();
 
         // A trailing validity child carries through to the output bitmap.
         let validity = if node.nchildren() == next_child + 1 {

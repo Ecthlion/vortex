@@ -7,19 +7,26 @@
 //! into guest memory up front — so the only export the SDK needs beyond the entry points is the
 //! allocator backing `vx_alloc`.
 
-use alloc::vec::Vec;
+use core::alloc::Layout;
 
-/// Allocate `len` bytes in linear memory and return the offset.
+/// Allocate `len` bytes in linear memory, **8-byte aligned**, and return the offset.
 ///
 /// Backs the `vx_alloc` export the host calls to place inputs, buffers, and child arrays into
-/// guest memory, and is available to kernels for their own scratch/output buffers. The allocation
-/// is deliberately leaked — with the SDK's grow-only bump allocator (the `runtime` feature)
-/// nothing is ever freed; the whole linear memory is reclaimed when the per-decode instance is
-/// dropped.
+/// guest memory, and is available to kernels for their own scratch/output buffers. The 8-byte
+/// alignment is part of the ABI: every host-uploaded buffer lands aligned, so kernels can view
+/// typed data in place (e.g. cast a packed buffer to `&[u32]`) instead of copying it out, and the
+/// Arrow C structs' `int64` fields are naturally aligned.
+///
+/// The allocation is deliberately leaked — with the SDK's grow-only bump allocator (the `runtime`
+/// feature) nothing is ever freed; the whole linear memory is reclaimed when the per-decode
+/// instance is dropped.
 pub fn alloc(len: usize) -> *mut u8 {
-    let mut buf = Vec::<u8>::with_capacity(len.max(1));
-    let ptr = buf.as_mut_ptr();
-    core::mem::forget(buf);
+    let layout = Layout::from_size_align(len.max(1), 8).expect("allocation too large");
+    // SAFETY: the layout has non-zero size.
+    let ptr = unsafe { alloc::alloc::alloc(layout) };
+    if ptr.is_null() {
+        alloc::alloc::handle_alloc_error(layout);
+    }
     ptr
 }
 
