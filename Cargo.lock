@@ -11982,11 +11982,16 @@ name = "vortex-wasm"
 version = "0.1.0"
 dependencies = [
  "fsst-rs",
+ "futures",
+ "tokio",
  "vortex-array",
  "vortex-buffer",
  "vortex-error",
  "vortex-fastlanes",
+ "vortex-file",
  "vortex-fsst",
+ "vortex-io",
+ "vortex-layout",
  "vortex-runend",
  "vortex-session",
  "wasmtime",

@@ -11,6 +11,7 @@
 mod field_sizes;
 mod file_layout;
 mod file_statistics;
+mod kernels;
 mod postscript;
 mod segment;
 
@@ -24,6 +25,9 @@ pub use field_sizes::CompressedFieldSizes;
 pub use file_statistics::FileStatistics;
 use flatbuffers::root;
 use itertools::Itertools;
+pub use kernels::EmbeddedKernel;
+pub use kernels::EmbeddedKernelLoader;
+pub use kernels::EmbeddedKernelSession;
 pub use segment::*;
 use vortex_array::ArrayId;
 use vortex_array::dtype::DType;

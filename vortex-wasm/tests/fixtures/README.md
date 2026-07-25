@@ -6,9 +6,9 @@ SPDX-FileCopyrightText: Copyright the Vortex contributors
 # WASM kernel test fixtures
 
 These `.wasm` files are decoder kernels compiled from the kernel crates that live alongside their
-native encodings. They are committed so `tests/plugin_roundtrip.rs` can exercise the full pipeline
-with real kernels (via `include_bytes!`) without building a `wasm32-unknown-unknown` toolchain at
-test time.
+native encodings. They are committed so `tests/plugin_roundtrip.rs` and `tests/file_kernels.rs` can
+exercise the full pipeline with real kernels (via `include_bytes!`) without building a
+`wasm32-unknown-unknown` toolchain at test time.
 
 | Fixture | Source crate | Encoding |
 | --- | --- | --- |

@@ -73,6 +73,16 @@ pub fn __run_decode<E: WasmEncoding>(in_ptr: i32, in_len: i32) -> i32 {
 #[macro_export]
 macro_rules! export_wasm_encoding {
     ($ty:ty) => {
+        /// ABI version export required by the host ABI.
+        ///
+        /// The host compares this against its own [`abi::ABI_VERSION`](crate::abi::ABI_VERSION)
+        /// and refuses to run the kernel if they disagree, so a kernel built against an older SDK
+        /// fails loudly instead of misreading frames.
+        #[unsafe(no_mangle)]
+        pub extern "C" fn vx_abi_version() -> i32 {
+            $crate::abi::ABI_VERSION as i32
+        }
+
         /// Guest allocator export required by the host ABI.
         #[unsafe(no_mangle)]
         pub extern "C" fn vx_alloc(len: i32) -> i32 {

@@ -10,16 +10,22 @@
 //! ([`register_wasm_encodings`]) — a native decoder always supersedes a kernel — and unknown
 //! encodings then deserialize through the sandboxed kernel transparently.
 //!
+//! Running file-supplied code is opt-in: call [`with_wasm_kernel_loader`] on a session for
+//! `vortex-file` to load a file's kernels at open, and [`embed_kernel`] to attach one when
+//! writing.
+//!
 //! - [`abi`] defines the host/guest ABI constants.
 //! - [`convert`] moves arrays across the boundary in Vortex's own canonical layouts.
 //! - [`WasmKernel`] is the `wasmtime`-backed runtime that drives the ABI.
 //! - [`WasmEncodingPlugin`] adapts a kernel into a session-registered array encoding.
+//! - [`WasmKernelLoader`] wires kernels found in a file into the reader that opened it.
 //!
 //! See `docs/design/wasm-encodings.md` for the full design.
 
 pub mod abi;
 mod convert;
 mod kernel;
+mod loader;
 mod plugin;
 
 pub use kernel::ChildDescriptor;
@@ -27,5 +33,8 @@ pub use kernel::ChildMode;
 pub use kernel::KernelOutput;
 pub use kernel::WasmDecoder;
 pub use kernel::WasmKernel;
+pub use loader::WasmKernelLoader;
+pub use loader::embed_kernel;
+pub use loader::with_wasm_kernel_loader;
 pub use plugin::WasmEncodingPlugin;
 pub use plugin::register_wasm_encodings;

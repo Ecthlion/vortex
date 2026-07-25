@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+#![expect(clippy::tests_outside_test_module)]
+
 //! End-to-end tests of wasm-backed encodings against the **real serialized format**.
 //!
 //! Each test serializes an array with the *native* encoding (the exact bytes a Vortex file would

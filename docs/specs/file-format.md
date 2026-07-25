@@ -55,6 +55,12 @@ The postscript contains the locations of:
 3. a `statistics` segment containing file-level per-field statistics (e.g., minima and maxima of each field/column, for whole-file pruning)
 4. a `footer` segment containing a dictionary-encoded _segment map_, and other shared configuration such as compression and encryption schemes
 5. up to 16 user-defined `metadata` segments, each identified by a unique, non-empty UTF-8 key of at most 64 bytes
+6. zero or more `wasm_kernels`, each naming an array encoding id and locating a segment holding a portable WebAssembly decoder for it
+
+The kernels let a reader decode an encoding it has no native implementation of. Because the
+encoding id is recorded in the postscript rather than inside the kernel segment, a reader fetches
+a kernel's bytes only for encodings it cannot already decode; a native decoder always supersedes an
+embedded one. Running embedded kernels is opt-in on the reader.
 
 The postscript carries a locator (offset, length, and alignment) for each metadata segment that is
 present; a file written without user metadata (and any file predating this feature) carries none.

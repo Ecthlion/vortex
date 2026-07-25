@@ -44,6 +44,10 @@ const INITIAL_READ_SIZE: usize = MAX_POSTSCRIPT_SIZE as usize + EOF_SIZE;
 struct FooterRead {
     footer: Footer,
     initial_segments: HashMap<SegmentId, ByteBuffer>,
+    /// The session the footer was parsed with. Not necessarily the opener's own: a file embedding
+    /// decoder kernels for encodings this reader lacks is parsed with a file-scoped session
+    /// carrying those encodings, and scans must use that same session.
+    session: VortexSession,
 }
 
 /// Open options for a Vortex file reader.
@@ -177,6 +181,10 @@ impl VortexOpenOptions {
     ///
     /// If this is provided, then the Vortex file can be opened without performing any I/O.
     /// Once open, the [`Footer`] can be accessed via [`crate::VortexFile::footer`].
+    ///
+    /// Note that this skips reading the postscript, so any decoder kernels the file embeds are not
+    /// loaded. Scanning a file whose encodings this session lacks then fails as it would for any
+    /// unknown encoding; supply a session that can already decode them.
     pub fn with_footer(mut self, footer: Footer) -> Self {
         self.dtype = Some(footer.layout().dtype().clone());
         self.footer = Some(footer);
@@ -254,9 +262,12 @@ impl VortexOpenOptions {
         let include_metadata = self.include_metadata;
         let mut opts = self.with_initial_read_size(0);
 
-        let footer = match opts.footer.take() {
-            Some(footer) => footer,
-            None => block_on(opts.read_footer(&buffer))?.footer,
+        let (footer, session) = match opts.footer.take() {
+            Some(footer) => (footer, opts.session.clone()),
+            None => {
+                let read = block_on(opts.read_footer(&buffer))?;
+                (read.footer, read.session)
+            }
         };
         footer.validate_file_size(buffer.len() as u64)?;
 
@@ -269,7 +280,7 @@ impl VortexOpenOptions {
         } else {
             Arc::new(HashMap::new())
         };
-        let file = VortexFile::new(footer, segment_source, opts.session).with_metadata(metadata);
+        let file = VortexFile::new(footer, segment_source, session).with_metadata(metadata);
         Ok(if cache_layout_reader {
             file.with_caching()
         } else {
@@ -294,6 +305,7 @@ impl VortexOpenOptions {
         let FooterRead {
             footer,
             initial_segments,
+            session,
         } = if let Some(footer) = self.footer {
             if let Some(file_size) = self.file_size {
                 footer.validate_file_size(file_size)?;
@@ -301,6 +313,7 @@ impl VortexOpenOptions {
             FooterRead {
                 footer,
                 initial_segments: HashMap::default(),
+                session: self.session.clone(),
             }
         } else {
             self.read_footer(&reader).await?
@@ -336,8 +349,7 @@ impl VortexOpenOptions {
         } else {
             Arc::new(HashMap::new())
         };
-        let file =
-            VortexFile::new(footer, segment_source, self.session.clone()).with_metadata(metadata);
+        let file = VortexFile::new(footer, segment_source, session).with_metadata(metadata);
         Ok(if self.cache_layout_reader {
             file.with_caching()
         } else {
@@ -345,6 +357,8 @@ impl VortexOpenOptions {
         })
     }
 
+    /// Read the footer, returning it alongside the segments the initial read covered and the
+    /// session it was parsed with (see [`FooterRead::session`]).
     async fn read_footer(&self, read: &dyn VortexReadAt) -> VortexResult<FooterRead> {
         // Fetch the file size and perform the initial read.
         let file_size = match self.file_size {
@@ -399,6 +413,7 @@ impl VortexOpenOptions {
         Ok(FooterRead {
             footer,
             initial_segments,
+            session: deserializer.session().clone(),
         })
     }
 

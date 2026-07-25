@@ -23,15 +23,20 @@ all-features = true
 vortex-array = { workspace = true }
 vortex-buffer = { workspace = true }
 vortex-error = { workspace = true }
+vortex-file = { workspace = true }
 vortex-session = { workspace = true }
 wasmtime = { workspace = true }
 
 [dev-dependencies]
 fsst-rs = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 vortex-array = { path = "../vortex-array", features = ["_test-harness"] }
 vortex-fastlanes = { workspace = true }
 vortex-runend = { workspace = true }
 vortex-fsst = { workspace = true }
+vortex-io = { workspace = true, features = ["tokio"] }
+vortex-layout = { workspace = true }
 
 [lints]
 workspace = true

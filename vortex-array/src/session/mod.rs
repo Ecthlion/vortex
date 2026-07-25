@@ -41,6 +41,11 @@ use crate::arrays::Variant;
 /// Registry of array encodings.
 pub type ArrayRegistry = ArcSwapMap<Id, ArrayPluginRef>;
 
+/// The array encodings available in a session.
+///
+/// Note that [`Clone`] shares the underlying registry, so a clone is a second handle onto the same
+/// set of encodings rather than an independent copy. Use [`fork`](ArraySession::fork) when
+/// registrations must be scoped — for instance to encodings supplied by a single file.
 #[derive(Clone, Debug)]
 pub struct ArraySession {
     /// Deserializers keyed by the array ID found on the wire.
@@ -59,6 +64,16 @@ impl ArraySession {
 
     pub fn registry(&self) -> &ArrayRegistry {
         &self.registry
+    }
+
+    /// Copy the currently registered encodings into an independent [`ArraySession`].
+    ///
+    /// Encodings registered on the fork are invisible to this session, and vice versa.
+    pub fn fork(&self) -> ArraySession {
+        Self {
+            registry: self.registry.fork(),
+            serializers: self.serializers.fork(),
+        }
     }
 
     /// Register an in-memory array plugin and all of its recognized serialized IDs.
@@ -161,6 +176,7 @@ mod tests {
 
     use crate::ArrayVTable;
     use crate::arrays::Bool;
+    use crate::arrays::Primitive;
     use crate::session::ArraySession;
     use crate::session::ArraySessionExt;
 
@@ -178,5 +194,19 @@ mod tests {
 
         assert!(!session.arrays().registry().contains_key(&Bool.id()));
         assert!(session.arrays().serializer(&Bool.id()).is_none());
+    }
+
+    #[test]
+    fn fork_copies_encodings_but_isolates_registrations() {
+        let original = ArraySession::empty();
+        original.register(Bool);
+
+        let forked = original.fork();
+        assert!(forked.registry().contains_key(&Bool.id()));
+        assert!(forked.serializer(&Bool.id()).is_some());
+
+        forked.register(Primitive);
+        assert!(!original.registry().contains_key(&Primitive.id()));
+        assert!(original.serializer(&Primitive.id()).is_none());
     }
 }

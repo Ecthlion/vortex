@@ -64,6 +64,9 @@
 //! │          Segments          │  serialized array chunks and per-column
 //! │     (data & statistics)    │  statistics, in writer-chosen order
 //! ├────────────────────────────┤
+//! │       Decoder kernels      │  optional; portable decoders for the encodings
+//! │                            │  used by the file, one segment each
+//! ├────────────────────────────┤
 //! │   User-metadata segments   │  optional; opaque values keyed by the postscript
 //! ├────────────────────────────┤
 //! │      DType flatbuffer      │  optional; omitted via `exclude_dtype`
@@ -75,7 +78,8 @@
 //! │      Footer flatbuffer     │  required; dictionary-encoded segment map
 //! │                            │  and array/layout/compression/encryption specs
 //! ├────────────────────────────┤
-//! │         Postscript         │  locators for the footer and user-metadata segments;
+//! │         Postscript         │  locators for the footer, kernel, and user-metadata
+//! │                            │  segments;
 //! │                            │  at most 65528 bytes
 //! ├────────────────────────────┤
 //! │     8-byte End of File     │  u16 version, u16 postscript length,
@@ -89,8 +93,9 @@
 //! User-metadata values live in their own segments; opening a file reads none of them by default.
 //! [`VortexOpenOptions::include_metadata`] eagerly resolves every locator through the cache-backed
 //! segment source, issuing targeted reads only for values not already covered by the initial read.
-//! The byte-level format is specified in full at
-//! <https://docs.vortex.dev/specs/file-format.html>.
+//! The postscript also records any [`EmbeddedKernel`]s, each tagged with the array encoding id it
+//! decodes so a reader can skip fetching the ones it does not need. The byte-level format is
+//! specified in full at <https://docs.vortex.dev/specs/file-format.html>.
 //!
 //! A Parquet-style file is realized by nesting a chunked layout of struct layouts of chunked layouts
 //! of flat layouts: the outer chunked layout models row groups and the inner one models pages.

@@ -316,10 +316,11 @@ impl ArrayDescriptor {
 }
 
 fn read_u32(mem: &[u8], off: usize) -> VortexResult<u32> {
-    vortex_ensure!(off + 4 <= mem.len(), "out-of-bounds read in kernel result");
-    Ok(u32::from_le_bytes(
-        mem[off..off + 4].try_into().expect("4 bytes"),
-    ))
+    let bytes: [u8; 4] = mem
+        .get(off..off + 4)
+        .and_then(|slice| slice.try_into().ok())
+        .ok_or_else(|| vortex_err!("out-of-bounds read in kernel result"))?;
+    Ok(u32::from_le_bytes(bytes))
 }
 
 fn copy_out(mem: &[u8], ptr: u32, len: usize) -> VortexResult<ByteBuffer> {
@@ -358,7 +359,7 @@ mod tests {
             while !self.mem.len().is_multiple_of(8) {
                 self.mem.push(0);
             }
-            let off = self.mem.len() as u32;
+            let off = u32::try_from(self.mem.len())?;
             self.mem.resize(self.mem.len() + len as usize, 0);
             Ok(off)
         }

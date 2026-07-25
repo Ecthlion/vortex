@@ -7,6 +7,7 @@ use vortex_array::flatbuffers::FlatBuffer;
 use vortex_array::flatbuffers::FlatBufferRoot;
 use vortex_array::flatbuffers::WriteFlatBuffer;
 use vortex_array::flatbuffers::WriteFlatBufferExt;
+use vortex_buffer::Alignment;
 use vortex_buffer::ByteBuffer;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
@@ -22,7 +23,9 @@ use crate::MAX_POSTSCRIPT_SIZE;
 use crate::VERSION;
 use crate::footer::SegmentSpec;
 use crate::footer::file_layout::FooterFlatBufferWriter;
+use crate::footer::kernels::EmbeddedKernel;
 use crate::footer::postscript::Postscript;
+use crate::footer::postscript::PostscriptKernel;
 use crate::footer::postscript::PostscriptMetadata;
 use crate::footer::postscript::PostscriptSegment;
 
@@ -33,6 +36,7 @@ pub struct FooterSerializer {
     exclude_dtype: bool,
     offset: u64,
     layout_ctx: LayoutContext,
+    wasm_kernels: Vec<EmbeddedKernel>,
 }
 
 impl FooterSerializer {
@@ -43,6 +47,7 @@ impl FooterSerializer {
             exclude_dtype: false,
             offset: 0,
             layout_ctx: LayoutContext::default(),
+            wasm_kernels: Vec::new(),
         }
     }
 
@@ -53,6 +58,16 @@ impl FooterSerializer {
     /// outside the permitted set. The default context permits any layout.
     pub fn with_layout_context(mut self, layout_ctx: LayoutContext) -> Self {
         self.layout_ctx = layout_ctx;
+        self
+    }
+
+    /// Embed decoder kernels for the encodings used by the file.
+    ///
+    /// Each kernel is written as its own segment and referenced from the postscript by encoding
+    /// id, so a reader lacking a native decoder for that encoding can run the kernel instead. See
+    /// [`EmbeddedKernel`].
+    pub fn with_wasm_kernels(mut self, kernels: impl IntoIterator<Item = EmbeddedKernel>) -> Self {
+        self.wasm_kernels = kernels.into_iter().collect();
         self
     }
 
@@ -96,6 +111,31 @@ impl FooterSerializer {
     ) -> VortexResult<(Vec<ByteBuffer>, super::MetadataSegments, usize)> {
         let mut buffers = vec![];
 
+        // Kernels go first so that a reader whose initial tail read misses them can pick them up
+        // in the same follow-up read as the rest of the footer segments. They are excluded from the
+        // footer's approximate size below, like metadata values: a reader that can already decode
+        // the file never fetches them.
+        let wasm_kernels = std::mem::take(&mut self.wasm_kernels)
+            .into_iter()
+            .map(|kernel| {
+                let module = kernel.module().clone();
+                let length = u32::try_from(module.len())
+                    .map_err(|_| vortex_err!("wasm kernel length exceeds maximum u32"))?;
+                let segment = PostscriptSegment {
+                    offset: self.offset,
+                    length,
+                    alignment: Alignment::none(),
+                };
+                self.offset += u64::from(length);
+                buffers.push(module);
+                Ok(PostscriptKernel {
+                    id: kernel.id().to_string(),
+                    abi_version: kernel.abi_version(),
+                    segment,
+                })
+            })
+            .collect::<VortexResult<Vec<_>>>()?;
+
         let (metadata_segments, metadata_locators) = if self.metadata.is_empty() {
             let locators = self
                 .footer
@@ -125,6 +165,7 @@ impl FooterSerializer {
             }
             (segments, locators)
         };
+        // Everything pushed so far — kernels and metadata values — is out-of-line storage.
         let metadata_storage_bytes = buffers.iter().map(ByteBuffer::len).sum::<usize>();
 
         let dtype_segment = if self.exclude_dtype {
@@ -172,6 +213,7 @@ impl FooterSerializer {
             statistics: statistics_segment,
             footer: footer_segment,
             metadata: metadata_segments,
+            wasm_kernels,
         };
         let postscript_buffer = postscript.write_flatbuffer_bytes()?;
         if postscript_buffer.len() > MAX_POSTSCRIPT_SIZE as usize {

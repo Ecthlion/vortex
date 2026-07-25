@@ -10,8 +10,8 @@
 //! 1. `vx_children` tells the host each serialized child's dtype and length (only the encoding
 //!    knows them);
 //! 2. the host decodes those children (natively or through other kernels), copies the node's raw
-//!    buffers into guest memory, exports the children as Arrow C Data Interface structs, and calls
-//!    `vx_decode` with everything in one frame;
+//!    buffers and the decoded children into guest memory, and calls `vx_decode` with everything in
+//!    one frame;
 //! 3. the guest returns its output as a Vortex buffer table, which the host turns back into an
 //!    array (see [`crate::convert`]) — or as a gather over a child it only named.
 //!
@@ -44,6 +44,8 @@ use wasmtime::StoreLimits;
 use wasmtime::StoreLimitsBuilder;
 use wasmtime::TypedFunc;
 
+use crate::abi::ABI_VERSION;
+use crate::abi::ABI_VERSION_EXPORT;
 use crate::abi::ALLOC_EXPORT;
 use crate::abi::CHILDREN_EXPORT;
 use crate::abi::DECODE_EXPORT;
@@ -157,6 +159,7 @@ pub struct WasmKernel {
 struct KernelInstance {
     store: Store<HostState>,
     memory: Memory,
+    abi_version: TypedFunc<(), i32>,
     alloc: TypedFunc<i32, i32>,
     children: TypedFunc<(i32, i32), i32>,
     decode: TypedFunc<(i32, i32), i32>,
@@ -164,11 +167,40 @@ struct KernelInstance {
 
 impl WasmKernel {
     /// Compile a kernel from raw `.wasm` bytes.
+    ///
+    /// Instantiates the module once to read its `vx_abi_version` export, so a kernel built against
+    /// a different ABI is rejected here rather than misreading frames at decode time.
     pub fn new(wasm_bytes: impl AsRef<[u8]>) -> VortexResult<Self> {
         let engine = Engine::default();
         let module = Module::new(&engine, wasm_bytes.as_ref())
             .map_err(|e| vortex_err!("failed to compile wasm kernel: {e}"))?;
-        Ok(Self { engine, module })
+        let kernel = Self { engine, module };
+
+        let abi_version = kernel.read_abi_version()?;
+        if abi_version != ABI_VERSION {
+            vortex_bail!(
+                "wasm kernel implements ABI version {abi_version}, but this host implements {ABI_VERSION}"
+            );
+        }
+        Ok(kernel)
+    }
+
+    /// The ABI version the kernel declares via its `vx_abi_version` export.
+    ///
+    /// Always equal to [`ABI_VERSION`] for a kernel that compiled successfully; exposed so a
+    /// writer can record the version it is embedding into a file.
+    pub fn abi_version(&self) -> u32 {
+        ABI_VERSION
+    }
+
+    fn read_abi_version(&self) -> VortexResult<u32> {
+        let mut instance = self.instantiate()?;
+        let version = instance
+            .abi_version
+            .call(&mut instance.store, ())
+            .map_err(map_trap)?;
+        u32::try_from(version)
+            .map_err(|_| vortex_err!("wasm kernel reported a negative ABI version {version}"))
     }
 
     fn instantiate(&self) -> VortexResult<KernelInstance> {
@@ -210,6 +242,9 @@ impl WasmKernel {
         let memory = instance
             .get_memory(&mut store, MEMORY_EXPORT)
             .ok_or_else(|| vortex_err!("wasm kernel does not export memory '{MEMORY_EXPORT}'"))?;
+        let abi_version = instance
+            .get_typed_func::<(), i32>(&mut store, ABI_VERSION_EXPORT)
+            .map_err(|e| vortex_err!("wasm kernel missing {ABI_VERSION_EXPORT}: {e}"))?;
         let alloc = instance
             .get_typed_func::<i32, i32>(&mut store, ALLOC_EXPORT)
             .map_err(|e| vortex_err!("wasm kernel missing {ALLOC_EXPORT}: {e}"))?;
@@ -223,6 +258,7 @@ impl WasmKernel {
         Ok(KernelInstance {
             store,
             memory,
+            abi_version,
             alloc,
             children,
             decode,
@@ -357,12 +393,11 @@ impl WasmDecoder {
                 Ok(KernelOutput::Materialized(descriptor.build(mem, dtype)?))
             }
             RESULT_TAKE => {
-                let slot = u32::from_le_bytes(
-                    mem.get(result_ptr as usize + 4..result_ptr as usize + 8)
-                        .ok_or_else(|| vortex_err!("truncated take result"))?
-                        .try_into()
-                        .expect("4 bytes"),
-                );
+                let bytes: [u8; 4] = mem
+                    .get(result_ptr as usize + 4..result_ptr as usize + 8)
+                    .and_then(|slice| slice.try_into().ok())
+                    .ok_or_else(|| vortex_err!("truncated take result"))?;
+                let slot = u32::from_le_bytes(bytes);
                 let (descriptor, _) = ArrayDescriptor::parse(mem, result_ptr as usize + 8)?;
                 Ok(KernelOutput::Take {
                     values_slot: slot as usize,
@@ -424,8 +459,10 @@ impl KernelInstance {
                 } else {
                     ChildMode::Values
                 };
-                let len =
-                    usize::try_from(u64::from_le_bytes(d[8..16].try_into().expect("8 bytes")))?;
+                let len_bytes: [u8; 8] = d[8..16]
+                    .try_into()
+                    .map_err(|_| vortex_err!("truncated child descriptor"))?;
+                let len = usize::try_from(u64::from_le_bytes(len_bytes))?;
                 Ok(ChildDescriptor { dtype, len, mode })
             })
             .collect()

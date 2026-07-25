@@ -73,6 +73,22 @@ impl<K, V, S> ArcSwapMap<K, V, S> {
         f(&self.inner.load())
     }
 
+    /// Copy the current snapshot into a new, independent map.
+    ///
+    /// Unlike [`Clone`], which shares the underlying cell, insertions on either the original or
+    /// the fork are invisible to the other. Use this to scope registrations — for example,
+    /// encodings supplied by one file must not leak into a session shared with others.
+    pub fn fork(&self) -> Self
+    where
+        K: Clone,
+        V: Clone,
+        S: Clone,
+    {
+        Self {
+            inner: Arc::new(ArcSwap::from_pointee((*self.snapshot()).clone())),
+        }
+    }
+
     /// Return a lock-free guard to the current snapshot without cloning the
     /// [`Arc`].
     ///

@@ -2166,6 +2166,7 @@ fn with_invalid_metadata_alignment(bytes: &ByteBuffer, exponent: u8) -> ByteBuff
             statistics,
             footer: Some(footer),
             metadata: Some(metadata),
+            wasm_kernels: None,
         },
     );
     fbb.finish_minimal(postscript);

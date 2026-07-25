@@ -34,11 +34,26 @@ table Postscript {
     /// User-defined metadata segments keyed by string. Keys must be unique, non-empty, and at most
     /// 64 UTF-8 bytes; readers reject postscripts that violate these limits.
     metadata: [PostscriptMetadata];
+    /// Decoder kernels embedded in the file, one per array encoding id.
+    ///
+    /// A reader that does not have a native decoder for an encoding used by the file may run the
+    /// corresponding kernel instead. A native decoder always supersedes an embedded kernel.
+    wasm_kernels: [WasmKernelSpec];
 }
 
 /// A keyed user-defined metadata segment.
 table PostscriptMetadata {
     key: string (required);
+    segment: PostscriptSegment (required);
+}
+
+/// A `WasmKernelSpec` locates a WebAssembly decoder kernel embedded in the file.
+table WasmKernelSpec {
+    /// The array encoding id this kernel decodes, e.g. "fastlanes.bitpacked".
+    id: string (required);
+    /// The host/guest ABI version the kernel was built against.
+    abi_version: uint32;
+    /// Segment containing the `.wasm` module (required).
     segment: PostscriptSegment (required);
 }
 

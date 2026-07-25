@@ -61,10 +61,10 @@ and build standalone for `wasm32-unknown-unknown`); the parity contract with the
 is enforced by round-trip tests that serialize with the **native** encoder and decode through the
 kernel (`vortex-wasm/tests/plugin_roundtrip.rs`).
 
-### File format: kernels as postscript-referenced segments (next)
+### File format: kernels as postscript-referenced segments
 
-Kernels are written as ordinary segments near the end of the file and referenced from the
-**postscript** with their encoding ids:
+Kernels are ordinary segments written just before the other footer segments, and referenced from
+the **postscript** by encoding id:
 
 ```
 table Postscript {
@@ -72,7 +72,7 @@ table Postscript {
     layout: PostscriptSegment;
     statistics: PostscriptSegment;
     footer: PostscriptSegment;
-    // NEW: embedded decoder kernels, one per encoding id.
+    // Embedded decoder kernels, one per encoding id.
     wasm_kernels: [WasmKernelSpec];
 }
 
@@ -82,24 +82,45 @@ table WasmKernelSpec {
     /// ABI version the kernel was built against.
     abi_version: uint32;
     /// Location of the `.wasm` blob.
-    segment: PostscriptSegment;
+    segment: PostscriptSegment (required);
 }
 ```
 
-The writer gains an option to attach kernels (e.g. `with_wasm_kernel(id, bytes)`); at open, the
-reader fetches the referenced segments and calls [`register_wasm_encodings`] on the scan session
-before building contexts. Kernels are naturally content-addressable for dedup across files.
+Writing: `VortexWriteOptions::with_wasm_kernel(EmbeddedKernel)`. `vortex_wasm::embed_kernel` builds
+one, compiling the module first so a kernel this host could not run is rejected at write time
+rather than by whoever reads the file. Attaching a kernel does not change how the data is encoded —
+the writer still needs the native encoding to produce it.
 
-*Status: the session-level machinery (registration, plugin, kernel, ABI, kernels, parity tests)
-is implemented; the postscript flatbuffer field and the writer/reader plumbing are the remaining
-step (blocked in the current environment on regenerating flatbuffers — `flatc` — and the
-workspace `Cargo.lock`).*
+Reading: `FooterDeserializer` extends its read window over the kernel segments, slices out the
+blobs, and hands them to an `EmbeddedKernelLoader` before anything resolves an encoding id. Three
+properties fall out of where the id lives:
+
+- **The id is in the postscript, not the kernel segment**, so the reader can decide whether it
+  wants the bytes at all. Kernels for encodings it can already decode are never fetched — a native
+  reader pays for the postscript entry only. (`a_native_reader_does_not_read_the_kernel_segment`
+  measures this differentially: same file, two sessions, one reads a megabyte more than the other.)
+- **Running file-supplied code is opt-in.** `vortex-file` knows nothing about wasm; without
+  `vortex_wasm::with_wasm_kernel_loader` installed on the session, embedded kernels are ignored and
+  an unknown encoding fails exactly as it does today. This also keeps `wasmtime` out of
+  `vortex-file`.
+- **A file's kernels are scoped to that file.** The loader forks the array registry rather than
+  registering into the caller's session, so two files using the same encoding id cannot end up
+  decoded by each other's code. (`Registry::clone` shares its map; `Registry::fork` is the
+  independent copy this needs.)
+
+The declared `abi_version` is checked before the module is compiled, and the module's own
+`vx_abi_version` export is checked before it is run — the first catches a stale kernel cheaply, the
+second catches a postscript that lies about one.
+
+Kernels are naturally content-addressable for dedup across files; that, and caching a compiled
+kernel across the files that share it, are not yet implemented.
 
 ## Crates
 
-- **`vortex-wasm` (the host)** — depends on `vortex-array`, `vortex-session`, `arrow-*`, and
+- **`vortex-wasm` (the host)** — depends on `vortex-array`, `vortex-session`, `vortex-file`, and
   `wasmtime`. Provides [`WasmKernel`]/`WasmDecoder` (the runtime), `convert` (the boundary),
-  [`WasmEncodingPlugin`] (the `ArrayPlugin` adapter), and [`register_wasm_encodings`].
+  [`WasmEncodingPlugin`] (the `ArrayPlugin` adapter), [`register_wasm_encodings`], and
+  [`WasmKernelLoader`]/`with_wasm_kernel_loader`/`embed_kernel` (the file-format wiring).
 - **`vortex-wasm-guest` (the guest SDK)** — `#![no_std]`, dependency-free (`core`/`alloc`).
   Provides the ABI (`abi`), the frame views (`node`), the array buffer builder/reader
   (`data`), a tiny protobuf reader for prost metadata (`proto`), the bump-allocator runtime
@@ -176,6 +197,9 @@ All integers little-endian; the single linear memory is exported as `"memory"`. 
 
 Guest exports:
 
+- `vx_abi_version() -> u32` — the ABI the kernel was built against. The host reads it at compile
+  time and refuses a kernel that disagrees with its own, so a stale kernel fails loudly instead of
+  misreading frames.
 - `vx_alloc(len) -> ptr` — bump allocation; the host uses it to place all inputs.
 - `vx_children(frame_ptr, frame_len) -> ptr` — input
   `[u64 len][u32 flags][u32 n_children][u32 metadata_len][metadata]`; output `[u32 n]` + `n`
@@ -391,10 +415,11 @@ fixable upstream (`num-traits` default features in fastlanes-rs).
 5. **Untrusted-input hardening (done):** `SerializedArray::decode` and the `ArrayChildren` blanket
    impl now return `VortexError` instead of `assert!`-ing, so a lying kernel cannot abort the
    process.
-6. **File plumbing (next):** the postscript `wasm_kernels` field, a writer option to attach
-   kernels, and reader-side registration at file-open (see above). Requires flatbuffer
-   regeneration.
-7. **Breadth (later):** the rest of the plan vocabulary (gated on the review findings above), the
+6. **File plumbing (done):** the postscript `wasm_kernels` field, `with_wasm_kernel` on the
+   writer, and loader-based registration at file-open — opt-in, file-scoped, and fetching only the
+   kernels the reader actually lacks (see above). A `vx_abi_version` guest export makes a stale
+   kernel a clear error rather than a misread frame.
+7. **Breadth (next):** the rest of the plan vocabulary (gated on the review findings above), the
    full parent-dtype channel, a Vortex-shaped output vocabulary, more kernels (dict, ALP, ...),
    kernel dedup + cross-file caching, CPU-time limits, and the `wasm32` fallback runtime for the
    browser reader.
@@ -413,6 +438,7 @@ decompress; the engine filters on the decoded output.
 [`WasmEncodingPlugin`]: ../../vortex-wasm/src/plugin.rs
 [`register_wasm_encodings`]: ../../vortex-wasm/src/plugin.rs
 [`WasmKernel`]: ../../vortex-wasm/src/kernel.rs
+[`WasmKernelLoader`]: ../../vortex-wasm/src/loader.rs
 [`WasmEncoding`]: ../../vortex-wasm-guest/src/encoding.rs
 [`fastlanes`]: https://crates.io/crates/fastlanes
 [`fsst`]: https://crates.io/crates/fsst-rs

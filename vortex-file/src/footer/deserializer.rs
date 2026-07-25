@@ -4,15 +4,18 @@
 use std::sync::Arc;
 
 use flatbuffers::root;
+use vortex_array::ArrayId;
 use vortex_array::dtype::DType;
 use vortex_array::flatbuffers::FlatBuffer;
 use vortex_array::flatbuffers::ReadFlatBuffer;
+use vortex_array::session::ArraySessionExt;
 use vortex_buffer::ByteBuffer;
 use vortex_buffer::ByteBufferMut;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 use vortex_error::vortex_err;
+use vortex_session::SessionExt;
 use vortex_session::VortexSession;
 
 use crate::EOF_SIZE;
@@ -21,7 +24,10 @@ use crate::MAGIC_BYTES;
 use crate::VERSION;
 use crate::footer::FileStatistics;
 use crate::footer::SegmentSpec;
+use crate::footer::kernels::EmbeddedKernel;
+use crate::footer::kernels::EmbeddedKernelSession;
 use crate::footer::postscript::Postscript;
+use crate::footer::postscript::PostscriptKernel;
 use crate::footer::postscript::PostscriptSegment;
 
 /// Deserialize a footer from the end of a Vortex file or created from a
@@ -99,6 +105,16 @@ impl FooterDeserializer {
         self.buffer = buffer.freeze();
     }
 
+    /// The session used for deserialization.
+    ///
+    /// Once [`deserialize`](Self::deserialize) has returned [`DeserializeStep::Done`], this is the
+    /// session the footer was parsed with — which, for a file embedding decoder kernels, is a
+    /// file-scoped session extended with those kernels' encodings. Readers must use it for
+    /// subsequent scans of the file, not the session they passed in.
+    pub fn session(&self) -> &VortexSession {
+        &self.session
+    }
+
     /// Advance footer deserialization.
     ///
     /// Returns the next missing input requirement or the finished [`Footer`].
@@ -123,7 +139,18 @@ impl FooterDeserializer {
                     )
                 })
             })
-            .transpose()?;
+            .transpose()?
+            .cloned();
+
+        // Kernels for encodings we can already decode natively are never fetched: a native decoder
+        // supersedes an embedded one, so their bytes would be dead weight.
+        let wanted_kernels = self.wanted_kernels(postscript);
+
+        // Copy the remaining segment locations out so the borrow of `self.postscript` ends here;
+        // loading kernels below replaces `self.session`.
+        let stats_segment = postscript.statistics.clone();
+        let layout_segment = postscript.layout.clone();
+        let footer_segment = postscript.footer.clone();
 
         // The other postscript segments are required, so now we figure out our the offset that
         // contains all the required segments.
@@ -145,11 +172,14 @@ impl FooterDeserializer {
         if let Some(dtype_segment) = &dtype_segment {
             read_more_offset = read_more_offset.min(dtype_segment.offset);
         }
-        if let Some(stats_segment) = &postscript.statistics {
+        if let Some(stats_segment) = &stats_segment {
             read_more_offset = read_more_offset.min(stats_segment.offset);
         }
-        read_more_offset = read_more_offset.min(postscript.layout.offset);
-        read_more_offset = read_more_offset.min(postscript.footer.offset);
+        for kernel in &wanted_kernels {
+            read_more_offset = read_more_offset.min(kernel.segment.offset);
+        }
+        read_more_offset = read_more_offset.min(layout_segment.offset);
+        read_more_offset = read_more_offset.min(footer_segment.offset);
 
         // Read more bytes if necessary.
         if read_more_offset < initial_offset {
@@ -162,24 +192,6 @@ impl FooterDeserializer {
             });
         }
 
-        // Now we read our initial segments.
-        let dtype = dtype_segment
-            .map(|segment| self.parse_dtype(initial_offset, &self.buffer, segment))
-            .transpose()?
-            .unwrap_or_else(|| self.dtype.clone().vortex_expect("DType was provided"));
-        let file_stats = postscript
-            .statistics
-            .as_ref()
-            .map(|segment| {
-                self.parse_file_statistics(
-                    initial_offset,
-                    &self.buffer,
-                    segment,
-                    &dtype,
-                    &self.session,
-                )
-            })
-            .transpose()?;
         let metadata = postscript
             .metadata
             .iter()
@@ -217,14 +229,100 @@ impl FooterDeserializer {
             })
             .collect::<VortexResult<Arc<[_]>>>()?;
 
+        // Register the file's decoder kernels before anything resolves an encoding id against the
+        // session, so the encodings they supply are visible to the layout and footer below. This
+        // replaces `self.session`, which is why every postscript field was copied out above.
+        self.load_kernels(initial_offset, &wanted_kernels)?;
+
+        // Now we read our initial segments.
+        let dtype = dtype_segment
+            .map(|segment| self.parse_dtype(initial_offset, &self.buffer, &segment))
+            .transpose()?
+            .unwrap_or_else(|| self.dtype.clone().vortex_expect("DType was provided"));
+        let file_stats = stats_segment
+            .map(|segment| {
+                self.parse_file_statistics(
+                    initial_offset,
+                    &self.buffer,
+                    &segment,
+                    &dtype,
+                    &self.session,
+                )
+            })
+            .transpose()?;
+
         Ok(DeserializeStep::Done(self.parse_footer(
             initial_offset,
             &self.buffer,
-            postscript,
+            &footer_segment,
+            &layout_segment,
             dtype,
             file_stats,
             metadata,
         )?))
+    }
+
+    /// The postscript's kernels for encodings this session has no native decoder for.
+    fn wanted_kernels(&self, postscript: &Postscript) -> Vec<PostscriptKernel> {
+        let arrays = self.session.arrays();
+        let registry = arrays.registry();
+        postscript
+            .wasm_kernels
+            .iter()
+            .filter(|kernel| {
+                #[expect(clippy::disallowed_methods, reason = "interning a dynamic id")]
+                let id = ArrayId::new(&kernel.id);
+                !registry.contains_key(&id)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Hand the wanted kernels' bytes to the session's [`EmbeddedKernelLoader`], replacing
+    /// `self.session` with the file-scoped session it returns.
+    ///
+    /// Does nothing if the file embeds no kernels this reader needs, or if no loader is installed
+    /// — in the latter case the encodings simply stay unknown, and the layout below fails (or
+    /// yields foreign placeholders) exactly as for any other unknown encoding.
+    fn load_kernels(
+        &mut self,
+        initial_offset: u64,
+        wanted: &[PostscriptKernel],
+    ) -> VortexResult<()> {
+        if wanted.is_empty() {
+            return Ok(());
+        }
+        let Some(loader) = self
+            .session
+            .get_opt::<EmbeddedKernelSession>()
+            .and_then(|kernels| kernels.loader().cloned())
+        else {
+            tracing::debug!(
+                "File embeds {} decoder kernel(s) for encodings this session cannot decode, but no EmbeddedKernelLoader is installed",
+                wanted.len()
+            );
+            return Ok(());
+        };
+
+        let kernels = wanted
+            .iter()
+            .map(|kernel| {
+                // The postscript is untrusted, so slice defensively rather than panicking.
+                let module = ByteBuffer::copy_from(checked_segment_slice(
+                    self.buffer.as_slice(),
+                    initial_offset,
+                    &kernel.segment,
+                )?);
+                Ok(EmbeddedKernel::new(
+                    kernel.id.clone(),
+                    kernel.abi_version,
+                    module,
+                ))
+            })
+            .collect::<VortexResult<Vec<_>>>()?;
+
+        self.session = loader.load(&self.session, &kernels)?;
+        Ok(())
     }
 
     /// The current buffer being used for deserialization.
@@ -308,15 +406,14 @@ impl FooterDeserializer {
         &self,
         initial_offset: u64,
         initial_read: &[u8],
-        postscript: &Postscript,
+        footer_segment: &PostscriptSegment,
+        layout_segment: &PostscriptSegment,
         dtype: DType,
         file_stats: Option<FileStatistics>,
         metadata: Arc<[(String, SegmentSpec)]>,
     ) -> VortexResult<Footer> {
-        let footer_segment = &postscript.footer;
         let footer_bytes = checked_segment_slice(initial_read, initial_offset, footer_segment)?;
 
-        let layout_segment = &postscript.layout;
         let layout_bytes = FlatBuffer::copy_from(checked_segment_slice(
             initial_read,
             initial_offset,
@@ -424,6 +521,7 @@ mod tests {
             statistics: None,
             footer: footer_segment,
             metadata: Vec::new(),
+            wasm_kernels: Vec::new(),
         };
         let buffer = eof_buffer(&postscript)?;
         let file_size = buffer.len() as u64;
@@ -444,6 +542,7 @@ mod tests {
             statistics: None,
             footer: segment(1, 1),
             metadata: Vec::new(),
+            wasm_kernels: Vec::new(),
         };
         let buffer = eof_buffer(&postscript)?;
         let declared_size = buffer.len() as u64 - 1;

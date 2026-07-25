@@ -19,6 +19,10 @@ pub const HOST_MODULE: &str = "vortex_host";
 /// Name of the guest's exported linear memory.
 pub const MEMORY_EXPORT: &str = "memory";
 
+/// Guest export: `vx_abi_version() -> i32`. Returns the [`ABI_VERSION`] the kernel was built
+/// against. The host refuses to run a kernel that disagrees with its own.
+pub const ABI_VERSION_EXPORT: &str = "vx_abi_version";
+
 /// Guest export: `vx_alloc(len: i32) -> i32`. Allocates `len` bytes and returns the offset.
 /// The returned offset is guaranteed 8-byte aligned (part of the ABI), so kernels can view
 /// host-uploaded buffers as typed slices in place.
@@ -31,10 +35,10 @@ pub const ALLOC_EXPORT: &str = "vx_alloc";
 pub const CHILDREN_EXPORT: &str = "vx_children";
 
 /// Guest export: `vx_decode(input_ptr: i32, input_len: i32) -> i32`. The input frame carries the
-/// node's metadata, its raw buffers (already in guest memory), and its host-decoded children (as
-/// Arrow C Data Interface struct pairs). Returns the offset of an
-/// `(array_ptr: u32, schema_ptr: u32)` pair pointing at the decoded output's Arrow C structs.
-/// Negative values are error codes.
+/// node's metadata, its raw buffers (already in guest memory), and its host-decoded `Values`
+/// children as array descriptors. Returns the offset of a tagged result frame: either a
+/// materialized array descriptor or a gather over a child the kernel only named. Negative values
+/// are error codes.
 pub const DECODE_EXPORT: &str = "vx_decode";
 
 /// Host import: `vx_host_log(ptr: i32, len: i32)`. Logs a UTF-8 string from guest memory.
