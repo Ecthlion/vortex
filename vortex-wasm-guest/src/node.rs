@@ -7,10 +7,10 @@ use alloc::vec::Vec;
 
 use crate::abi::PType;
 use crate::abi::child_descriptor;
+use crate::abi::child_entry;
 use crate::abi::children_frame;
 use crate::abi::decode_frame;
-use crate::arrow::ChildView;
-use crate::arrow::read_child;
+use crate::data::ChildView;
 use crate::error::GuestError;
 use crate::error::GuestResult;
 
@@ -33,7 +33,7 @@ pub enum ChildMode {
     /// The guest reads this child's element bytes. The host canonicalizes it and copies it into
     /// guest memory, so its dtype must be one the guest can read.
     Values,
-    /// The guest only *names* this child in its result (see [`Decoded::Take`](crate::arrow::Decoded)).
+    /// The guest only *names* this child in its result (see [`Decoded::Take`](crate::data::Decoded)).
     /// The host resolves it lazily in its own encoding and never canonicalizes or copies it —
     /// so a referenced child may have **any** dtype, including nested ones the guest could
     /// neither read nor reproduce.
@@ -207,7 +207,7 @@ impl<'a> NodeView<'a> {
 
         let buffers_table = decode_frame::HEADER + metadata_len;
         let children_table = buffers_table + n_buffers * 8;
-        if input.len() < children_table + n_children * 8 {
+        if input.len() < children_table + n_children * child_entry::SIZE {
             return Err(GuestError::new("decode frame tables out of bounds"));
         }
         Ok(Self {
@@ -248,14 +248,12 @@ impl<'a> NodeView<'a> {
         self.n_children
     }
 
-    /// The `i`th host-decoded child, as a typed view over its Arrow C structs.
+    /// The `i`th host-supplied `Values` child, as a typed view.
     pub fn child(&self, i: usize) -> GuestResult<ChildView> {
         if i >= self.n_children {
             return Err(GuestError::new("child index out of bounds"));
         }
-        let entry = self.children_table + i * 8;
-        let array_ptr = read_u32(self.input, entry);
-        let schema_ptr = read_u32(self.input, entry + 4);
-        read_child(array_ptr, schema_ptr)
+        let start = self.children_table + i * child_entry::SIZE;
+        crate::data::read_child(&self.input[start..start + child_entry::SIZE])
     }
 }

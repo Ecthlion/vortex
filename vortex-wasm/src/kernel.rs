@@ -12,8 +12,8 @@
 //! 2. the host decodes those children (natively or through other kernels), copies the node's raw
 //!    buffers into guest memory, exports the children as Arrow C Data Interface structs, and calls
 //!    `vx_decode` with everything in one frame;
-//! 3. the guest returns its decoded output as Arrow C structs, which the host imports back into a
-//!    Vortex array (see [`crate::arrow_ffi`]).
+//! 3. the guest returns its output as a Vortex buffer table, which the host turns back into an
+//!    array (see [`crate::convert`]) — or as a gather over a child it only named.
 //!
 //! Kernels are untrusted file data. The runtime is `wasmtime` with its default Cranelift backend
 //! (not Winch/Pulley, which are less battle-tested); each decode runs in a fresh [`Store`] whose
@@ -50,8 +50,10 @@ use crate::abi::DECODE_EXPORT;
 use crate::abi::HOST_LOG_IMPORT;
 use crate::abi::HOST_MODULE;
 use crate::abi::MEMORY_EXPORT;
-use crate::arrow_ffi;
-use crate::arrow_ffi::GuestMem;
+use crate::convert::ArrayDescriptor;
+use crate::convert::CHILD_ENTRY_SIZE;
+use crate::convert::GuestMem;
+use crate::convert::write_child;
 
 /// Maximum linear memory a kernel may grow to in a single decode, as a coarse DoS guard against
 /// untrusted kernels. Generous enough for legitimate decodes (wasm32 memory tops out at 4 GiB); a
@@ -292,16 +294,13 @@ impl WasmDecoder {
         children: &[Canonical],
         ctx: &mut ExecutionCtx,
     ) -> VortexResult<KernelOutput> {
-        // Export the decoded children into guest memory as Arrow C structs.
-        let mut child_pairs = Vec::with_capacity(children.len());
+        // Copy the decoded `Values` children into guest memory as fixed-size entries.
+        let mut child_entries = Vec::with_capacity(children.len());
         for canonical in children {
-            let pair = {
-                let mut guest = InstanceGuestMem {
-                    instance: &mut self.instance,
-                };
-                arrow_ffi::export(canonical, ctx, &mut guest)?
+            let mut guest = InstanceGuestMem {
+                instance: &mut self.instance,
             };
-            child_pairs.push(pair);
+            child_entries.push(write_child(canonical, ctx, &mut guest)?);
         }
 
         // Copy the raw buffers into guest memory.
@@ -312,21 +311,21 @@ impl WasmDecoder {
         }
 
         // Build the decode frame and run the kernel.
-        let mut frame =
-            Vec::with_capacity(24 + metadata.len() + buffers.len() * 8 + child_pairs.len() * 8);
+        let mut frame = Vec::with_capacity(
+            24 + metadata.len() + buffers.len() * 8 + child_entries.len() * CHILD_ENTRY_SIZE,
+        );
         frame.extend_from_slice(&(len as u64).to_le_bytes());
         frame.extend_from_slice(&frame_flags(dtype).to_le_bytes());
         frame.extend_from_slice(&(u32::try_from(metadata.len())?).to_le_bytes());
         frame.extend_from_slice(&(u32::try_from(buffers.len())?).to_le_bytes());
-        frame.extend_from_slice(&(u32::try_from(child_pairs.len())?).to_le_bytes());
+        frame.extend_from_slice(&(u32::try_from(child_entries.len())?).to_le_bytes());
         frame.extend_from_slice(metadata);
         for (ptr, buffer_len) in &buffer_entries {
             frame.extend_from_slice(&ptr.to_le_bytes());
             frame.extend_from_slice(&buffer_len.to_le_bytes());
         }
-        for (array_ptr, schema_ptr) in &child_pairs {
-            frame.extend_from_slice(&array_ptr.to_le_bytes());
-            frame.extend_from_slice(&schema_ptr.to_le_bytes());
+        for entry in &child_entries {
+            frame.extend_from_slice(entry);
         }
 
         let frame_ptr = self.instance.upload(&frame)?;
@@ -350,42 +349,24 @@ impl WasmDecoder {
             .map_err(|e| vortex_err!("failed to read result tag: {e}"))?;
         let tag = u32::from_le_bytes(header);
 
-        let read_pair = |slf: &Self, off: usize| -> VortexResult<(u32, u32)> {
-            let mut pair = [0u8; 8];
-            slf.instance
-                .memory
-                .read(&slf.instance.store, off, &mut pair)
-                .map_err(|e| vortex_err!("failed to read result pair: {e}"))?;
-            Ok((
-                u32::from_le_bytes(pair[0..4].try_into().expect("4 bytes")),
-                u32::from_le_bytes(pair[4..8].try_into().expect("4 bytes")),
-            ))
-        };
+        let mem = self.instance.memory.data(&self.instance.store);
 
         match tag {
             RESULT_MATERIALIZED => {
-                let (array_ptr, schema_ptr) = read_pair(self, result_ptr as usize + 4)?;
-                Ok(KernelOutput::Materialized(arrow_ffi::import(
-                    self.instance.memory.data(&self.instance.store),
-                    array_ptr,
-                    schema_ptr,
-                )?))
+                let (descriptor, _) = ArrayDescriptor::parse(mem, result_ptr as usize + 4)?;
+                Ok(KernelOutput::Materialized(descriptor.build(mem, dtype)?))
             }
             RESULT_TAKE => {
-                let mut slot = [0u8; 4];
-                self.instance
-                    .memory
-                    .read(&self.instance.store, result_ptr as usize + 4, &mut slot)
-                    .map_err(|e| vortex_err!("failed to read take slot: {e}"))?;
-                let (array_ptr, schema_ptr) = read_pair(self, result_ptr as usize + 8)?;
-                let indices = arrow_ffi::import(
-                    self.instance.memory.data(&self.instance.store),
-                    array_ptr,
-                    schema_ptr,
-                )?;
+                let slot = u32::from_le_bytes(
+                    mem.get(result_ptr as usize + 4..result_ptr as usize + 8)
+                        .ok_or_else(|| vortex_err!("truncated take result"))?
+                        .try_into()
+                        .expect("4 bytes"),
+                );
+                let (descriptor, _) = ArrayDescriptor::parse(mem, result_ptr as usize + 8)?;
                 Ok(KernelOutput::Take {
-                    values_slot: u32::from_le_bytes(slot) as usize,
-                    indices,
+                    values_slot: slot as usize,
+                    indices: descriptor.build_indices(mem)?,
                 })
             }
             other => vortex_bail!("wasm kernel returned unknown result tag {other}"),

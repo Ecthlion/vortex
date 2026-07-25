@@ -53,7 +53,7 @@ pure decode libraries so semantics match by construction:
 | Kernel crate | Encoding | Reuses |
 | --- | --- | --- |
 | `encodings/fastlanes/wasm` | `fastlanes.bitpacked` | the [`fastlanes`] crate's unpack kernels |
-| `encodings/runend/wasm` | `vortex.runend` | nothing — it gathers instead of decoding |
+| `encodings/runend/wasm` | `vortex.runend` | nothing — it gathers instead of decoding (5.3 KB) |
 | `encodings/fsst/wasm` | `vortex.fsst` | [`fsst`] (fsst-rs)'s `Decompressor` |
 
 The kernel crates are workspace-excluded (they carry their own size-optimized release profiles
@@ -98,11 +98,11 @@ workspace `Cargo.lock`).*
 ## Crates
 
 - **`vortex-wasm` (the host)** — depends on `vortex-array`, `vortex-session`, `arrow-*`, and
-  `wasmtime`. Provides [`WasmKernel`]/`WasmDecoder` (the runtime), `arrow_ffi` (the boundary),
+  `wasmtime`. Provides [`WasmKernel`]/`WasmDecoder` (the runtime), `convert` (the boundary),
   [`WasmEncodingPlugin`] (the `ArrayPlugin` adapter), and [`register_wasm_encodings`].
 - **`vortex-wasm-guest` (the guest SDK)** — `#![no_std]`, dependency-free (`core`/`alloc`).
-  Provides the ABI (`abi`), the frame views (`node`), the Arrow C struct builder/reader
-  (`arrow`), a tiny protobuf reader for prost metadata (`proto`), the bump-allocator runtime
+  Provides the ABI (`abi`), the frame views (`node`), the array buffer builder/reader
+  (`data`), a tiny protobuf reader for prost metadata (`proto`), the bump-allocator runtime
   (default `runtime` feature; disable it when a dependency links `std`), and the
   [`WasmEncoding`] trait + `export_wasm_encoding!` macro.
 
@@ -131,7 +131,7 @@ Hence two result shapes, and a per-child access mode:
 | | value-producing | re-arranging |
 | --- | --- | --- |
 | child access | `ChildMode::Values` — canonicalized and copied into the sandbox | `ChildMode::Reference` — resolved lazily, in its own encoding, never copied |
-| result | `Decoded::Primitive` / `Decoded::Utf8` | `Decoded::Take { values_slot, indices }` |
+| result | `Decoded::Primitive` / `Bool` / `VarBinView` | `Decoded::Take { values_slot, indices }` |
 | guest bytes moved | O(len) | 0 for the referenced child |
 
 `Take` is deliberately the *only* re-arrangement op today. The full vocabulary a complete design
@@ -183,22 +183,40 @@ Guest exports:
 - `vx_decode(frame_ptr, frame_len) -> ptr` — input
   `[u64 len][u32 flags][u32 metadata_len][u32 n_buffers][u32 n_children][metadata]`
   `[(ptr,len) x buffers][(array_ptr,schema_ptr) x children]`; output points at the decoded
-  array's `(array_ptr, schema_ptr)` Arrow C struct pair.
+  array's buffer-table descriptor (or, for a gather, the child slot plus the index array).
 
 The `flags` word carries the parent dtype: bit 0 nullability, bits 8-15 the kind
 (primitive/bool/utf8), bits 16-23 the ptype. Negative returns are error codes; panics become
 traps, which the host surfaces as decode errors.
 
-### Decoded-array boundary: Arrow C Data Interface
+### Array boundary: Vortex's own layouts, not Arrow
 
-Arrays cross the boundary as Arrow C structs laid out for wasm32 (4-byte pointers). The host side
-(`arrow_ffi`) implements the **complete interface**, driven by Arrow's own machinery: schemas
-round-trip through `FFI_ArrowSchema` (full format-string coverage, names, flags, metadata,
-children, dictionaries), array buffers are sized by `arrow_data::layout()` per `DataType`
-(validity/bitmap/fixed/offsets+data/view variadic buffers), and `ArrayData::try_new` validates
-untrusted guest data before any host code consumes it. Host-decoded children are exported through
-the session's Arrow export (any Vortex dtype); guest-side typed helpers are a deliberate subset
-(primitive/bool child views, primitive/utf8 outputs) — kernels needing more parse the raw structs.
+Arrays cross in Vortex's canonical layouts — a **buffer table plus a shape tag** — with no schema
+and no Arrow dependency.
+
+The boundary *was* the Arrow C Data Interface. It was removed because Arrow C FFI is a
+**schema-carrying protocol and this boundary has no schema to carry**: the host already holds the
+node's `DType`, and the guest declares its children's dtypes itself. The round trip therefore had
+the guest write a format string that the host parsed back into a type it already knew, ran
+`ArrayData::try_new` revalidation over, and then converted into Vortex's representation. For
+strings that conversion was also lossy in cost: Arrow utf8's i32 offsets import as `VarBin`, which
+is **not** canonical, so every string kernel paid a second full conversion of the heap.
+
+- `shape` is `Primitive` (one values buffer), `Bool` (one bitmap), or `VarBinView` (16-byte views
+  plus the data buffers they reference — Vortex's canonical string form, which FSST now emits
+  directly).
+- `validity` is an **algebra** — `NonNullable | AllValid | AllInvalid | Bitmap` — so a
+  non-nullable or all-valid array transmits no bitmap at all. The Arrow-shaped channel copied one
+  for nothing.
+- Only primitive and boolean children are deliverable *into* the guest. That is not a limitation
+  in practice: anything else is declared `Reference` and never enters the sandbox.
+- Bitmaps are byte-aligned via `shrink_offset` before crossing, closing the bit-offset hazard a
+  sliced array's mask would otherwise cause.
+
+For primitives and bools these bytes are identical to Arrow's; only the schema went away. What
+went with it: the `arrow-array`/`arrow-buffer`/`arrow-data`/`arrow-schema` dependencies, ~800
+lines of schema recursion, metadata-blob parsing, and dictionary handling — and the attack surface
+they carried.
 
 ### Memory
 
@@ -210,8 +228,7 @@ so `dealloc` is a no-op and there is no free in the ABI.
 **`vx_alloc` returns 8-byte-aligned offsets — this is part of the ABI.** Every host upload (the
 frames, the raw buffers, the child structs) lands aligned, so kernels view typed data **in
 place**: wasm32 is little-endian, matching the serialized format, so e.g. the bitpacked kernel
-casts its packed buffer to `&[u32]` (`align_to`, checked) instead of copying words out, and Arrow
-`int64` struct fields are naturally aligned.
+casts its packed buffer to `&[u32]` (`align_to`, checked) instead of copying words out.
 
 Today the two shipped kernels disable the `runtime` feature because a dependency links `std`
 (fastlanes' `num-traits` edge lacks `default-features = false`; fsst-rs is not `#![no_std]`) —
@@ -233,7 +250,7 @@ alignment guarantee + wasm32's little-endianness), and full in-range chunks unpa
 the output — mirroring the native `decode_into` fast path — with scratch only for a sliced first
 chunk and a partial trailer. Patches overwrite `index - patches.offset`; the validity child
 carries through. Scope: 4-byte primitives — other widths are pure monomorphization at ~25 KB of
-unrolled unpack code per width family. Blob: **~53 KB** (**37 KB** once fastlanes-rs's
+unrolled unpack code per width family. Blob: **~51 KB** (~35 KB once fastlanes-rs's
 `num-traits` edge stops linking `std`; the unpack kernels dominate the rest).
 
 ### `vortex.fsst` (`encodings/fsst/wasm`)
@@ -241,7 +258,7 @@ unrolled unpack code per width family. Blob: **~53 KB** (**37 KB** once fastlane
 Parses `FSSTMetadata`; declares `[uncompressed_lengths, codes_offsets, validity]` children;
 rebuilds the symbol table with `fsst::Symbol::from_slice` and bulk-decompresses the whole codes
 heap with **the same [`fsst`] crate `Decompressor` the native canonical path uses**; the prefix
-sums of the uncompressed lengths are exactly the output utf8 offsets. Blob: **~27 KB**.
+sums of the uncompressed lengths are exactly the output utf8 offsets. Blob: **~26 KB**.
 
 ### `vortex.runend` (`encodings/runend/wasm`) — the structural case
 
@@ -257,7 +274,7 @@ The consequences are worth stating plainly, because they are the argument for th
 - **The kernel is dtype-agnostic.** The *native* decoder needs three separate implementations
   (bool / primitive / varbinview) and `vortex_bail!`s on anything else. This kernel has none —
   run-end over strings works with zero string code in the guest, and is covered by a test.
-- **It is 7.7 KB**, versus 53 KB for bitpacked. Not decoding is cheap.
+- **It is 5.3 KB**, versus 51 KB for bitpacked. Not decoding is cheap.
 - **Validity falls out.** Run-end's output validity is the values' validity gathered through the
   same runs; `take` reproduces that, so the kernel never touches validity.
 
@@ -289,15 +306,10 @@ vocabulary returned *needs-rework*, and those findings gate the expansion:
 - **The parent dtype is 24 bits of frame flags.** Anything that is not primitive/bool/utf8 arrives
   as `Other`. This is *fatal, not slow*, for `datetimeparts` (needs the Timestamp `TimeUnit` and
   tz), `decimal`/`decimal_byte_parts` (precision/scale), and `fixed_size_list` (`list_size`).
-- **A `Utf8` child is declarable but undeliverable.** `DType::Utf8` exports as Arrow `Utf8View`
-  (`"vu"`), which `read_child` rejects. `ChildMode::Reference` sidesteps this for re-arranging
-  encodings (the child never enters the guest), but a kernel that must *read* strings still
-  cannot.
-- **Arrow is the wrong output vocabulary.** `Decoded::Utf8`'s i32 offsets import as `VarBin`,
-  which is not canonical, so every string kernel pays a second decode. There is no `Bool` output
-  (so `vortex.bytebool` is unimplementable), no decimal, and no 16/32-byte alignment.
-- **Validity is a materialized bitmap, not an algebra** — both materializing kernels copy a
-  validity bitmap through the sandbox for nothing.
+- **A kernel cannot *read* a string child.** Only primitive and boolean children are deliverable
+  into the sandbox. `ChildMode::Reference` covers every re-arranging encoding (the child never
+  enters the guest), so this only binds a hypothetical kernel that must inspect string bytes.
+- **Decimal output** (i128/i256) and its 16/32-byte buffer alignment are still unsupported.
 - **`vortex.chunked` is inexpressible at any cost**: its per-chunk lengths are the *decoded
   contents of child 0*, and `children` is a single pure call with a mandatory length. Fixing it
   requires an iterative declaration phase, not more plan ops.
@@ -344,10 +356,10 @@ Compiled `wasm32-unknown-unknown`, size-optimized (`opt-level = "z"`, `lto`, `pa
 
 | kernel | size | notes |
 |---|---|---|
-| minimal SDK kernel (no_std, no deps) | ~4 KB | the SDK floor: allocator + Arrow glue |
-| `vortex.fsst` | ~28 KB | fsst-rs `Decompressor` + `std` (fsst-rs is not yet no_std) |
-| `fastlanes.bitpacked` | ~53 KB | fastlanes unrolled unpack kernels + `std` via num-traits |
-| `fastlanes.bitpacked`, fully no_std | **~37 KB** | measured with num-traits `default-features = false` patched into fastlanes-rs |
+| minimal SDK kernel (no_std, no deps) | ~4 KB | the SDK floor: allocator + buffer glue |
+| `vortex.fsst` | ~26 KB | fsst-rs `Decompressor` + `std` (fsst-rs is not yet no_std) |
+| `fastlanes.bitpacked` | ~51 KB | fastlanes unrolled unpack kernels + `std` via num-traits |
+| `fastlanes.bitpacked`, fully no_std | **~35 KB** | measured with num-traits `default-features = false` patched into fastlanes-rs |
 
 The early prototype showed why the SDK avoids Vortex crates entirely: pulling `vortex-error`
 (which drags `jiff`/`prost`/`arrow-schema`) put kernels at ~74 KB before any real decode logic.
@@ -357,9 +369,11 @@ fixable upstream (`num-traits` default features in fastlanes-rs).
 ## Implementation phases
 
 1. **Prototype (done, superseded):** `WasmLayout` + payload/child write model over `wasmi`, then
-   `wasmtime`; proved the VM, the Arrow boundary, and end-to-end round trips.
-2. **Arrow C Data Interface, complete and generic (done):** `arrow_ffi` import/export driven by
-   `FFI_ArrowSchema` + `arrow_data::layout()`, validated by `ArrayData::try_new`.
+   `wasmtime`; proved the VM, the boundary, and end-to-end round trips.
+2. **Arrow C Data Interface, then removed (done):** the boundary was briefly a complete, generic
+   Arrow C FFI binding. It was deleted once it became clear Arrow is a schema-carrying protocol
+   and this boundary carries no schema — see
+   [the array boundary](#array-boundary-vortexs-own-layouts-not-arrow).
 3. **Session-level wasm encodings (done):** `WasmLayout` removed. Kernels decode the **real
    serialized parts** (ABI v2: `vx_children` + pushed `vx_decode` frame);
    [`WasmEncodingPlugin`] registers under the encoding's id and returns decoded arrays;

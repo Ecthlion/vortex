@@ -5,8 +5,8 @@
 
 use alloc::vec::Vec;
 
-use crate::arrow::Decoded;
-use crate::arrow::write;
+use crate::data::Decoded;
+use crate::data::write;
 use crate::error::GuestResult;
 use crate::node::ChildSpec;
 use crate::node::NodeHeader;

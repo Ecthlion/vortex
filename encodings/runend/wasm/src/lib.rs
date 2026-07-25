@@ -35,10 +35,11 @@ use vortex_wasm_guest::GuestError;
 use vortex_wasm_guest::GuestResult;
 use vortex_wasm_guest::WasmEncoding;
 use vortex_wasm_guest::abi::PType;
-use vortex_wasm_guest::arrow::ChildView;
-use vortex_wasm_guest::arrow::Decoded;
-use vortex_wasm_guest::arrow::DecodedPrimitive;
-use vortex_wasm_guest::arrow::DecodedTake;
+use vortex_wasm_guest::data::ChildView;
+use vortex_wasm_guest::data::Decoded;
+use vortex_wasm_guest::data::DecodedPrimitive;
+use vortex_wasm_guest::data::DecodedTake;
+use vortex_wasm_guest::data::Validity;
 use vortex_wasm_guest::export_wasm_encoding;
 use vortex_wasm_guest::guest_ensure;
 use vortex_wasm_guest::node::ChildDType;
@@ -149,9 +150,8 @@ impl WasmEncoding for RunEnd {
             indices: DecodedPrimitive {
                 ptype: PType::U32,
                 len: node.len,
-                nullable: false,
                 values: indices,
-                validity: None,
+                validity: Validity::NonNullable,
             },
         }))
     }

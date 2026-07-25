@@ -33,9 +33,11 @@ use vortex_wasm_guest::GuestError;
 use vortex_wasm_guest::GuestResult;
 use vortex_wasm_guest::WasmEncoding;
 use vortex_wasm_guest::abi::PType;
-use vortex_wasm_guest::arrow::ChildView;
-use vortex_wasm_guest::arrow::Decoded;
-use vortex_wasm_guest::arrow::DecodedPrimitive;
+use vortex_wasm_guest::data::ChildView;
+use vortex_wasm_guest::data::Decoded;
+use vortex_wasm_guest::data::DecodedPrimitive;
+use vortex_wasm_guest::data::Validity;
+use vortex_wasm_guest::data::ValidityView;
 use vortex_wasm_guest::export_wasm_encoding;
 use vortex_wasm_guest::guest_ensure;
 use vortex_wasm_guest::node::ChildDType;
@@ -246,20 +248,22 @@ impl WasmEncoding for BitPacked {
             unsafe { core::slice::from_raw_parts(out.as_ptr() as *const u8, out.len() * 4) }
                 .to_vec();
 
-        // A trailing validity child carries through to the output bitmap.
+        // A trailing validity child carries through to the output.
         let validity = if node.nchildren() == next_child + 1 {
             let ChildView::Bool(bits) = node.child(next_child)? else {
                 return Err(GuestError::new("validity child must be boolean"));
             };
-            Some(bits.bits[..node.len.div_ceil(8)].to_vec())
+            Validity::Bitmap(bits.bits[..node.len.div_ceil(8)].to_vec())
+        } else if node.nullable {
+            Validity::AllValid
         } else {
-            None
+            Validity::NonNullable
         };
+        let _ = ValidityView::NonNullable;
 
         Ok(Decoded::Primitive(DecodedPrimitive {
             ptype,
             len: node.len,
-            nullable: node.nullable,
             values,
             validity,
         }))

@@ -27,9 +27,10 @@ use vortex_wasm_guest::GuestError;
 use vortex_wasm_guest::GuestResult;
 use vortex_wasm_guest::WasmEncoding;
 use vortex_wasm_guest::abi::PType;
-use vortex_wasm_guest::arrow::ChildView;
-use vortex_wasm_guest::arrow::Decoded;
-use vortex_wasm_guest::arrow::DecodedUtf8;
+use vortex_wasm_guest::data::ChildView;
+use vortex_wasm_guest::data::Decoded;
+use vortex_wasm_guest::data::DecodedVarBinView;
+use vortex_wasm_guest::data::Validity;
 use vortex_wasm_guest::export_wasm_encoding;
 use vortex_wasm_guest::guest_ensure;
 use vortex_wasm_guest::node::ChildDType;
@@ -148,35 +149,26 @@ impl WasmEncoding for Fsst {
             lengths.len == node.len,
             "fsst uncompressed lengths must have len entries"
         );
-        let mut offsets = Vec::with_capacity(node.len + 1);
-        let mut total: u64 = 0;
-        offsets.push(0i32);
-        for i in 0..node.len {
-            total += lengths.value_u64(i);
-            offsets
-                .push(i32::try_from(total).map_err(|_| GuestError::new("fsst output too large"))?);
-        }
-        guest_ensure!(
-            total as usize == values.len(),
-            "fsst decompressed size disagrees with uncompressed lengths"
-        );
 
         let validity = if node.nchildren() == 3 {
             let ChildView::Bool(bits) = node.child(2)? else {
                 return Err(GuestError::new("fsst validity child must be boolean"));
             };
-            Some(bits.bits[..node.len.div_ceil(8)].to_vec())
+            Validity::Bitmap(bits.bits[..node.len.div_ceil(8)].to_vec())
+        } else if node.nullable {
+            Validity::AllValid
         } else {
-            None
+            Validity::NonNullable
         };
 
-        Ok(Decoded::Utf8(DecodedUtf8 {
-            len: node.len,
-            nullable: node.nullable,
-            offsets,
+        // Emit Vortex's canonical view layout directly. The previous Arrow-shaped output used i32
+        // offsets, which the host imported as `VarBin` — not canonical — costing a second full
+        // conversion of the whole heap on every string decode.
+        Ok(Decoded::VarBinView(DecodedVarBinView::from_heap(
             values,
+            (0..node.len).map(|i| lengths.value_u64(i) as usize),
             validity,
-        }))
+        )?))
     }
 }
 

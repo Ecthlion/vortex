@@ -17,9 +17,9 @@
 //! allocator and panic machinery dominate a kernel's size), the SDK provides the runtime itself: a
 //! grow-only bump `#[global_allocator]` over linear memory plus a trap-on-panic handler, both
 //! behind the default `runtime` feature (disable it when a dependency links `std`, or to bring
-//! your own allocator). Decoded arrays cross the host/guest boundary as the
-//! [Arrow C Data Interface](crate::arrow), which is plain byte layout, so no Arrow library is
-//! needed; prost-encoded metadata is parsed with the tiny [`proto`] reader. Errors use the
+//! your own allocator). Arrays cross the host/guest boundary in [Vortex's own canonical
+//! layouts](crate::data) — a buffer table plus a shape tag, with no schema and no Arrow
+//! dependency; prost-encoded metadata is parsed with the tiny [`proto`] reader. Errors use the
 //! minimal [`GuestError`].
 //!
 //! See `docs/design/wasm-encodings.md`.
@@ -29,7 +29,7 @@
 extern crate alloc;
 
 pub mod abi;
-pub mod arrow;
+pub mod data;
 mod encoding;
 mod error;
 pub mod host;

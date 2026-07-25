@@ -11,14 +11,14 @@
 //! encodings then deserialize through the sandboxed kernel transparently.
 //!
 //! - [`abi`] defines the host/guest ABI constants.
-//! - [`arrow_ffi`] moves arrays across the boundary as Arrow C Data Interface structs.
+//! - [`convert`] moves arrays across the boundary in Vortex's own canonical layouts.
 //! - [`WasmKernel`] is the `wasmtime`-backed runtime that drives the ABI.
 //! - [`WasmEncodingPlugin`] adapts a kernel into a session-registered array encoding.
 //!
 //! See `docs/design/wasm-encodings.md` for the full design.
 
 pub mod abi;
-pub mod arrow_ffi;
+mod convert;
 mod kernel;
 mod plugin;
 
