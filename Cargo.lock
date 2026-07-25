@@ -11981,10 +11981,6 @@ dependencies = [
 name = "vortex-wasm"
 version = "0.1.0"
 dependencies = [
- "arrow-array 59.3.0",
- "arrow-buffer 59.3.0",
- "arrow-data 59.3.0",
- "arrow-schema 59.3.0",
  "fsst-rs",
  "vortex-array",
  "vortex-buffer",
