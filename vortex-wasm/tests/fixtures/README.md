@@ -12,8 +12,9 @@ test time.
 
 | Fixture | Source crate | Encoding |
 | --- | --- | --- |
-| `bitpacked_kernel.wasm` | `encodings/fastlanes/wasm` | `vortex.fastlanes.bitpacked` |
+| `bitpacked_kernel.wasm` | `encodings/fastlanes/wasm` | `fastlanes.bitpacked` |
 | `fsst_kernel.wasm` | `encodings/fsst/wasm` | `vortex.fsst` |
+| `runend_kernel.wasm` | `encodings/runend/wasm` | `vortex.runend` |
 
 ## Rebuilding
 
@@ -22,8 +23,11 @@ After changing the guest SDK or a kernel, rebuild and copy the fixtures:
 ```bash
 (cd encodings/fastlanes/wasm && cargo build --target wasm32-unknown-unknown --release)
 (cd encodings/fsst/wasm && cargo build --target wasm32-unknown-unknown --release)
+(cd encodings/runend/wasm && cargo build --target wasm32-unknown-unknown --release)
 cp encodings/fastlanes/wasm/target/wasm32-unknown-unknown/release/vortex_fastlanes_wasm.wasm \
    vortex-wasm/tests/fixtures/bitpacked_kernel.wasm
 cp encodings/fsst/wasm/target/wasm32-unknown-unknown/release/vortex_fsst_wasm.wasm \
    vortex-wasm/tests/fixtures/fsst_kernel.wasm
+cp encodings/runend/wasm/target/wasm32-unknown-unknown/release/vortex_runend_wasm.wasm \
+   vortex-wasm/tests/fixtures/runend_kernel.wasm
 ```

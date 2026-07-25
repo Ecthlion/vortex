@@ -17,6 +17,7 @@ use vortex_error::VortexError;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
+use vortex_error::vortex_ensure;
 use vortex_error::vortex_err;
 use vortex_error::vortex_panic;
 use vortex_session::VortexSession;
@@ -312,9 +313,23 @@ pub trait ArrayChildren {
 
 impl<T: AsRef<[ArrayRef]>> ArrayChildren for T {
     fn get(&self, index: usize, dtype: &DType, len: usize) -> VortexResult<ArrayRef> {
-        let array = self.as_ref()[index].clone();
-        assert_eq!(array.len(), len);
-        assert_eq!(array.dtype(), dtype);
+        let array = self
+            .as_ref()
+            .get(index)
+            .ok_or_else(|| vortex_err!("child index {index} out of bounds"))?
+            .clone();
+        // Errors rather than asserts: a sandboxed encoding may request a child with a dtype/length
+        // of its own choosing, and untrusted input must not be able to abort the process.
+        vortex_ensure!(
+            array.len() == len,
+            "child {index} has length {}, expected {len}",
+            array.len()
+        );
+        vortex_ensure!(
+            array.dtype() == dtype,
+            "child {index} has dtype {}, expected {dtype}",
+            array.dtype()
+        );
         Ok(array)
     }
 
@@ -392,24 +407,25 @@ impl SerializedArray {
             session,
         )?;
 
-        assert_eq!(
-            decoded.len(),
-            len,
+        // These are `vortex_ensure!` rather than `assert!` because `decode` runs on untrusted file
+        // data: with sandboxed (e.g. wasm-backed) encodings a malformed file can drive a plugin to
+        // return a mismatched array, and that must surface as a `VortexError`, not abort the
+        // process.
+        vortex_ensure!(
+            decoded.len() == len,
             "Array decoded from {} has incorrect length {}, expected {}",
             encoding_id,
             decoded.len(),
             len
         );
-        assert_eq!(
-            decoded.dtype(),
-            dtype,
+        vortex_ensure!(
+            decoded.dtype() == dtype,
             "Array decoded from {} has incorrect dtype {}, expected {}",
             encoding_id,
             decoded.dtype(),
             dtype,
         );
-
-        assert!(
+        vortex_ensure!(
             plugin.is_supported_encoding(&decoded.encoding_id()),
             "Array decoded from {} has incorrect encoding {}",
             encoding_id,

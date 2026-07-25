@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright the Vortex contributors
+
+# The embeddable WASM decoder kernel for `vortex.runend`, living alongside the native encoding in
+# `encodings/runend`. Build with:
+#   cargo build --target wasm32-unknown-unknown --release
+#
+# Unlike the bitpacked/fsst kernels this one is fully `no_std` — it has no dependency that links
+# `std`, because run-end decoding needs no decompression library at all: the kernel only expands
+# run ends into gather indices and lets the host perform the gather.
+#
+# Excluded from the main workspace (see the root Cargo.toml `exclude`); only meaningful for wasm32.
+
+[workspace]
+
+[package]
+name = "vortex-runend-wasm"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+vortex-wasm-guest = { path = "../../../vortex-wasm-guest" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

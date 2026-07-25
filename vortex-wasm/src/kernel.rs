@@ -93,14 +93,46 @@ const TAG_PRIMITIVE: u8 = 1;
 const TAG_BOOL: u8 = 2;
 const TAG_UTF8: u8 = 3;
 const DESCRIPTOR_SIZE: usize = 16;
+const MODE_REFERENCE: u8 = 1;
 
-/// The dtype and length of one serialized child, as declared by the kernel.
+/// Result frame tags (see the guest SDK's `abi::decode_result`).
+const RESULT_MATERIALIZED: u32 = 0;
+const RESULT_TAKE: u32 = 1;
+
+/// How the kernel intends to use a serialized child.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildMode {
+    /// The kernel reads this child's element bytes: the host canonicalizes it and copies it into
+    /// guest memory.
+    Values,
+    /// The kernel only names this child in its result: the host resolves it lazily, in its own
+    /// encoding, and never canonicalizes or copies it.
+    Reference,
+}
+
+/// The dtype, length, and access mode of one serialized child, as declared by the kernel.
 #[derive(Debug, Clone)]
 pub struct ChildDescriptor {
     /// The child's dtype.
     pub dtype: DType,
     /// The child's logical element count.
     pub len: usize,
+    /// Whether the kernel reads this child or merely references it.
+    pub mode: ChildMode,
+}
+
+/// What a kernel produced for a node.
+pub enum KernelOutput {
+    /// The kernel materialized the decoded array itself.
+    Materialized(ArrayRef),
+    /// The output is the child at `values_slot` gathered by `indices`. The host performs the
+    /// gather, so the gathered child never crosses the sandbox boundary and may have any dtype.
+    Take {
+        /// The serialized child slot to gather from.
+        values_slot: usize,
+        /// One unsigned index per output element.
+        indices: ArrayRef,
+    },
 }
 
 /// Store state for a single decode: only the resource limiter (the v2 ABI has no host callbacks
@@ -249,7 +281,8 @@ impl WasmDecoder {
     }
 
     /// Decode the node: `metadata` and `buffers` are its serialized parts, `children` the decoded
-    /// child arrays (in the order declared by [`children`](Self::children)).
+    /// [`ChildMode::Values`] child arrays (in declaration order — `Reference` children are absent,
+    /// because they never enter guest memory).
     pub fn decode(
         &mut self,
         dtype: &DType,
@@ -258,7 +291,7 @@ impl WasmDecoder {
         buffers: &[ByteBuffer],
         children: &[Canonical],
         ctx: &mut ExecutionCtx,
-    ) -> VortexResult<ArrayRef> {
+    ) -> VortexResult<KernelOutput> {
         // Export the decoded children into guest memory as Arrow C structs.
         let mut child_pairs = Vec::with_capacity(children.len());
         for canonical in children {
@@ -309,20 +342,54 @@ impl WasmDecoder {
             vortex_bail!("wasm kernel {DECODE_EXPORT} returned error code {result_ptr}");
         }
 
-        // The result is a pointer to an (array_ptr: u32, schema_ptr: u32) pair.
-        let mut pair = [0u8; 8];
+        // The result frame is [u32 tag] followed by a tag-specific body.
+        let mut header = [0u8; 4];
         self.instance
             .memory
-            .read(&self.instance.store, result_ptr as usize, &mut pair)
-            .map_err(|e| vortex_err!("failed to read result pair: {e}"))?;
-        let array_ptr = u32::from_le_bytes(pair[0..4].try_into().expect("4 bytes"));
-        let schema_ptr = u32::from_le_bytes(pair[4..8].try_into().expect("4 bytes"));
+            .read(&self.instance.store, result_ptr as usize, &mut header)
+            .map_err(|e| vortex_err!("failed to read result tag: {e}"))?;
+        let tag = u32::from_le_bytes(header);
 
-        arrow_ffi::import(
-            self.instance.memory.data(&self.instance.store),
-            array_ptr,
-            schema_ptr,
-        )
+        let read_pair = |slf: &Self, off: usize| -> VortexResult<(u32, u32)> {
+            let mut pair = [0u8; 8];
+            slf.instance
+                .memory
+                .read(&slf.instance.store, off, &mut pair)
+                .map_err(|e| vortex_err!("failed to read result pair: {e}"))?;
+            Ok((
+                u32::from_le_bytes(pair[0..4].try_into().expect("4 bytes")),
+                u32::from_le_bytes(pair[4..8].try_into().expect("4 bytes")),
+            ))
+        };
+
+        match tag {
+            RESULT_MATERIALIZED => {
+                let (array_ptr, schema_ptr) = read_pair(self, result_ptr as usize + 4)?;
+                Ok(KernelOutput::Materialized(arrow_ffi::import(
+                    self.instance.memory.data(&self.instance.store),
+                    array_ptr,
+                    schema_ptr,
+                )?))
+            }
+            RESULT_TAKE => {
+                let mut slot = [0u8; 4];
+                self.instance
+                    .memory
+                    .read(&self.instance.store, result_ptr as usize + 4, &mut slot)
+                    .map_err(|e| vortex_err!("failed to read take slot: {e}"))?;
+                let (array_ptr, schema_ptr) = read_pair(self, result_ptr as usize + 8)?;
+                let indices = arrow_ffi::import(
+                    self.instance.memory.data(&self.instance.store),
+                    array_ptr,
+                    schema_ptr,
+                )?;
+                Ok(KernelOutput::Take {
+                    values_slot: u32::from_le_bytes(slot) as usize,
+                    indices,
+                })
+            }
+            other => vortex_bail!("wasm kernel returned unknown result tag {other}"),
+        }
     }
 }
 
@@ -371,9 +438,14 @@ impl KernelInstance {
                     TAG_UTF8 => DType::Utf8(nullability),
                     other => vortex_bail!("bad child descriptor tag {other}"),
                 };
+                let mode = if d[3] == MODE_REFERENCE {
+                    ChildMode::Reference
+                } else {
+                    ChildMode::Values
+                };
                 let len =
                     usize::try_from(u64::from_le_bytes(d[8..16].try_into().expect("8 bytes")))?;
-                Ok(ChildDescriptor { dtype, len })
+                Ok(ChildDescriptor { dtype, len, mode })
             })
             .collect()
     }

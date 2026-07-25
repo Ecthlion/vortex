@@ -34,6 +34,7 @@ wasmtime = { workspace = true }
 fsst-rs = { workspace = true }
 vortex-array = { path = "../vortex-array", features = ["_test-harness"] }
 vortex-fastlanes = { workspace = true }
+vortex-runend = { workspace = true }
 vortex-fsst = { workspace = true }
 
 [lints]

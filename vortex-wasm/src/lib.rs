@@ -23,6 +23,9 @@ mod kernel;
 mod plugin;
 
 pub use kernel::ChildDescriptor;
+pub use kernel::ChildMode;
+pub use kernel::KernelOutput;
+pub use kernel::WasmDecoder;
 pub use kernel::WasmKernel;
 pub use plugin::WasmEncodingPlugin;
 pub use plugin::register_wasm_encodings;

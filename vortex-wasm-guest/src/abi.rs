@@ -52,10 +52,10 @@ pub mod children_frame {
 /// The `vx_children` output: `[u32 n]` followed by `n` 16-byte descriptors:
 ///
 /// ```text
-/// [u8 tag][u8 ptype][u8 nullable][u8 pad x5][u64 len]
+/// [u8 tag][u8 ptype][u8 nullable][u8 mode][u8 pad x4][u64 len]
 /// ```
 pub mod child_descriptor {
-    /// The child has the parent's dtype (e.g. patch values).
+    /// The child has the parent's dtype (e.g. run-end values, patch values).
     pub const TAG_PARENT: u8 = 0;
     /// A primitive child; `ptype` holds the [`PType`](super::PType) discriminant.
     pub const TAG_PRIMITIVE: u8 = 1;
@@ -65,6 +65,25 @@ pub mod child_descriptor {
     pub const TAG_UTF8: u8 = 3;
     /// Size of one descriptor.
     pub const SIZE: usize = 16;
+
+    /// The guest will read this child's element bytes: the host canonicalizes it and copies it
+    /// into guest memory as Arrow C structs.
+    pub const MODE_VALUES: u8 = 0;
+    /// The guest only *names* this child in its result: the host resolves it lazily, in its own
+    /// encoding, and never canonicalizes or copies it. A referenced child may therefore have any
+    /// dtype, including nested ones the guest could not read or reproduce.
+    pub const MODE_REFERENCE: u8 = 1;
+}
+
+/// The `vx_decode` result frame: `[u32 tag]` followed by a tag-specific body.
+pub mod decode_result {
+    /// The guest materialized the output: `[u32 array_ptr][u32 schema_ptr]` — Arrow C structs.
+    pub const TAG_MATERIALIZED: u32 = 0;
+    /// The output is a child gathered by guest-materialized indices:
+    /// `[u32 values_slot][u32 array_ptr][u32 schema_ptr]`, where the Arrow structs describe the
+    /// index array. The host performs the gather, so the gathered child never crosses the
+    /// boundary.
+    pub const TAG_TAKE: u32 = 1;
 }
 
 /// The `vx_decode` input frame (all integers little-endian).

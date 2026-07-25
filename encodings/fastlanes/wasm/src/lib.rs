@@ -115,30 +115,27 @@ impl WasmEncoding for BitPacked {
             let indices_ptype = patches
                 .indices_ptype
                 .ok_or(GuestError::new("patches missing indices ptype"))?;
-            specs.push(ChildSpec {
-                dtype: ChildDType::Primitive(indices_ptype, false),
-                len: patches.len,
-            });
-            specs.push(ChildSpec {
-                dtype: ChildDType::Parent,
-                len: patches.len,
-            });
+            specs.push(ChildSpec::values(
+                ChildDType::Primitive(indices_ptype, false),
+                patches.len,
+            ));
+            specs.push(ChildSpec::values(ChildDType::Parent, patches.len));
             if let (Some(co_len), Some(co_ptype)) =
                 (patches.chunk_offsets_len, patches.chunk_offsets_ptype)
             {
-                specs.push(ChildSpec {
-                    dtype: ChildDType::Primitive(co_ptype, false),
-                    len: co_len,
-                });
+                specs.push(ChildSpec::values(
+                    ChildDType::Primitive(co_ptype, false),
+                    co_len,
+                ));
             }
         }
         // A trailing validity child is present iff the node has one more child than the patch
         // layout accounts for.
         if header.n_children == specs.len() + 1 {
-            specs.push(ChildSpec {
-                dtype: ChildDType::Bool(false),
-                len: header.len as u64,
-            });
+            specs.push(ChildSpec::values(
+                ChildDType::Bool(false),
+                header.len as u64,
+            ));
         }
         guest_ensure!(
             specs.len() == header.n_children,

@@ -31,6 +31,8 @@ use vortex_fastlanes::BitPackedData;
 use vortex_fsst::FSST;
 use vortex_fsst::fsst_compress;
 use vortex_fsst::fsst_train_compressor;
+use vortex_runend::RunEnd;
+use vortex_runend::RunEndArrayExt;
 use vortex_session::VortexSession;
 use vortex_session::registry::ReadContext;
 use vortex_wasm::register_wasm_encodings;
@@ -39,6 +41,8 @@ use vortex_wasm::register_wasm_encodings;
 const BITPACKED_KERNEL: &[u8] = include_bytes!("fixtures/bitpacked_kernel.wasm");
 /// The `vortex.fsst` kernel (`encodings/fsst/wasm`).
 const FSST_KERNEL: &[u8] = include_bytes!("fixtures/fsst_kernel.wasm");
+/// The `vortex.runend` kernel (`encodings/runend/wasm`).
+const RUNEND_KERNEL: &[u8] = include_bytes!("fixtures/runend_kernel.wasm");
 
 /// Serialize `array` exactly as a file would, then deserialize it in a session that has no native
 /// decoder for it — only the given wasm kernel.
@@ -80,6 +84,7 @@ fn native_session() -> VortexSession {
     let session = array_session();
     session.get::<ArraySession>().register(BitPacked);
     session.get::<ArraySession>().register(FSST);
+    session.get::<ArraySession>().register(RunEnd);
     session
 }
 
@@ -189,6 +194,170 @@ fn fsst_nullable_decodes_via_wasm() -> VortexResult<()> {
         FSST_KERNEL,
     )?;
     assert_arrays_eq!(decoded, array, &mut ctx);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Run-end: the structural case. The kernel never sees the values child — it only expands the run
+// ends into gather indices and names the child, so the host gathers it lazily. That is what lets
+// these tests cover dtypes the kernel contains no code for.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn runend_primitive_decodes_via_wasm() -> VortexResult<()> {
+    let session = native_session();
+    let mut ctx = session.create_execution_ctx();
+
+    let values: Vec<i32> = (0..4000).map(|i| (i / 37) % 11).collect();
+    let array = PrimitiveArray::new(Buffer::copy_from(&values), Validity::NonNullable).into_array();
+    let encoded = RunEnd::encode(array.clone(), &mut ctx)?;
+
+    let decoded = round_trip_via_wasm(
+        encoded.into_array(),
+        &session,
+        "vortex.runend",
+        RUNEND_KERNEL,
+    )?;
+    assert_arrays_eq!(decoded, array, &mut ctx);
+    Ok(())
+}
+
+#[test]
+fn runend_strings_decode_via_wasm() -> VortexResult<()> {
+    // The payoff of ChildMode::Reference: the kernel has no string code at all, and strings never
+    // enter guest memory. The native decoder needs a dedicated varbinview implementation for this.
+    let session = native_session();
+    let mut ctx = session.create_execution_ctx();
+
+    let strings: Vec<String> = (0..1200)
+        .map(|i| format!("region-{}", (i / 53) % 9))
+        .collect();
+    let array = VarBinViewArray::from_iter_str(strings.iter()).into_array();
+    // Run-end encode by hand: `RunEndArray::encode` only accepts primitives.
+    let mut ends: Vec<u64> = Vec::new();
+    let mut run_values: Vec<&String> = Vec::new();
+    for (i, s) in strings.iter().enumerate() {
+        if run_values.last().is_none_or(|prev| *prev != s) {
+            if i > 0 {
+                ends.push(i as u64);
+            }
+            run_values.push(s);
+        }
+    }
+    ends.push(strings.len() as u64);
+    let encoded = RunEnd::try_new(
+        PrimitiveArray::new(Buffer::copy_from(&ends), Validity::NonNullable).into_array(),
+        VarBinViewArray::from_iter_str(run_values.iter().map(|s| s.as_str())).into_array(),
+        &mut ctx,
+    )?;
+
+    let decoded = round_trip_via_wasm(
+        encoded.into_array(),
+        &session,
+        "vortex.runend",
+        RUNEND_KERNEL,
+    )?;
+    assert_arrays_eq!(decoded, array, &mut ctx);
+    Ok(())
+}
+
+#[test]
+fn runend_sliced_decodes_via_wasm() -> VortexResult<()> {
+    // A sliced run-end array carries a non-zero `offset`, which the kernel must apply when
+    // expanding run ends (mirroring `trimmed_ends_iter`).
+    let session = native_session();
+    let mut ctx = session.create_execution_ctx();
+
+    // Runs of 100, so an offset of 50 falls inside the first run (which
+    // `try_new_offset_length` requires: the first run end must not precede the offset).
+    let values: Vec<i32> = (0..3000).map(|i| (i / 100) % 7).collect();
+    let array = PrimitiveArray::new(Buffer::copy_from(&values), Validity::NonNullable).into_array();
+    let encoded = RunEnd::encode(array.clone(), &mut ctx)?;
+
+    // Build the sliced view directly so the `offset` field is definitely exercised.
+    let (start, stop) = (50usize, 2593usize);
+    let sliced = RunEnd::try_new_offset_length(
+        encoded.ends().clone(),
+        encoded.values().clone(),
+        start,
+        stop - start,
+        &mut ctx,
+    )?;
+    assert!(sliced.offset() > 0, "expected a non-zero run-end offset");
+    let expected = array.slice(start..stop)?;
+
+    let decoded = round_trip_via_wasm(
+        sliced.into_array(),
+        &session,
+        "vortex.runend",
+        RUNEND_KERNEL,
+    )?;
+    assert_arrays_eq!(decoded, expected, &mut ctx);
+    Ok(())
+}
+
+#[test]
+fn runend_nullable_decodes_via_wasm() -> VortexResult<()> {
+    // Run-end's output validity is the values' validity gathered through the same runs; the host
+    // `take` reproduces that without the kernel touching validity at all.
+    let session = native_session();
+    let mut ctx = session.create_execution_ctx();
+
+    let values: Vec<i32> = (0..2400).map(|i| (i / 31) % 9).collect();
+    let validity = Validity::from_iter((0..2400).map(|i| (i / 31) % 4 != 0));
+    let array = PrimitiveArray::new(Buffer::copy_from(&values), validity).into_array();
+    let encoded = RunEnd::encode(array.clone(), &mut ctx)?;
+
+    let decoded = round_trip_via_wasm(
+        encoded.into_array(),
+        &session,
+        "vortex.runend",
+        RUNEND_KERNEL,
+    )?;
+    assert_arrays_eq!(decoded, array, &mut ctx);
+    Ok(())
+}
+
+#[test]
+fn lying_kernel_errors_rather_than_aborting() -> VortexResult<()> {
+    // A kernel's child declarations and gather indices are untrusted file data. Point the run-end
+    // kernel at FSST-encoded bytes: its declared children will not match what is actually there.
+    // The requirement is that this surfaces as a VortexError — before this work the mismatch hit
+    // an `assert_eq!` inside `SerializedArray::decode` and aborted the process.
+    let session = native_session();
+    let mut ctx = session.create_execution_ctx();
+
+    let strings: Vec<String> = (0..64).map(|i| format!("value-{}", i % 8)).collect();
+    let array = VarBinViewArray::from_iter_str(strings.iter()).into_array();
+    let compressor = fsst_train_compressor(&array, &mut ctx)?;
+    let compressed = fsst_compress(&array, &compressor, &mut ctx)?.into_array();
+
+    let dtype = compressed.dtype().clone();
+    let len = compressed.len();
+    let array_ctx = ArrayContext::empty();
+    let serialized = compressed.serialize(&array_ctx, &session, &SerializeOptions::default())?;
+    let mut concat = ByteBufferMut::empty();
+    for buf in serialized {
+        concat.extend_from_slice(buf.as_ref());
+    }
+
+    // Register the run-end kernel under FSST's id, so the wrong decoder runs on these bytes.
+    let read_session = array_session();
+    register_wasm_encodings(
+        &read_session,
+        [(
+            "vortex.fsst".to_string(),
+            ByteBuffer::from(RUNEND_KERNEL.to_vec()),
+        )],
+    )?;
+
+    let result = SerializedArray::try_from(concat.freeze())?.decode(
+        &dtype,
+        len,
+        &ReadContext::new(array_ctx.to_ids()),
+        &read_session,
+    );
+    assert!(result.is_err(), "a mismatched kernel must not succeed");
     Ok(())
 }
 

@@ -80,6 +80,7 @@ exclude = [
     # wasm32 target, and excluded so they can carry their own size-optimized release profiles.
     "encodings/fastlanes/wasm",
     "encodings/fsst/wasm",
+    "encodings/runend/wasm",
 ]
 resolver = "3"
 

@@ -15,17 +15,39 @@ use crate::abi::ARROW_FLAG_NULLABLE;
 use crate::abi::PType;
 use crate::abi::SCHEMA_SIZE;
 use crate::abi::array;
+use crate::abi::decode_result;
 use crate::abi::schema;
 use crate::error::GuestError;
 use crate::error::GuestResult;
 use crate::host::alloc_bytes;
 
-/// A decoded array a kernel returns.
+/// What a kernel produces for a node.
+///
+/// Two shapes, because Vortex encodings come in two kinds. Encodings that compute *new element
+/// values* (bit-packing, FSST, zstd, delta) must materialize bytes. Encodings that merely
+/// **re-arrange** an existing child (run-end, dict) must not: materializing them would force the
+/// guest to reproduce a dtype it may not even be able to represent, and would copy the child
+/// through the sandbox twice for nothing. Those return [`Decoded::Take`] instead and let the host
+/// gather.
 pub enum Decoded {
-    /// A primitive array.
+    /// A materialized primitive array.
     Primitive(DecodedPrimitive),
-    /// A utf8 string array.
+    /// A materialized utf8 string array.
     Utf8(DecodedUtf8),
+    /// The output is a referenced child gathered by guest-computed indices.
+    Take(DecodedTake),
+}
+
+/// The output is child `values_slot`, gathered by `indices`.
+///
+/// The gathered child is declared [`ChildMode::Reference`](crate::node::ChildMode::Reference), so
+/// it never enters guest memory: its dtype may be anything, including nested types, and the host
+/// performs the gather lazily.
+pub struct DecodedTake {
+    /// The serialized child slot to gather from.
+    pub values_slot: u16,
+    /// One unsigned index per output element, each `< values.len()`.
+    pub indices: DecodedPrimitive,
 }
 
 /// A decoded primitive array. The values buffer must hold an entry at every position; null
@@ -59,26 +81,50 @@ pub struct DecodedUtf8 {
     pub validity: Option<Vec<u8>>,
 }
 
-/// Write a [`Decoded`] as Arrow C Data Interface structs in linear memory.
-///
-/// Returns a pointer to an 8-byte pair `[array_ptr: u32, schema_ptr: u32]` — the value a kernel's
-/// `vx_decode` returns to the host.
+/// Write a [`Decoded`] as a `vx_decode` result frame in linear memory (see
+/// [`decode_result`](crate::abi::decode_result)), returning its offset.
 pub fn write(decoded: &Decoded) -> i32 {
     match decoded {
-        Decoded::Primitive(primitive) => {
-            let values_ptr = alloc_bytes(&primitive.values);
-            let validity_ptr = primitive
-                .validity
-                .as_ref()
-                .map(|v| alloc_bytes(v))
-                .unwrap_or(0);
-            write_structs(
-                primitive.ptype.format_code(),
-                primitive.len,
-                primitive.nullable,
-                &[validity_ptr, values_ptr],
-            )
+        Decoded::Take(take) => {
+            let pair = write_primitive_structs(&take.indices);
+            let mut frame = Vec::with_capacity(16);
+            frame.extend_from_slice(&decode_result::TAG_TAKE.to_le_bytes());
+            frame.extend_from_slice(&u32::from(take.values_slot).to_le_bytes());
+            frame.extend_from_slice(&pair.0.to_le_bytes());
+            frame.extend_from_slice(&pair.1.to_le_bytes());
+            alloc_bytes(&frame) as i32
         }
+        other => {
+            let (array_ptr, schema_ptr) = write_materialized(other);
+            let mut frame = Vec::with_capacity(12);
+            frame.extend_from_slice(&decode_result::TAG_MATERIALIZED.to_le_bytes());
+            frame.extend_from_slice(&array_ptr.to_le_bytes());
+            frame.extend_from_slice(&schema_ptr.to_le_bytes());
+            alloc_bytes(&frame) as i32
+        }
+    }
+}
+
+/// Lay out the Arrow C structs for a materialized primitive, returning `(array_ptr, schema_ptr)`.
+fn write_primitive_structs(primitive: &DecodedPrimitive) -> (u32, u32) {
+    let values_ptr = alloc_bytes(&primitive.values);
+    let validity_ptr = primitive
+        .validity
+        .as_ref()
+        .map(|v| alloc_bytes(v))
+        .unwrap_or(0);
+    write_structs(
+        primitive.ptype.format_code(),
+        primitive.len,
+        primitive.nullable,
+        &[validity_ptr, values_ptr],
+    )
+}
+
+/// Lay out the Arrow C structs for a materialized output, returning `(array_ptr, schema_ptr)`.
+fn write_materialized(decoded: &Decoded) -> (u32, u32) {
+    match decoded {
+        Decoded::Primitive(primitive) => write_primitive_structs(primitive),
         Decoded::Utf8(utf8) => {
             let mut offset_bytes = Vec::with_capacity(utf8.offsets.len() * 4);
             for offset in &utf8.offsets {
@@ -94,12 +140,14 @@ pub fn write(decoded: &Decoded) -> i32 {
                 &[validity_ptr, offsets_ptr, values_ptr],
             )
         }
+        // `write` routes Take before calling this.
+        Decoded::Take(_) => (0, 0),
     }
 }
 
-/// Lay out the `ArrowSchema`/`ArrowArray` structs (plus the buffer-pointer table and the result
-/// pair) for an array whose buffers are already in linear memory.
-fn write_structs(format: &str, len: usize, nullable: bool, buffer_ptrs: &[u32]) -> i32 {
+/// Lay out the `ArrowSchema`/`ArrowArray` structs (plus the buffer-pointer table) for an array
+/// whose buffers are already in linear memory, returning `(array_ptr, schema_ptr)`.
+fn write_structs(format: &str, len: usize, nullable: bool, buffer_ptrs: &[u32]) -> (u32, u32) {
     let mut format_bytes = Vec::with_capacity(format.len() + 1);
     format_bytes.extend_from_slice(format.as_bytes());
     format_bytes.push(0);
@@ -127,10 +175,7 @@ fn write_structs(format: &str, len: usize, nullable: bool, buffer_ptrs: &[u32]) 
     array_buf[array::BUFFERS..array::BUFFERS + 4].copy_from_slice(&buffers_ptr.to_le_bytes());
     let array_ptr = alloc_bytes(&array_buf);
 
-    let mut pair = [0u8; 8];
-    pair[0..4].copy_from_slice(&array_ptr.to_le_bytes());
-    pair[4..8].copy_from_slice(&schema_ptr.to_le_bytes());
-    alloc_bytes(&pair) as i32
+    (array_ptr, schema_ptr)
 }
 
 /// A read-only view of a host-decoded child array delivered as Arrow C structs.

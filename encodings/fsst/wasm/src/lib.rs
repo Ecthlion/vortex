@@ -75,20 +75,20 @@ impl WasmEncoding for Fsst {
     fn children(header: &NodeHeader<'_>) -> GuestResult<Vec<ChildSpec>> {
         let meta = parse_metadata(header.metadata)?;
         let mut specs = Vec::with_capacity(3);
-        specs.push(ChildSpec {
-            dtype: ChildDType::Primitive(meta.uncompressed_lengths_ptype, false),
-            len: header.len as u64,
-        });
-        specs.push(ChildSpec {
-            dtype: ChildDType::Primitive(meta.codes_offsets_ptype, false),
-            // VarBin offsets are len + 1.
-            len: header.len as u64 + 1,
-        });
+        specs.push(ChildSpec::values(
+            ChildDType::Primitive(meta.uncompressed_lengths_ptype, false),
+            header.len as u64,
+        ));
+        // VarBin offsets are len + 1.
+        specs.push(ChildSpec::values(
+            ChildDType::Primitive(meta.codes_offsets_ptype, false),
+            header.len as u64 + 1,
+        ));
         if header.n_children == 3 {
-            specs.push(ChildSpec {
-                dtype: ChildDType::Bool(false),
-                len: header.len as u64,
-            });
+            specs.push(ChildSpec::values(
+                ChildDType::Bool(false),
+                header.len as u64,
+            ));
         }
         guest_ensure!(
             specs.len() == header.n_children,

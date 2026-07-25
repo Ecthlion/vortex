@@ -27,13 +27,48 @@ pub enum ChildDType {
     Utf8(bool),
 }
 
-/// One serialized child's dtype and logical length.
+/// How the guest intends to use a serialized child.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ChildMode {
+    /// The guest reads this child's element bytes. The host canonicalizes it and copies it into
+    /// guest memory, so its dtype must be one the guest can read.
+    Values,
+    /// The guest only *names* this child in its result (see [`Decoded::Take`](crate::arrow::Decoded)).
+    /// The host resolves it lazily in its own encoding and never canonicalizes or copies it —
+    /// so a referenced child may have **any** dtype, including nested ones the guest could
+    /// neither read nor reproduce.
+    Reference,
+}
+
+/// One serialized child's dtype, logical length, and access mode.
 #[derive(Clone, Copy)]
 pub struct ChildSpec {
     /// The child's dtype.
     pub dtype: ChildDType,
     /// The child's logical element count.
     pub len: u64,
+    /// Whether the guest reads this child or merely references it.
+    pub mode: ChildMode,
+}
+
+impl ChildSpec {
+    /// A child the guest will read.
+    pub fn values(dtype: ChildDType, len: u64) -> Self {
+        Self {
+            dtype,
+            len,
+            mode: ChildMode::Values,
+        }
+    }
+
+    /// A child the guest will only name in its result.
+    pub fn reference(dtype: ChildDType, len: u64) -> Self {
+        Self {
+            dtype,
+            len,
+            mode: ChildMode::Reference,
+        }
+    }
 }
 
 /// The parent (node) dtype, as far as the frame flags can describe it.
@@ -130,7 +165,11 @@ pub fn write_child_specs(specs: &[ChildSpec]) -> i32 {
             ChildDType::Bool(nullable) => (child_descriptor::TAG_BOOL, 0u8, nullable as u8),
             ChildDType::Utf8(nullable) => (child_descriptor::TAG_UTF8, 0u8, nullable as u8),
         };
-        out.extend_from_slice(&[tag, ptype, nullable, 0, 0, 0, 0, 0]);
+        let mode = match spec.mode {
+            ChildMode::Values => child_descriptor::MODE_VALUES,
+            ChildMode::Reference => child_descriptor::MODE_REFERENCE,
+        };
+        out.extend_from_slice(&[tag, ptype, nullable, mode, 0, 0, 0, 0]);
         out.extend_from_slice(&spec.len.to_le_bytes());
     }
     crate::host::alloc_bytes(&out) as i32
