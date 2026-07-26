@@ -5,13 +5,13 @@
 
 use alloc::vec::Vec;
 
-use crate::data::Decoded;
-use crate::data::write;
 use crate::error::GuestResult;
 use crate::node::ChildSpec;
 use crate::node::NodeHeader;
 use crate::node::NodeView;
 use crate::node::write_child_specs;
+use crate::plan::NodeId;
+use crate::plan::PlanBuilder;
 
 /// The wasm decoder for a single Vortex array encoding.
 ///
@@ -21,8 +21,13 @@ use crate::node::write_child_specs;
 ///
 /// 1. [`children`](Self::children) — from the metadata, declare each serialized child's dtype and
 ///    length so the host can decode them (natively, or recursively through another kernel).
-/// 2. [`decode`](Self::decode) — with buffers and decoded children in hand, produce the decoded
-///    output as a [`Decoded`].
+/// 2. [`decode`](Self::decode) — with buffers and decoded children in hand, describe the output as
+///    a [`plan`](crate::plan) over the node's children.
+///
+/// A kernel that computes new values ends its plan in a single
+/// [`materialized`](PlanBuilder::materialized) node. One that merely re-arranges a child should
+/// not materialize anything: name the child and say what to do with it, and its data never enters
+/// the sandbox at all.
 ///
 /// Wire it up with [`export_wasm_encoding!`](crate::export_wasm_encoding).
 pub trait WasmEncoding {
@@ -32,8 +37,8 @@ pub trait WasmEncoding {
     /// optional trailing children such as a validity bitmap.
     fn children(header: &NodeHeader<'_>) -> GuestResult<Vec<ChildSpec>>;
 
-    /// Decode the node into its canonical output.
-    fn decode(node: &NodeView<'_>) -> GuestResult<Decoded>;
+    /// Describe the node's decoded output as a plan, returning its root node.
+    fn decode(node: &NodeView<'_>, plan: &mut PlanBuilder) -> GuestResult<NodeId>;
 }
 
 fn input_slice(in_ptr: i32, in_len: i32) -> &'static [u8] {
@@ -56,8 +61,10 @@ pub fn __run_children<E: WasmEncoding>(in_ptr: i32, in_len: i32) -> i32 {
 /// Internal entry point invoked by [`export_wasm_encoding!`]. Not part of the stable API.
 #[doc(hidden)]
 pub fn __run_decode<E: WasmEncoding>(in_ptr: i32, in_len: i32) -> i32 {
-    match NodeView::parse(input_slice(in_ptr, in_len)).and_then(|node| E::decode(&node)) {
-        Ok(decoded) => write(&decoded),
+    let mut plan = PlanBuilder::new();
+    match NodeView::parse(input_slice(in_ptr, in_len)).and_then(|node| E::decode(&node, &mut plan))
+    {
+        Ok(root) => plan.finish(root),
         Err(_) => -1,
     }
 }

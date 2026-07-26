@@ -6,8 +6,8 @@
 //! Run-end is the canonical **structural** encoding: its output is not new data, it is the values
 //! child repeated. So this kernel never touches the values child at all. It declares it
 //! [`ChildMode::Reference`], expands the run ends into one gather index per output row, and
-//! returns [`Decoded::Take`] — the host resolves the child in its own encoding and gathers it
-//! lazily.
+//! returns the plan `take(child(VALUES), indices)` — the host resolves the child in its own
+//! encoding and gathers it lazily.
 //!
 //! That is what makes this kernel *dtype-agnostic*. The native decoder
 //! (`run_end_canonicalize`, `encodings/runend/src/array.rs`) needs a separate implementation per
@@ -38,14 +38,15 @@ use vortex_wasm_guest::abi::PType;
 use vortex_wasm_guest::data::ChildView;
 use vortex_wasm_guest::data::Decoded;
 use vortex_wasm_guest::data::DecodedPrimitive;
-use vortex_wasm_guest::data::DecodedTake;
 use vortex_wasm_guest::data::Validity;
+use vortex_wasm_guest::dtype::DTypeExpr;
 use vortex_wasm_guest::export_wasm_encoding;
 use vortex_wasm_guest::guest_ensure;
-use vortex_wasm_guest::node::ChildDType;
 use vortex_wasm_guest::node::ChildSpec;
 use vortex_wasm_guest::node::NodeHeader;
 use vortex_wasm_guest::node::NodeView;
+use vortex_wasm_guest::plan::NodeId;
+use vortex_wasm_guest::plan::PlanBuilder;
 use vortex_wasm_guest::proto::Field;
 use vortex_wasm_guest::proto::ProtoReader;
 
@@ -94,16 +95,16 @@ impl WasmEncoding for RunEnd {
         let mut specs = Vec::with_capacity(2);
         // The ends are read here, to build the gather indices.
         specs.push(ChildSpec::values(
-            ChildDType::Primitive(ends_ptype, false),
+            DTypeExpr::primitive(ends_ptype, false),
             meta.num_runs,
         ));
         // The values are only named: same dtype as the parent, whatever that is, and never copied
         // into guest memory.
-        specs.push(ChildSpec::reference(ChildDType::Parent, meta.num_runs));
+        specs.push(ChildSpec::reference(DTypeExpr::parent(), meta.num_runs));
         Ok(specs)
     }
 
-    fn decode(node: &NodeView<'_>) -> GuestResult<Decoded> {
+    fn decode(node: &NodeView<'_>, plan: &mut PlanBuilder) -> GuestResult<NodeId> {
         let meta = parse_metadata(node.metadata)?;
         let offset = meta.offset;
 
@@ -145,15 +146,17 @@ impl WasmEncoding for RunEnd {
             "run ends do not cover the array's length"
         );
 
-        Ok(Decoded::Take(DecodedTake {
-            values_slot: VALUES,
-            indices: DecodedPrimitive {
+        let values = plan.child(VALUES);
+        let indices = plan.materialized(
+            DTypeExpr::primitive(PType::U32, false),
+            Decoded::Primitive(DecodedPrimitive {
                 ptype: PType::U32,
                 len: node.len,
                 values: indices,
                 validity: Validity::NonNullable,
-            },
-        }))
+            }),
+        );
+        Ok(plan.take(values, indices))
     }
 }
 

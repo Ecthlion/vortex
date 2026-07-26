@@ -31,12 +31,14 @@ use vortex_wasm_guest::data::ChildView;
 use vortex_wasm_guest::data::Decoded;
 use vortex_wasm_guest::data::DecodedVarBinView;
 use vortex_wasm_guest::data::Validity;
+use vortex_wasm_guest::dtype::DTypeExpr;
 use vortex_wasm_guest::export_wasm_encoding;
 use vortex_wasm_guest::guest_ensure;
-use vortex_wasm_guest::node::ChildDType;
 use vortex_wasm_guest::node::ChildSpec;
 use vortex_wasm_guest::node::NodeHeader;
 use vortex_wasm_guest::node::NodeView;
+use vortex_wasm_guest::plan::NodeId;
+use vortex_wasm_guest::plan::PlanBuilder;
 use vortex_wasm_guest::proto::Field;
 use vortex_wasm_guest::proto::ProtoReader;
 
@@ -77,19 +79,16 @@ impl WasmEncoding for Fsst {
         let meta = parse_metadata(header.metadata)?;
         let mut specs = Vec::with_capacity(3);
         specs.push(ChildSpec::values(
-            ChildDType::Primitive(meta.uncompressed_lengths_ptype, false),
+            DTypeExpr::primitive(meta.uncompressed_lengths_ptype, false),
             header.len as u64,
         ));
         // VarBin offsets are len + 1.
         specs.push(ChildSpec::values(
-            ChildDType::Primitive(meta.codes_offsets_ptype, false),
+            DTypeExpr::primitive(meta.codes_offsets_ptype, false),
             header.len as u64 + 1,
         ));
         if header.n_children == 3 {
-            specs.push(ChildSpec::values(
-                ChildDType::Bool(false),
-                header.len as u64,
-            ));
+            specs.push(ChildSpec::values(DTypeExpr::bool(false), header.len as u64));
         }
         guest_ensure!(
             specs.len() == header.n_children,
@@ -98,7 +97,7 @@ impl WasmEncoding for Fsst {
         Ok(specs)
     }
 
-    fn decode(node: &NodeView<'_>) -> GuestResult<Decoded> {
+    fn decode(node: &NodeView<'_>, plan: &mut PlanBuilder) -> GuestResult<NodeId> {
         guest_ensure!(
             node.nbuffers() == 3,
             "fsst expects [symbols, symbol_lengths, codes] buffers"
@@ -164,11 +163,16 @@ impl WasmEncoding for Fsst {
         // Emit Vortex's canonical view layout directly. The previous Arrow-shaped output used i32
         // offsets, which the host imported as `VarBin` — not canonical — costing a second full
         // conversion of the whole heap on every string decode.
-        Ok(Decoded::VarBinView(DecodedVarBinView::from_heap(
-            values,
-            (0..node.len).map(|i| lengths.value_u64(i) as usize),
-            validity,
-        )?))
+        // The parent dtype carries through: FSST compresses both Utf8 and Binary, and the view
+        // layout alone does not distinguish them.
+        Ok(plan.materialized(
+            DTypeExpr::parent(),
+            Decoded::VarBinView(DecodedVarBinView::from_heap(
+                values,
+                (0..node.len).map(|i| lengths.value_u64(i) as usize),
+                validity,
+            )?),
+        ))
     }
 }
 

@@ -38,13 +38,14 @@ use vortex_wasm_guest::data::Decoded;
 use vortex_wasm_guest::data::DecodedPrimitive;
 use vortex_wasm_guest::data::Validity;
 use vortex_wasm_guest::data::ValidityView;
+use vortex_wasm_guest::dtype::DTypeExpr;
 use vortex_wasm_guest::export_wasm_encoding;
 use vortex_wasm_guest::guest_ensure;
-use vortex_wasm_guest::node::ChildDType;
 use vortex_wasm_guest::node::ChildSpec;
 use vortex_wasm_guest::node::NodeHeader;
 use vortex_wasm_guest::node::NodeView;
-use vortex_wasm_guest::node::ParentDType;
+use vortex_wasm_guest::plan::NodeId;
+use vortex_wasm_guest::plan::PlanBuilder;
 use vortex_wasm_guest::proto::Field;
 use vortex_wasm_guest::proto::ProtoReader;
 
@@ -118,15 +119,19 @@ impl WasmEncoding for BitPacked {
                 .indices_ptype
                 .ok_or(GuestError::new("patches missing indices ptype"))?;
             specs.push(ChildSpec::values(
-                ChildDType::Primitive(indices_ptype, false),
+                DTypeExpr::primitive(indices_ptype, false),
                 patches.len,
             ));
-            specs.push(ChildSpec::values(ChildDType::Parent, patches.len));
+            // Bit-packing's patch values are always the parent's own primitive type, and there are
+            // few of them, so reading them here costs less than the output-length index array a
+            // plan-level patch would need. Encodings whose patch values are *not* guest-readable
+            // should reference them and use `PlanBuilder::patch` instead.
+            specs.push(ChildSpec::values(DTypeExpr::parent(), patches.len));
             if let (Some(co_len), Some(co_ptype)) =
                 (patches.chunk_offsets_len, patches.chunk_offsets_ptype)
             {
                 specs.push(ChildSpec::values(
-                    ChildDType::Primitive(co_ptype, false),
+                    DTypeExpr::primitive(co_ptype, false),
                     co_len,
                 ));
             }
@@ -134,10 +139,7 @@ impl WasmEncoding for BitPacked {
         // A trailing validity child is present iff the node has one more child than the patch
         // layout accounts for.
         if header.n_children == specs.len() + 1 {
-            specs.push(ChildSpec::values(
-                ChildDType::Bool(false),
-                header.len as u64,
-            ));
+            specs.push(ChildSpec::values(DTypeExpr::bool(false), header.len as u64));
         }
         guest_ensure!(
             specs.len() == header.n_children,
@@ -146,9 +148,9 @@ impl WasmEncoding for BitPacked {
         Ok(specs)
     }
 
-    fn decode(node: &NodeView<'_>) -> GuestResult<Decoded> {
+    fn decode(node: &NodeView<'_>, plan: &mut PlanBuilder) -> GuestResult<NodeId> {
         let meta = parse_metadata(node.metadata)?;
-        let ParentDType::Primitive(ptype) = node.parent else {
+        let Some(ptype) = node.dtype()?.ptype() else {
             return Err(GuestError::new("bitpacked expects a primitive dtype"));
         };
         guest_ensure!(
@@ -261,12 +263,15 @@ impl WasmEncoding for BitPacked {
         };
         let _ = ValidityView::NonNullable;
 
-        Ok(Decoded::Primitive(DecodedPrimitive {
-            ptype,
-            len: node.len,
-            values,
-            validity,
-        }))
+        Ok(plan.materialized(
+            DTypeExpr::parent(),
+            Decoded::Primitive(DecodedPrimitive {
+                ptype,
+                len: node.len,
+                values,
+                validity,
+            }),
+        ))
     }
 }
 

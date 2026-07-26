@@ -30,6 +30,7 @@ wasmtime = { workspace = true }
 [dev-dependencies]
 fsst-rs = { workspace = true }
 futures = { workspace = true }
+rstest = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 vortex-array = { path = "../vortex-array", features = ["_test-harness"] }
 vortex-fastlanes = { workspace = true }

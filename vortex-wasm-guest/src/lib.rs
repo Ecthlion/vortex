@@ -25,15 +25,22 @@
 //! See `docs/design/wasm-encodings.md`.
 
 #![no_std]
+// Kernels only ever build for wasm32, where `usize` is 32 bits, so the `usize`/`u32`
+// conversions throughout the frame writers are lossless. Clippy evaluates the lint for
+// 64-bit pointer targets regardless, and `try_from` on every offset would be noise for a
+// branch that cannot be taken.
+#![expect(clippy::cast_possible_truncation)]
 
 extern crate alloc;
 
 pub mod abi;
 pub mod data;
+pub mod dtype;
 mod encoding;
 mod error;
 pub mod host;
 pub mod node;
+pub mod plan;
 pub mod proto;
 #[cfg(all(target_arch = "wasm32", feature = "runtime"))]
 mod runtime;

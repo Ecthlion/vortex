@@ -26,7 +26,6 @@ use vortex_array::arrays::VarBinViewArray;
 use vortex_array::arrays::bool::BoolArrayExt;
 use vortex_array::arrays::varbinview::BinaryView;
 use vortex_array::dtype::DType;
-use vortex_array::dtype::Nullability;
 use vortex_array::dtype::PType;
 use vortex_array::validity::Validity;
 use vortex_buffer::BitBuffer;
@@ -298,21 +297,6 @@ impl ArrayDescriptor {
         );
         Ok(array)
     }
-
-    /// Build an index array, requiring a non-nullable unsigned primitive.
-    pub(crate) fn build_indices(&self, mem: &[u8]) -> VortexResult<ArrayRef> {
-        vortex_ensure!(
-            self.shape == SHAPE_PRIMITIVE,
-            "gather indices must be a primitive array"
-        );
-        let ptype = PType::try_from(self.ptype as i32)
-            .map_err(|_| vortex_err!("kernel returned bad index ptype {}", self.ptype))?;
-        vortex_ensure!(
-            ptype.is_unsigned_int(),
-            "gather indices must be an unsigned integer, got {ptype}"
-        );
-        self.build(mem, &DType::Primitive(ptype, Nullability::NonNullable))
-    }
 }
 
 fn read_u32(mem: &[u8], off: usize) -> VortexResult<u32> {
@@ -337,6 +321,7 @@ fn copy_out(mem: &[u8], ptr: u32, len: usize) -> VortexResult<ByteBuffer> {
 mod tests {
     use vortex_array::VortexSessionExecute;
     use vortex_array::array_session;
+    use vortex_array::dtype::Nullability;
     use vortex_buffer::buffer;
 
     use super::*;

@@ -19,7 +19,6 @@ use alloc::vec::Vec;
 
 use crate::abi::PType;
 use crate::abi::child_entry;
-use crate::abi::decode_result;
 use crate::abi::shape;
 use crate::abi::validity;
 use crate::error::GuestError;
@@ -55,11 +54,12 @@ impl Validity {
     }
 }
 
-/// What a kernel produces for a node.
+/// An array the kernel built itself, for
+/// [`PlanBuilder::materialized`](crate::plan::PlanBuilder::materialized).
 ///
-/// Encodings that compute *new element values* (bit-packing, FSST, zstd) return a materialized
-/// variant. Encodings that merely **re-arrange** an existing child (run-end, dict) return
-/// [`Decoded::Take`], so the child never enters guest memory and may have any dtype.
+/// This is for encodings that compute *new element values* — bit-packing, FSST, zstd. Encodings
+/// that merely **re-arrange** an existing child should not build one at all: name the child in a
+/// plan instead, and it never enters guest memory and may have any dtype.
 pub enum Decoded {
     /// A materialized primitive array.
     Primitive(DecodedPrimitive),
@@ -67,8 +67,6 @@ pub enum Decoded {
     Bool(DecodedBool),
     /// A materialized string/binary array in Vortex's canonical view layout.
     VarBinView(DecodedVarBinView),
-    /// The output is a referenced child gathered by guest-computed indices.
-    Take(DecodedTake),
 }
 
 /// A materialized primitive array.
@@ -157,29 +155,10 @@ impl DecodedVarBinView {
     }
 }
 
-/// The output is child `values_slot`, gathered by `indices`.
-pub struct DecodedTake {
-    /// The serialized child slot to gather from.
-    pub values_slot: u16,
-    /// One unsigned index per output element, each `< values.len()`.
-    pub indices: DecodedPrimitive,
-}
-
-/// Write a [`Decoded`] as a `vx_decode` result frame, returning its offset.
-pub fn write(decoded: &Decoded) -> i32 {
-    let mut frame = Vec::new();
-    match decoded {
-        Decoded::Take(take) => {
-            frame.extend_from_slice(&decode_result::TAG_TAKE.to_le_bytes());
-            frame.extend_from_slice(&u32::from(take.values_slot).to_le_bytes());
-            write_array(&mut frame, DecodedRef::Primitive(&take.indices));
-        }
-        other => {
-            frame.extend_from_slice(&decode_result::TAG_MATERIALIZED.to_le_bytes());
-            write_array(&mut frame, other);
-        }
-    }
-    alloc_bytes(&frame) as i32
+/// Append a [`Decoded`] to `out` as an array descriptor (see
+/// [`array_descriptor`](crate::abi::array_descriptor)).
+pub(crate) fn write_array_into(out: &mut Vec<u8>, decoded: &Decoded) {
+    write_array(out, decoded);
 }
 
 /// A borrowed view of a materialized output, so the writer is shared between the direct and
@@ -196,13 +175,12 @@ impl<'a> From<&'a Decoded> for DecodedRef<'a> {
             Decoded::Primitive(p) => DecodedRef::Primitive(p),
             Decoded::Bool(b) => DecodedRef::Bool(b),
             Decoded::VarBinView(v) => DecodedRef::VarBinView(v),
-            // `write` routes Take before reaching here.
-            Decoded::Take(t) => DecodedRef::Primitive(&t.indices),
         }
     }
 }
 
-/// Append an array descriptor + buffer table to `frame` (see [`decode_result`]).
+/// Append an array descriptor + buffer table to `frame` (see
+/// [`array_descriptor`](crate::abi::array_descriptor)).
 fn write_array<'a>(frame: &mut Vec<u8>, decoded: impl Into<DecodedRef<'a>>) {
     let decoded = decoded.into();
     let (shape_tag, ptype, len, validity, buffers): (u8, u8, usize, &Validity, Vec<&[u8]>) =

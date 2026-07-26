@@ -147,20 +147,15 @@ The axis that matters is **not** leaf-vs-nested, and it is **not** buffers-vs-ch
 Roughly 20 of ~29 surveyed encodings are re-arranging. So the ABI's job is to let a kernel say
 *"my output is child N, gathered like this"* without ever touching child N.
 
-Hence two result shapes, and a per-child access mode:
+Hence a per-child access mode, and a result that is a **plan** rather than an array:
 
 | | value-producing | re-arranging |
 | --- | --- | --- |
 | child access | `ChildMode::Values` — canonicalized and copied into the sandbox | `ChildMode::Reference` — resolved lazily, in its own encoding, never copied |
-| result | `Decoded::Primitive` / `Bool` / `VarBinView` | `Decoded::Take { values_slot, indices }` |
+| result | a plan ending in one `Materialized` node | a plan of `Child` / `Take` / `Slice` / `Concat` / `Constant` / `SetValidity` nodes |
 | guest bytes moved | O(len) | 0 for the referenced child |
 
-`Take` is deliberately the *only* re-arrangement op today. The full vocabulary a complete design
-needs (`Patch`, `Mask`, `Concat`, `Slice`, `Constant`, …) is sketched in
-[Toward a plan vocabulary](#toward-a-plan-vocabulary), but each of those is blocked on host work,
-so shipping them speculatively would add untested attack surface. `Take` alone is enough to prove
-the model on run-end, and it composes forward: the eventual arena of plan nodes has `Take` as one
-node type.
+See [The plan vocabulary](#the-plan-vocabulary).
 
 ## The encoding trait (guest)
 
@@ -173,8 +168,8 @@ pub trait WasmEncoding {
     /// and access mode.
     fn children(header: &NodeHeader<'_>) -> GuestResult<Vec<ChildSpec>>;
 
-    /// Produce the node's output: either materialized bytes, or a gather over a referenced child.
-    fn decode(node: &NodeView<'_>) -> GuestResult<Decoded>;
+    /// Describe the node's output as a plan over its children, returning the root node.
+    fn decode(node: &NodeView<'_>, plan: &mut PlanBuilder) -> GuestResult<NodeId>;
 }
 
 export_wasm_encoding!(MyEncoding); // defines vx_alloc + vx_children + vx_decode
@@ -183,14 +178,16 @@ export_wasm_encoding!(MyEncoding); // defines vx_alloc + vx_children + vx_decode
 `ChildSpec::values(dtype, len)` declares a child the guest will read; `ChildSpec::reference(...)`
 declares one it will only *name*. Reference children are never canonicalized and never enter the
 sandbox, so **their dtype is unconstrained** — this is what lets one dtype-agnostic kernel cover
-cases the guest has no code for. `ChildDType` is `Parent` (the node's own dtype), primitive, bool,
-or utf8; `Parent` is all a re-arranging kernel needs, since it is naming rather than reading.
+cases the guest has no code for. The dtype is a [`DTypeExpr`](#the-dtype-channel): a literal, or a
+derivation such as `DTypeExpr::parent()`, which is all a re-arranging kernel needs since it is
+naming rather than reading.
 
-`NodeView` exposes the metadata bytes (parse with `proto`), the raw buffers (resident in guest
-memory, 8-byte aligned so they can be cast in place), and typed views of the `Values` children.
-`Decoded` is a materialized primitive/utf8 output, or `Decoded::Take`.
+`NodeView` exposes the node's full dtype, the metadata bytes (parse with `proto`), the raw buffers
+(resident in guest memory, 8-byte aligned so they can be cast in place), and typed views of the
+`Values` children. `PlanBuilder` hands back a `NodeId` per node, which is the only way to name
+one — so a kernel cannot express a dangling or cyclic reference even by accident.
 
-## Host / guest ABI (`abi_version = 2`)
+## Host / guest ABI (`abi_version = 3`)
 
 All integers little-endian; the single linear memory is exported as `"memory"`. The ABI is
 **push-based**: there are no host callbacks during decode.
@@ -202,16 +199,16 @@ Guest exports:
   misreading frames.
 - `vx_alloc(len) -> ptr` — bump allocation; the host uses it to place all inputs.
 - `vx_children(frame_ptr, frame_len) -> ptr` — input
-  `[u64 len][u32 flags][u32 n_children][u32 metadata_len][metadata]`; output `[u32 n]` + `n`
-  16-byte descriptors `[u8 tag][u8 ptype][u8 nullable][pad][u64 len]`.
+  `[u64 len][u32 flags][u32 n_children][u32 dtype_len][u32 metadata_len][dtype][metadata]`; output
+  `[u32 n]` + `n` descriptors `[u8 mode][pad x3][u32 dtype_len][u64 len][dtype]`.
 - `vx_decode(frame_ptr, frame_len) -> ptr` — input
-  `[u64 len][u32 flags][u32 metadata_len][u32 n_buffers][u32 n_children][metadata]`
-  `[(ptr,len) x buffers][(array_ptr,schema_ptr) x children]`; output points at the decoded
-  array's buffer-table descriptor (or, for a gather, the child slot plus the index array).
+  `[u64 len][u32 flags][u32 dtype_len][u32 metadata_len][u32 n_buffers][u32 n_children]`
+  `[dtype][metadata][(ptr,len) x buffers][child_entry x children]`; output points at a
+  [plan](#the-plan-vocabulary) frame.
 
-The `flags` word carries the parent dtype: bit 0 nullability, bits 8-15 the kind
-(primitive/bool/utf8), bits 16-23 the ptype. Negative returns are error codes; panics become
-traps, which the host surfaces as decode errors.
+`flags` bit 0 is the parent's nullability, kept because it is free and it is what most kernels
+branch on; the full type travels as a real [dtype expression](#the-dtype-channel). Negative
+returns are error codes; panics become traps, which the host surfaces as decode errors.
 
 ### Array boundary: Vortex's own layouts, not Arrow
 
@@ -272,8 +269,10 @@ validity]` children; unpacks 1024-element FastLanes chunks with the **same [`fas
 kernels the native encoding uses**. The packed buffer is **cast, not copied** (`vx_alloc`'s
 alignment guarantee + wasm32's little-endianness), and full in-range chunks unpack directly into
 the output — mirroring the native `decode_into` fast path — with scratch only for a sliced first
-chunk and a partial trailer. Patches overwrite `index - patches.offset`; the validity child
-carries through. Scope: 4-byte primitives — other widths are pure monomorphization at ~25 KB of
+chunk and a partial trailer. Patches overwrite `index - patches.offset` in the sandbox rather
+than going through `PlanBuilder::patch`: bit-packing's patch values are always the parent's own
+primitive type and there are few of them, so reading them costs less than the output-length index
+array a plan-level patch needs. The validity child carries through. Scope: 4-byte primitives — other widths are pure monomorphization at ~25 KB of
 unrolled unpack code per width family. Blob: **~51 KB** (~35 KB once fastlanes-rs's
 `num-traits` edge stops linking `std`; the unpack kernels dominate the rest).
 
@@ -289,9 +288,9 @@ sums of the uncompressed lengths are exactly the output utf8 offsets. Blob: **~2
 Run-end is the canonical re-arranging encoding, and its kernel decodes **nothing**. It declares
 `ends` as `Values` (to build indices) and `values` as `Reference`, expands the run ends into one
 `u32` gather index per row — mirroring `trimmed_ends_iter`, so a sliced array's `offset` is
-honoured — and returns `Decoded::Take`. The host resolves the values child in its own encoding and
-calls `ArrayRef::take`, which builds a lazy `DictArray`: no canonicalization, no copy, no
-materialized output.
+honoured — and returns the plan `take(child(VALUES), indices)`. The host resolves the values child
+in its own encoding and calls `ArrayRef::take`, which builds a lazy `DictArray`: no
+canonicalization, no copy, no materialized output.
 
 The consequences are worth stating plainly, because they are the argument for the whole design:
 
@@ -302,38 +301,126 @@ The consequences are worth stating plainly, because they are the argument for th
 - **Validity falls out.** Run-end's output validity is the values' validity gathered through the
   same runs; `take` reproduces that, so the kernel never touches validity.
 
-## Toward a plan vocabulary
+## The plan vocabulary
 
-`Take` is the first of what should become a small arena of dtype-agnostic ops — `Patch`, `Mask`,
-`Concat`, `Slice`, `Constant`, `Struct`/`List` construction — with materialized buffers as leaves,
-so hybrids compose (bitpacked would become `Patch{materialized, indices_child, values_child}`,
-which also removes its current 4-byte patch-value limit). An adversarial review of the full
-vocabulary returned *needs-rework*, and those findings gate the expansion:
+A kernel returns a **plan**, not an array: a small tree of operations over the node's children
+that the host evaluates. The design constraint that shapes everything else is that a kernel exists
+*precisely because the reader lacks that encoding*, so a plan may only name operations the reader
+is guaranteed to have. Every opcode is therefore one `vortex-array` constructor:
 
-- The arithmetic ops `for`/`bytebool`/`datetimeparts` would need (`WrappingAdd`, `Shl`, `Or`)
-  **do not exist in vortex-array**; the nearest are checked/saturating, which would be a
-  correctness regression. They must land natively first.
-- **Statistics must never be load-bearing for safety** — a malicious file can write a small
-  `Stat::Max`. Index bounds are therefore recomputed from the materialized buffer (see
-  `validate_indices`), never read from stats. This rule is already followed here.
-- Variadic nodes (`Concat`, `Struct`) break "acyclic by construction" if operands are an implicit
-  arena range, and blow a fixed node cap.
-- Child resolution must be **memoized**: `SerializedArrayChildren::get` re-decodes the subtree on
-  every call, so a plan naming one slot 250 times would decode it 250 times.
-- Every interior node's length must be bounded by the node length, or a small file can drive an
-  arbitrarily large host allocation.
-- The parent-dtype channel must become a real descriptor table (level-order, not preorder with a
-  `child0` index, which is wrong for nested dtypes) before `struct`/`list` kernels are possible.
+| op | operands | evaluated as | needed by |
+| --- | --- | --- | --- |
+| `Materialized` | dtype + array descriptor | `convert::ArrayDescriptor::build` | bit-packing, FSST, zstd, ALP — anything computing new values |
+| `Child` | slot | the serialized child, in its own encoding | every re-arranging encoding |
+| `Take` | base, indices | `ArrayRef::take` → `DictArray` | run-end, dict |
+| `Slice` | base, start, stop | `ArrayRef::slice` → `SliceArray` | windowed children |
+| `Concat` | parts… | `ChunkedArray::try_new` | chunked; and patching, below |
+| `Constant` | scalar, len | `ConstantArray::new` | sparse's fill value |
+| `SetValidity` | base, mask | `MaskedArray::try_new` | encodings storing validity as a separate child |
 
-## Other ABI gaps found by the survey (not yet fixed)
+Two ops that a first sketch had, and that turned out not to be needed:
 
-- **The parent dtype is 24 bits of frame flags.** Anything that is not primitive/bool/utf8 arrives
-  as `Other`. This is *fatal, not slow*, for `datetimeparts` (needs the Timestamp `TimeUnit` and
-  tz), `decimal`/`decimal_byte_parts` (precision/scale), and `fixed_size_list` (`list_size`).
+- **`Patch`** is not a primitive. `patch(base, indices, values)` is exactly
+  `take(concat[base, values], merged)`, where `merged[i]` is either `i` or `base.len() + j`. The
+  guest SDK offers `PlanBuilder::patch` as sugar that emits those three nodes, so kernel authors
+  get the ergonomic op while the host's trusted evaluator stays smaller by one case. `PatchedArray`
+  would not have served anyway: it is a lane-transposed FastLanes-specific structure with
+  chunk-local `u16` indices, not a general overlay.
+- **`RunEnd`/`Dict`** are not ops. They *are* the encodings a kernel is standing in for, so
+  requiring them of the host would defeat the purpose.
+
+### Why the wire format is flat
+
+The plan is a flat postorder array, not a nested tree:
+
+```text
+[u32 n_nodes][u32 root][u32 aux_len][u32 reserved]
+[node × n_nodes]        node = [u8 op][u8 flags][u16 pad][u32 a][u32 b][u32 c]
+[aux bytes]
+```
+
+A node may only reference nodes at a **lower index**. This is the whole safety argument, and it
+buys three things at once:
+
+1. **Cycles are unrepresentable**, not merely rejected.
+2. **Evaluation is a `for` loop** over a slot table — no recursion, so no depth to bound and no
+   host stack to overflow. A nested encoding would have handed an untrusted file a recursive
+   descent parser.
+3. **Sharing is free.** References are by index, so a node used twice is evaluated once; the plan
+   is a DAG.
+
+Payloads that do not fit in three `u32`s — 64-bit ranges, scalars, `Concat`'s operand list, a
+`Materialized` descriptor — live in a trailing `aux` blob.
+
+### What the host validates
+
+The plan is untrusted file data, so every one of these is checked, and none of them may rely on
+anything the file says about itself:
+
+| checked at | check |
+| --- | --- |
+| parse | node count ≤ 1024; root in range; opcode known; **every operand strictly backwards**; aux payloads present and in range |
+| `Take` | indices are non-nullable unsigned primitives, and **every index is recomputed** against the base's length |
+| `Slice` | `start ≤ stop ≤ base.len()` |
+| `Concat` | ≤ 1024 parts, all of one dtype |
+| `SetValidity` | mask is a non-nullable boolean of the base's length |
+| `Constant` | scalar dtype is null/bool/primitive; length within budget |
+| every node | running total of intermediate rows ≤ 64× the node's length |
+| root | length and dtype match the node being decoded |
+
+Two of these deserve their reasoning spelled out.
+
+**Index bounds are recomputed, never read from statistics.** `Stat::Max` is itself
+attacker-controlled file data. It matters here because `ArrayRef::take` builds a `DictArray`,
+whose constructor checks only that codes are integral — an out-of-range index would surface later
+as a panic or as data from beyond the child. (The same reasoning applies to `Patches::new`, which
+in release builds only *debug*-asserts sortedness and bounds-checks the last index; that is why
+patching goes through `take`, which validates every index, rather than through `Patches`.)
+
+**A plan is cheap to write and can describe expensive work.** Twelve `Concat` nodes describe an
+array 4096× the size of their input. The ops build lazy arrays, so nothing blows up during
+evaluation — but the cost is real once the scan canonicalizes, so the running output total is
+capped at a multiple of the node's own length.
+
+## The dtype channel
+
+ABI v2 gave the guest three bits of parent dtype: primitive, bool, utf8, or `Other`. Anything else
+was fatal, not slow — `datetimeparts` needs a Timestamp's `TimeUnit` and timezone, `decimal` needs
+precision and scale, `fixed_size_list` needs its size, and none of them could see any of it.
+
+v3 sends a real type, in a compact preorder encoding with a tag byte per node
+(`vortex-wasm-guest/src/dtype.rs` holds the grammar). It covers every `DType` variant.
+
+The part that makes it *complete* rather than merely wide is **derivations**. A literal is not
+always writable: extension types resolve through a host vtable registry, so no byte encoding lets
+a guest construct one. And a kernel generic over its parent does not *want* to name a concrete
+type. So a guest may instead write a path:
+
+```text
+Parent | Field(i, inner) | Element(inner) | Storage(inner) | Nullable(inner) | NonNullable(inner)
+```
+
+These compose — `NonNullable(Element(Field(1, Parent)))` is valid — and the host resolves them
+against a `DType` it already trusts. The kernel never holds the type, only a route to it. That is
+how the run-end kernel stays dtype-agnostic: it declares its values child as `Parent` and works
+over strings, decimals, structs, or any type added later, with no code.
+
+The direction is asymmetric on purpose: the host only ever writes literals, because it holds the
+real type and has nothing to derive from.
+
+## Remaining ABI gaps
+
 - **A kernel cannot *read* a string child.** Only primitive and boolean children are deliverable
   into the sandbox. `ChildMode::Reference` covers every re-arranging encoding (the child never
   enters the guest), so this only binds a hypothetical kernel that must inspect string bytes.
 - **Decimal output** (i128/i256) and its 16/32-byte buffer alignment are still unsupported.
+- **Arithmetic ops are still missing natively.** `for`/`bytebool`/`datetimeparts` would want
+  `WrappingAdd`, `Shl`, `Or` as plan nodes; `vortex-array`'s nearest equivalents are
+  checked/saturating, which would be a correctness regression. They must land natively before the
+  vocabulary can grow to cover those encodings.
+- **Child resolution is not memoized.** `SerializedArrayChildren::get` re-decodes the subtree on
+  every call, so a plan naming one slot 250 times decodes it 250 times. The node cap bounds this,
+  but a memo in the resolver closure is the real fix.
 - **`vortex.chunked` is inexpressible at any cost**: its per-chunk lengths are the *decoded
   contents of child 0*, and `children` is a single pure call with a mandatory length. Fixing it
   requires an iterative declaration phase, not more plan ops.
@@ -407,11 +494,11 @@ fixable upstream (`num-traits` default features in fastlanes-rs).
    including patches and nullable columns.
 4. **Structural decoding via `Take` (done):** the survey found that ~20 of ~29 encodings only
    re-arrange a child, so the guest must not materialize them. `ChildMode::{Values, Reference}`
-   lets a kernel name a child without the host canonicalizing or copying it, and `Decoded::Take`
-   lets the host perform the gather with `ArrayRef::take` (a lazy `DictArray`). Proven by the
-   `vortex.runend` kernel — 7.7 KB, dtype-agnostic, and correct over strings, which the native
-   decoder needs a dedicated implementation for. Untrusted gather indices are validated by
-   recomputing bounds, never from statistics.
+   lets a kernel name a child without the host canonicalizing or copying it, and a gather lets the
+   host perform the re-arrangement with `ArrayRef::take` (a lazy `DictArray`). Proven by the
+   `vortex.runend` kernel — dtype-agnostic, and correct over strings, which the native decoder
+   needs a dedicated implementation for. Untrusted gather indices are validated by recomputing
+   bounds, never from statistics.
 5. **Untrusted-input hardening (done):** `SerializedArray::decode` and the `ArrayChildren` blanket
    impl now return `VortexError` instead of `assert!`-ing, so a lying kernel cannot abort the
    process.
@@ -419,10 +506,16 @@ fixable upstream (`num-traits` default features in fastlanes-rs).
    writer, and loader-based registration at file-open — opt-in, file-scoped, and fetching only the
    kernels the reader actually lacks (see above). A `vx_abi_version` guest export makes a stale
    kernel a clear error rather than a misread frame.
-7. **Breadth (next):** the rest of the plan vocabulary (gated on the review findings above), the
-   full parent-dtype channel, a Vortex-shaped output vocabulary, more kernels (dict, ALP, ...),
-   kernel dedup + cross-file caching, CPU-time limits, and the `wasm32` fallback runtime for the
-   browser reader.
+7. **Plan vocabulary and dtype channel (done, ABI v3):** `vx_decode` now returns a flat postorder
+   [plan](#the-plan-vocabulary) — `Materialized`, `Child`, `Take`, `Slice`, `Concat`, `Constant`,
+   `SetValidity` — each opcode one `vortex-array` constructor, evaluated in a single non-recursive
+   forward pass with per-node validation and an output budget. Patching is guest-side sugar over
+   `take`+`concat` rather than a host primitive. The three-bit parent-kind tag became the full
+   [dtype channel](#the-dtype-channel), with derivations so a kernel can name types it cannot
+   construct.
+8. **Breadth (next):** more kernels (dict, ALP, sparse), the missing native arithmetic ops,
+   memoized child resolution, decimal output, kernel dedup + cross-file caching, CPU-time limits,
+   and the `wasm32` fallback runtime for the browser reader.
 
 Pushdown (filter/pruning into the kernel) is explicitly **out of scope** — WASM encodings only
 decompress; the engine filters on the decoded output.

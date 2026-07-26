@@ -10,10 +10,12 @@
 //! decoded array — so wasm-backed encodings are decode-only and nothing wasm-specific survives
 //! past deserialization.
 //!
-//! A kernel produces its output one of two ways. Value-producing encodings materialize bytes.
-//! Re-arranging encodings (run-end, dict, ...) instead name a child and a gather, which the host
-//! executes with `ArrayRef::take` — so the gathered child is never canonicalized, never copied
-//! into the sandbox, and may have any dtype, including ones the kernel could not represent.
+//! A kernel does not return an array, it returns a *plan* — a small tree of operations over the
+//! node's children that the host evaluates with its own lazy arrays.
+//! Value-producing encodings end their plan in one materialized node. Re-arranging encodings
+//! (run-end, dict, sparse, ...) name their children and say what to do with them, so those
+//! children are never canonicalized, never copied into the sandbox, and may have any dtype —
+//! including ones the kernel could not represent.
 //!
 //! Kernels never shadow native decoders: [`register_wasm_encodings`] skips any id already present
 //! in the session registry.
@@ -24,11 +26,9 @@ use vortex_array::ArrayId;
 use vortex_array::ArrayPlugin;
 use vortex_array::ArrayRef;
 use vortex_array::Canonical;
-use vortex_array::ExecutionCtx;
 use vortex_array::VortexSessionExecute;
 use vortex_array::buffer::BufferHandle;
 use vortex_array::dtype::DType;
-use vortex_array::match_each_unsigned_integer_ptype;
 use vortex_array::serde::ArrayChildren;
 use vortex_array::session::ArraySession;
 use vortex_buffer::ByteBuffer;
@@ -39,8 +39,8 @@ use vortex_error::vortex_err;
 use vortex_session::VortexSession;
 
 use crate::ChildMode;
-use crate::KernelOutput;
 use crate::WasmKernel;
+use crate::plan::PlanContext;
 
 /// An array encoding whose decoder is an embedded WebAssembly kernel.
 pub struct WasmEncodingPlugin {
@@ -122,34 +122,34 @@ impl ArrayPlugin for WasmEncodingPlugin {
             }
         }
 
-        let output = decoder.decode(dtype, len, metadata, &buffers, &values_children, &mut ctx)?;
+        let (plan, guest_mem) =
+            decoder.decode(dtype, len, metadata, &buffers, &values_children, &mut ctx)?;
 
-        let decoded = match output {
-            KernelOutput::Materialized(array) => array,
-            KernelOutput::Take {
-                values_slot,
-                indices,
-            } => {
-                let descriptor = descriptors.get(values_slot).ok_or_else(|| {
-                    vortex_err!(
-                        "wasm kernel for {} gathered child {values_slot}, but only {} were declared",
-                        self.id,
-                        descriptors.len()
-                    )
-                })?;
-                vortex_ensure!(
-                    descriptor.mode == ChildMode::Reference,
-                    "wasm kernel for {} gathered child {values_slot}, which it declared as Values",
-                    self.id
-                );
-                validate_indices(&indices, descriptor.len, len, &mut ctx)?;
-                // Resolve the gathered child in its own encoding — never canonicalized, never
-                // copied into the sandbox — and let Vortex gather it lazily.
-                children
-                    .get(values_slot, &descriptor.dtype, descriptor.len)?
-                    .take(indices)?
-            }
+        // Only the child slots the plan actually names get resolved, and each in its own encoding:
+        // a `Reference` child a plan does not mention costs nothing at all.
+        let id = self.id;
+        let mut resolve = |slot: usize| -> VortexResult<ArrayRef> {
+            let descriptor = descriptors.get(slot).ok_or_else(|| {
+                vortex_err!(
+                    "wasm kernel for {id} names child {slot}, but only {} were declared",
+                    descriptors.len()
+                )
+            })?;
+            vortex_ensure!(
+                descriptor.mode == ChildMode::Reference,
+                "wasm kernel for {id} names child {slot} in its plan, but declared it as Values"
+            );
+            children.get(slot, &descriptor.dtype, descriptor.len)
         };
+        let decoded = plan.evaluate(
+            &mut PlanContext {
+                dtype,
+                len,
+                child: &mut resolve,
+            },
+            &mut ctx,
+            &guest_mem,
+        )?;
 
         vortex_ensure!(
             decoded.len() == len,
@@ -165,53 +165,6 @@ impl ArrayPlugin for WasmEncodingPlugin {
         );
         Ok(decoded)
     }
-}
-
-/// Validate gather indices produced by an untrusted kernel.
-///
-/// Deliberately recomputes the maximum over the materialized index buffer rather than consulting
-/// `Stat::Max`: statistics are themselves attacker-controlled file data, so they must never be
-/// load-bearing for a safety property. This matters because `ArrayRef::take` builds a `DictArray`,
-/// whose constructor checks only that the codes are integral — an out-of-range index would
-/// otherwise surface later as a panic or garbage.
-fn validate_indices(
-    indices: &ArrayRef,
-    values_len: usize,
-    expected_len: usize,
-    ctx: &mut ExecutionCtx,
-) -> VortexResult<()> {
-    vortex_ensure!(
-        indices.len() == expected_len,
-        "wasm kernel produced {} gather indices, expected {expected_len}",
-        indices.len()
-    );
-    let DType::Primitive(ptype, _) = indices.dtype() else {
-        vortex_bail!(
-            "wasm gather indices must be primitive, got {}",
-            indices.dtype()
-        );
-    };
-    vortex_ensure!(
-        ptype.is_unsigned_int(),
-        "wasm gather indices must be an unsigned integer, got {ptype}"
-    );
-    vortex_ensure!(
-        !indices.dtype().is_nullable(),
-        "wasm gather indices must be non-nullable"
-    );
-
-    let primitive = indices.clone().execute::<Canonical>(ctx)?.into_primitive();
-    let in_bounds = match_each_unsigned_integer_ptype!(primitive.ptype(), |P| {
-        primitive
-            .as_slice::<P>()
-            .iter()
-            .all(|&i| (i as u128) < values_len as u128)
-    });
-    vortex_ensure!(
-        in_bounds,
-        "wasm gather index out of bounds for a child of length {values_len}"
-    );
-    Ok(())
 }
 
 /// Merge embedded kernels into `session`'s array-encoding registry, returning the ids actually

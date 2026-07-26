@@ -12,24 +12,22 @@
 //! 2. the host decodes those children (natively or through other kernels), copies the node's raw
 //!    buffers and the decoded children into guest memory, and calls `vx_decode` with everything in
 //!    one frame;
-//! 3. the guest returns its output as a Vortex buffer table, which the host turns back into an
-//!    array (see [`crate::convert`]) — or as a gather over a child it only named.
+//! 3. the guest returns a decode plan — a small tree of operations over the node's children,
+//!    which the host evaluates with its own lazy arrays.
 //!
 //! Kernels are untrusted file data. The runtime is `wasmtime` with its default Cranelift backend
 //! (not Winch/Pulley, which are less battle-tested); each decode runs in a fresh [`Store`] whose
 //! linear memory growth is capped via [`StoreLimits`]. CPU-time bounding (fuel / epoch
 //! interruption) is a planned follow-up — see `docs/design/wasm-encodings.md`.
 
-use vortex_array::ArrayRef;
 use vortex_array::Canonical;
 use vortex_array::ExecutionCtx;
 use vortex_array::dtype::DType;
-use vortex_array::dtype::Nullability;
-use vortex_array::dtype::PType;
 use vortex_buffer::ByteBuffer;
 use vortex_error::VortexError;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
+use vortex_error::vortex_ensure;
 use vortex_error::vortex_err;
 use wasmtime::Caller;
 use wasmtime::Engine;
@@ -52,10 +50,11 @@ use crate::abi::DECODE_EXPORT;
 use crate::abi::HOST_LOG_IMPORT;
 use crate::abi::HOST_MODULE;
 use crate::abi::MEMORY_EXPORT;
-use crate::convert::ArrayDescriptor;
 use crate::convert::CHILD_ENTRY_SIZE;
 use crate::convert::GuestMem;
 use crate::convert::write_child;
+use crate::dtype as dtype_codec;
+use crate::plan::Plan;
 
 /// Maximum linear memory a kernel may grow to in a single decode, as a coarse DoS guard against
 /// untrusted kernels. Generous enough for legitimate decodes (wasm32 memory tops out at 4 GiB); a
@@ -66,42 +65,26 @@ const MAX_GUEST_MEMORY_BYTES: usize = 1 << 30;
 const MAX_CHILDREN: usize = 4096;
 
 /// Frame flag bit 0: the parent dtype is nullable.
+///
+/// The full dtype now rides in its own length-prefixed blob; this bit is kept because it is free
+/// and it is what most kernels actually branch on.
 const FLAG_NULLABLE: u32 = 1;
-/// Frame flags bits 8-15: the parent dtype's kind (0 other, 1 primitive, 2 bool, 3 utf8).
-const PARENT_KIND_SHIFT: u32 = 8;
-/// Frame flags bits 16-23: the parent's `PType` prost discriminant (when primitive).
-const PARENT_PTYPE_SHIFT: u32 = 16;
 
 /// Encode the frame flags word for a node dtype.
 fn frame_flags(dtype: &DType) -> u32 {
-    let mut flags = if dtype.is_nullable() {
+    if dtype.is_nullable() {
         FLAG_NULLABLE
     } else {
         0
-    };
-    match dtype {
-        DType::Primitive(ptype, _) => {
-            flags |= 1 << PARENT_KIND_SHIFT;
-            flags |= (*ptype as u32) << PARENT_PTYPE_SHIFT;
-        }
-        DType::Bool(_) => flags |= 2 << PARENT_KIND_SHIFT,
-        DType::Utf8(_) => flags |= 3 << PARENT_KIND_SHIFT,
-        _ => {}
     }
-    flags
 }
 
-/// Child descriptor tags (see the guest SDK's `abi::child_descriptor`).
-const TAG_PARENT: u8 = 0;
-const TAG_PRIMITIVE: u8 = 1;
-const TAG_BOOL: u8 = 2;
-const TAG_UTF8: u8 = 3;
-const DESCRIPTOR_SIZE: usize = 16;
+/// Fixed part of a child descriptor (see the guest SDK's `abi::child_descriptor`).
+const DESCRIPTOR_HEADER: usize = 16;
 const MODE_REFERENCE: u8 = 1;
 
-/// Result frame tags (see the guest SDK's `abi::decode_result`).
-const RESULT_MATERIALIZED: u32 = 0;
-const RESULT_TAKE: u32 = 1;
+/// Cap on the bytes a kernel may spend describing one child's dtype.
+const MAX_CHILD_DTYPE_BYTES: usize = 4096;
 
 /// How the kernel intends to use a serialized child.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,7 +92,7 @@ pub enum ChildMode {
     /// The kernel reads this child's element bytes: the host canonicalizes it and copies it into
     /// guest memory.
     Values,
-    /// The kernel only names this child in its result: the host resolves it lazily, in its own
+    /// The kernel only names this child in its plan: the host resolves it lazily, in its own
     /// encoding, and never canonicalizes or copies it.
     Reference,
 }
@@ -125,22 +108,8 @@ pub struct ChildDescriptor {
     pub mode: ChildMode,
 }
 
-/// What a kernel produced for a node.
-pub enum KernelOutput {
-    /// The kernel materialized the decoded array itself.
-    Materialized(ArrayRef),
-    /// The output is the child at `values_slot` gathered by `indices`. The host performs the
-    /// gather, so the gathered child never crosses the sandbox boundary and may have any dtype.
-    Take {
-        /// The serialized child slot to gather from.
-        values_slot: usize,
-        /// One unsigned index per output element.
-        indices: ArrayRef,
-    },
-}
-
-/// Store state for a single decode: only the resource limiter (the v2 ABI has no host callbacks
-/// that carry state).
+/// Store state for a single decode: only the resource limiter (the ABI has no host callbacks that
+/// carry state).
 struct HostState {
     limits: StoreLimits,
 }
@@ -274,7 +243,7 @@ impl WasmKernel {
 }
 
 /// A live kernel instance for decoding one serialized array node: first ask it which children the
-/// node has ([`children`](Self::children)), decode them, then run [`decode`](Self::decode).
+/// node has ([`children`](Self::children)), decode them, then run the decode step.
 pub struct WasmDecoder {
     instance: KernelInstance,
 }
@@ -289,11 +258,14 @@ impl WasmDecoder {
         n_children: usize,
         metadata: &[u8],
     ) -> VortexResult<Vec<ChildDescriptor>> {
-        let mut frame = Vec::with_capacity(20 + metadata.len());
+        let dtype_bytes = dtype_codec::encode(dtype)?;
+        let mut frame = Vec::with_capacity(24 + dtype_bytes.len() + metadata.len());
         frame.extend_from_slice(&(len as u64).to_le_bytes());
         frame.extend_from_slice(&frame_flags(dtype).to_le_bytes());
         frame.extend_from_slice(&(u32::try_from(n_children)?).to_le_bytes());
+        frame.extend_from_slice(&(u32::try_from(dtype_bytes.len())?).to_le_bytes());
         frame.extend_from_slice(&(u32::try_from(metadata.len())?).to_le_bytes());
+        frame.extend_from_slice(&dtype_bytes);
         frame.extend_from_slice(metadata);
 
         let frame_ptr = self.instance.upload(&frame)?;
@@ -321,7 +293,10 @@ impl WasmDecoder {
     /// Decode the node: `metadata` and `buffers` are its serialized parts, `children` the decoded
     /// [`ChildMode::Values`] child arrays (in declaration order — `Reference` children are absent,
     /// because they never enter guest memory).
-    pub fn decode(
+    ///
+    /// Returns the kernel's plan, which the caller evaluates once it can resolve the node's
+    /// serialized children.
+    pub(crate) fn decode(
         &mut self,
         dtype: &DType,
         len: usize,
@@ -329,7 +304,7 @@ impl WasmDecoder {
         buffers: &[ByteBuffer],
         children: &[Canonical],
         ctx: &mut ExecutionCtx,
-    ) -> VortexResult<KernelOutput> {
+    ) -> VortexResult<(Plan, Vec<u8>)> {
         // Copy the decoded `Values` children into guest memory as fixed-size entries.
         let mut child_entries = Vec::with_capacity(children.len());
         for canonical in children {
@@ -347,14 +322,20 @@ impl WasmDecoder {
         }
 
         // Build the decode frame and run the kernel.
+        let dtype_bytes = dtype_codec::encode(dtype)?;
         let mut frame = Vec::with_capacity(
-            24 + metadata.len() + buffers.len() * 8 + child_entries.len() * CHILD_ENTRY_SIZE,
+            28 + dtype_bytes.len()
+                + metadata.len()
+                + buffers.len() * 8
+                + child_entries.len() * CHILD_ENTRY_SIZE,
         );
         frame.extend_from_slice(&(len as u64).to_le_bytes());
         frame.extend_from_slice(&frame_flags(dtype).to_le_bytes());
+        frame.extend_from_slice(&(u32::try_from(dtype_bytes.len())?).to_le_bytes());
         frame.extend_from_slice(&(u32::try_from(metadata.len())?).to_le_bytes());
         frame.extend_from_slice(&(u32::try_from(buffers.len())?).to_le_bytes());
         frame.extend_from_slice(&(u32::try_from(child_entries.len())?).to_le_bytes());
+        frame.extend_from_slice(&dtype_bytes);
         frame.extend_from_slice(metadata);
         for (ptr, buffer_len) in &buffer_entries {
             frame.extend_from_slice(&ptr.to_le_bytes());
@@ -377,35 +358,14 @@ impl WasmDecoder {
             vortex_bail!("wasm kernel {DECODE_EXPORT} returned error code {result_ptr}");
         }
 
-        // The result frame is [u32 tag] followed by a tag-specific body.
-        let mut header = [0u8; 4];
-        self.instance
-            .memory
-            .read(&self.instance.store, result_ptr as usize, &mut header)
-            .map_err(|e| vortex_err!("failed to read result tag: {e}"))?;
-        let tag = u32::from_le_bytes(header);
-
+        // The result is a plan frame. Parsing checks its structure — node count, opcodes, and
+        // that every operand points strictly backwards; the length and dtype checks happen when
+        // it is evaluated, where the arrays exist.
         let mem = self.instance.memory.data(&self.instance.store);
-
-        match tag {
-            RESULT_MATERIALIZED => {
-                let (descriptor, _) = ArrayDescriptor::parse(mem, result_ptr as usize + 4)?;
-                Ok(KernelOutput::Materialized(descriptor.build(mem, dtype)?))
-            }
-            RESULT_TAKE => {
-                let bytes: [u8; 4] = mem
-                    .get(result_ptr as usize + 4..result_ptr as usize + 8)
-                    .and_then(|slice| slice.try_into().ok())
-                    .ok_or_else(|| vortex_err!("truncated take result"))?;
-                let slot = u32::from_le_bytes(bytes);
-                let (descriptor, _) = ArrayDescriptor::parse(mem, result_ptr as usize + 8)?;
-                Ok(KernelOutput::Take {
-                    values_slot: slot as usize,
-                    indices: descriptor.build_indices(mem)?,
-                })
-            }
-            other => vortex_bail!("wasm kernel returned unknown result tag {other}"),
-        }
+        let plan = Plan::parse(mem, result_ptr as usize)?;
+        // The plan's `Materialized` nodes point at buffers in guest memory, which dies with this
+        // instance, so the caller gets a snapshot to build them from.
+        Ok((plan, mem.to_vec()))
     }
 }
 
@@ -423,46 +383,56 @@ impl KernelInstance {
         Ok(ptr)
     }
 
-    /// Parse the `vx_children` result: `[u32 n][16-byte descriptors…]`.
+    /// Parse the `vx_children` result: `[u32 n]` then `n` variable-length descriptors, each a
+    /// fixed header followed by a dtype expression resolved against `parent`.
     fn read_descriptors(&mut self, ptr: u32, parent: &DType) -> VortexResult<Vec<ChildDescriptor>> {
-        let mut count = [0u8; 4];
-        self.memory
-            .read(&self.store, ptr as usize, &mut count)
-            .map_err(|e| vortex_err!("failed to read child descriptors: {e}"))?;
-        let n = u32::from_le_bytes(count) as usize;
-        if n > MAX_CHILDREN {
-            vortex_bail!("wasm kernel declared too many children: {n}");
-        }
+        let mem = self.memory.data(&self.store);
+        let start = ptr as usize;
+        let count = mem
+            .get(start..start + 4)
+            .ok_or_else(|| vortex_err!("failed to read the child descriptor count"))?;
+        let n = usize::try_from(u32::from_le_bytes(
+            count
+                .try_into()
+                .map_err(|_| vortex_err!("truncated child descriptor count"))?,
+        ))?;
+        vortex_ensure!(
+            n <= MAX_CHILDREN,
+            "wasm kernel declared too many children: {n}"
+        );
 
-        let mut bytes = vec![0u8; n * DESCRIPTOR_SIZE];
-        self.memory
-            .read(&self.store, ptr as usize + 4, &mut bytes)
-            .map_err(|e| vortex_err!("failed to read child descriptors: {e}"))?;
-
+        let mut offset = start + 4;
         (0..n)
-            .map(|i| {
-                let d = &bytes[i * DESCRIPTOR_SIZE..(i + 1) * DESCRIPTOR_SIZE];
-                let nullability = Nullability::from(d[2] != 0);
-                let dtype = match d[0] {
-                    TAG_PARENT => parent.clone(),
-                    TAG_PRIMITIVE => {
-                        let ptype = PType::try_from(d[1] as i32)
-                            .map_err(|_| vortex_err!("bad child ptype {}", d[1]))?;
-                        DType::Primitive(ptype, nullability)
-                    }
-                    TAG_BOOL => DType::Bool(nullability),
-                    TAG_UTF8 => DType::Utf8(nullability),
-                    other => vortex_bail!("bad child descriptor tag {other}"),
-                };
-                let mode = if d[3] == MODE_REFERENCE {
+            .map(|_| {
+                let header = mem
+                    .get(offset..offset + DESCRIPTOR_HEADER)
+                    .ok_or_else(|| vortex_err!("truncated child descriptor"))?;
+                let mode = if header[0] == MODE_REFERENCE {
                     ChildMode::Reference
                 } else {
                     ChildMode::Values
                 };
-                let len_bytes: [u8; 8] = d[8..16]
-                    .try_into()
-                    .map_err(|_| vortex_err!("truncated child descriptor"))?;
-                let len = usize::try_from(u64::from_le_bytes(len_bytes))?;
+                let dtype_len = usize::try_from(u32::from_le_bytes(
+                    header[4..8]
+                        .try_into()
+                        .map_err(|_| vortex_err!("truncated child descriptor"))?,
+                ))?;
+                vortex_ensure!(
+                    dtype_len <= MAX_CHILD_DTYPE_BYTES,
+                    "a kernel spent {dtype_len} bytes describing one child's dtype, over the \
+                     {MAX_CHILD_DTYPE_BYTES} allowed"
+                );
+                let len = usize::try_from(u64::from_le_bytes(
+                    header[8..16]
+                        .try_into()
+                        .map_err(|_| vortex_err!("truncated child descriptor"))?,
+                ))?;
+                offset += DESCRIPTOR_HEADER;
+                let expr = mem
+                    .get(offset..offset + dtype_len)
+                    .ok_or_else(|| vortex_err!("truncated child dtype expression"))?;
+                let (dtype, _) = dtype_codec::decode(expr, parent)?;
+                offset += dtype_len;
                 Ok(ChildDescriptor { dtype, len, mode })
             })
             .collect()
