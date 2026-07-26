@@ -55,6 +55,7 @@ pure decode libraries so semantics match by construction:
 | `encodings/fastlanes/wasm` | `fastlanes.bitpacked` | the [`fastlanes`] crate's unpack kernels |
 | `encodings/runend/wasm` | `vortex.runend` | nothing — it gathers instead of decoding (5.9 KB) |
 | `encodings/fsst/wasm` | `vortex.fsst` | [`fsst`] (fsst-rs)'s `Decompressor` |
+| `encodings/experimental/onpair/wasm` | `vortex.onpair` | the [`onpair`] crate's `decompress_into` |
 
 The kernel crates are workspace-excluded (they carry their own size-optimized release profiles
 and build standalone for `wasm32-unknown-unknown`); the parity contract with the native encoding
@@ -308,6 +309,33 @@ rebuilds the symbol table with `fsst::Symbol::from_slice` and bulk-decompresses 
 heap with **the same [`fsst`] crate `Decompressor` the native canonical path uses**; the prefix
 sums of the uncompressed lengths are exactly the output utf8 offsets. Blob: **~26 KB**.
 
+### `vortex.onpair` (`encodings/experimental/onpair/wasm`)
+
+OnPair is FSST-shaped — a trained dictionary in buffer 0, a stream of fixed-width codes indexing
+it, per-row code boundaries, per-row uncompressed lengths — so its kernel is the same
+*value-producing* shape and returns one `Materialized` node. Two things about it are worth
+recording, because neither was true of the first two kernels.
+
+**Every child ptype comes from the metadata.** The four integer children flow through the ordinary
+cascading compressor, which narrows them: `codes` to U8 when `bits <= 8`, `dict_offsets` to U16 when
+the dictionary is small. The recorded ptype is the only thing that says how wide they are on disk,
+and the kernel widens them back to the `u16`/`u32` the decoder's `Parts` wants. A kernel that
+assumed the natural widths would misread a well-formed file.
+
+**The decoder was already written for untrusted input.** `onpair::Parts` is built by struct literal
+from deserialized bytes, so the crate provides `Parts::validate` — dictionary offsets strictly
+increasing, no token over `MAX_TOKEN_SIZE`, the trailing decoder padding present, every code in
+range. The kernel calls it once before decoding, which is what turns a corrupt file into a clean
+error rather than a guest panic the host can only report as an opaque trap. It also cross-checks the
+sum of `uncompressed_lengths` against `decompressed_len(parts)`, since those two independently
+describe the same output and only agree if the file is honest. Blob: **~28 KB**.
+
+The one wart is a dependency, not a design problem: `onpair` links `rand` for dictionary *training*,
+which pulls `getrandom`, which refuses to build for `wasm32-unknown-unknown` without a backend. The
+kernel crate selects the custom backend in `.cargo/config.toml` and supplies a shim that always
+fails, since a decoder never draws randomness. A `train`/`compress` feature gate upstream would
+remove it.
+
 ### `vortex.runend` (`encodings/runend/wasm`) — the structural case
 
 Run-end is the canonical re-arranging encoding, and its kernel decodes **nothing**. It declares
@@ -521,6 +549,16 @@ real type and has nothing to derive from.
 - **`vortex.chunked` is inexpressible at any cost**: its per-chunk lengths are the *decoded
   contents of child 0*, and `children` is a single pure call with a mandatory length. Fixing it
   requires an iterative declaration phase, not more plan ops.
+- **`children` cannot request a row window of a child.** `ChildSpec` carries a dtype, a length, and
+  an access mode, so a kernel that needs only part of a child still gets all of it. `vortex.onpair`
+  is the live case: `codes_offsets` bounds the run of `codes` belonging to the rows present, and the
+  native path point-looks-up those two boundaries and slices `codes` before materializing it. The
+  kernel slices the same window, but only after the host has already decoded and copied the whole
+  child in. Measured on a 161-of-400-row slice, the serialized array is 78% of the full array's
+  bytes rather than 40%, so the over-read is most of the codes stream. This is the `chunked` problem
+  in a milder form — the bound lives inside another child, which the single pure `vx_children` call
+  cannot read — and it wants the same fix: a second declaration round, or a `ChildSpec` row range
+  the host applies with `slice` before canonicalizing.
 
 ## Runtime choice: `wasmtime`
 
@@ -610,7 +648,12 @@ fixable upstream (`num-traits` default features in fastlanes-rs).
    `take`+`concat` rather than a host primitive. Types cross in the full
    [dtype channel](#the-dtype-channel), with derivations so a kernel can name types it cannot
    construct.
-8. **Breadth (next):** more kernels (dict, ALP, sparse), the missing native arithmetic ops,
+8. **A fourth kernel, `vortex.onpair` (done):** the first kernel written *against* the settled ABI
+   rather than alongside it, and it needed no ABI change — FSST's shape, so `Materialized` and the
+   dtype channel were already enough. What it did surface is the child-windowing gap below, plus a
+   dependency wart: `onpair` links `rand` for training, so the kernel crate has to select
+   `getrandom`'s custom backend to build for wasm32 at all.
+9. **Breadth (next):** more kernels (dict, ALP, sparse), the missing native arithmetic ops,
    memoized child resolution, decimal output, kernel dedup + cross-file caching, CPU-time limits,
    and the `wasm32` fallback runtime for the browser reader.
 
@@ -632,3 +675,4 @@ decompress; the engine filters on the decoded output.
 [`WasmEncoding`]: ../../vortex-wasm-guest/src/encoding.rs
 [`fastlanes`]: https://crates.io/crates/fastlanes
 [`fsst`]: https://crates.io/crates/fsst-rs
+[`onpair`]: https://crates.io/crates/onpair

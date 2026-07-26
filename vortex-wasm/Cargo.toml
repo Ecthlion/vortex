@@ -38,6 +38,7 @@ vortex-runend = { workspace = true }
 vortex-fsst = { workspace = true }
 vortex-io = { workspace = true, features = ["tokio"] }
 vortex-layout = { workspace = true }
+vortex-onpair = { workspace = true }
 
 [lints]
 workspace = true

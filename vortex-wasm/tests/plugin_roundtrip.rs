@@ -33,6 +33,9 @@ use vortex_fastlanes::BitPackedData;
 use vortex_fsst::FSST;
 use vortex_fsst::fsst_compress;
 use vortex_fsst::fsst_train_compressor;
+use vortex_onpair::DEFAULT_DICT12_CONFIG;
+use vortex_onpair::OnPair;
+use vortex_onpair::onpair_compress;
 use vortex_runend::RunEnd;
 use vortex_runend::RunEndArrayExt;
 use vortex_session::VortexSession;
@@ -45,6 +48,8 @@ const BITPACKED_KERNEL: &[u8] = include_bytes!("fixtures/bitpacked_kernel.wasm")
 const FSST_KERNEL: &[u8] = include_bytes!("fixtures/fsst_kernel.wasm");
 /// The `vortex.runend` kernel (`encodings/runend/wasm`).
 const RUNEND_KERNEL: &[u8] = include_bytes!("fixtures/runend_kernel.wasm");
+/// The `vortex.onpair` kernel (`encodings/experimental/onpair/wasm`).
+const ONPAIR_KERNEL: &[u8] = include_bytes!("fixtures/onpair_kernel.wasm");
 
 /// Serialize `array` exactly as a file would, then deserialize it in a session that has no native
 /// decoder for it — only the given wasm kernel.
@@ -87,6 +92,7 @@ fn native_session() -> VortexSession {
     session.get::<ArraySession>().register(BitPacked);
     session.get::<ArraySession>().register(FSST);
     session.get::<ArraySession>().register(RunEnd);
+    session.get::<ArraySession>().register(OnPair);
     session
 }
 
@@ -360,6 +366,70 @@ fn lying_kernel_errors_rather_than_aborting() -> VortexResult<()> {
         &read_session,
     );
     assert!(result.is_err(), "a mismatched kernel must not succeed");
+    Ok(())
+}
+
+#[test]
+fn onpair_decodes_via_wasm() -> VortexResult<()> {
+    let session = native_session();
+    let mut ctx = session.create_execution_ctx();
+
+    // Repetitive short strings: what OnPair's pair-based dictionary is trained for.
+    let strings: Vec<String> = (0..512)
+        .map(|i| format!("/api/v2/orders/{}/items/{}", i % 64, i % 9))
+        .collect();
+    let array = VarBinViewArray::from_iter_str(strings.iter()).into_array();
+    let compressed = onpair_compress(&array, DEFAULT_DICT12_CONFIG, &mut ctx)?;
+
+    let decoded = round_trip_via_wasm(
+        compressed.into_array(),
+        &session,
+        "vortex.onpair",
+        ONPAIR_KERNEL,
+    )?;
+    assert_arrays_eq!(decoded, array, &mut ctx);
+    Ok(())
+}
+
+#[test]
+fn onpair_nullable_decodes_via_wasm() -> VortexResult<()> {
+    let session = native_session();
+    let mut ctx = session.create_execution_ctx();
+
+    let strings: Vec<Option<String>> = (0..256)
+        .map(|i| (i % 5 != 0).then(|| format!("user-{}-region-{}", i % 32, i % 6)))
+        .collect();
+    let array =
+        VarBinViewArray::from_iter_nullable_str(strings.iter().map(|s| s.as_deref())).into_array();
+    let compressed = onpair_compress(&array, DEFAULT_DICT12_CONFIG, &mut ctx)?;
+
+    let decoded = round_trip_via_wasm(
+        compressed.into_array(),
+        &session,
+        "vortex.onpair",
+        ONPAIR_KERNEL,
+    )?;
+    assert_arrays_eq!(decoded, array, &mut ctx);
+    Ok(())
+}
+
+/// A sliced OnPair array keeps the whole `codes` child and narrows only `codes_offsets`, so the
+/// kernel must decode the window those boundaries delimit rather than the whole stream.
+#[test]
+fn onpair_sliced_decodes_via_wasm() -> VortexResult<()> {
+    let session = native_session();
+    let mut ctx = session.create_execution_ctx();
+
+    let strings: Vec<String> = (0..400)
+        .map(|i| format!("shard-{}/part-{}.parquet", i % 48, i % 11))
+        .collect();
+    let array = VarBinViewArray::from_iter_str(strings.iter()).into_array();
+    let compressed = onpair_compress(&array, DEFAULT_DICT12_CONFIG, &mut ctx)?;
+    let sliced = compressed.into_array().slice(137..298)?;
+    let expected = VarBinViewArray::from_iter_str(strings[137..298].iter()).into_array();
+
+    let decoded = round_trip_via_wasm(sliced, &session, "vortex.onpair", ONPAIR_KERNEL)?;
+    assert_arrays_eq!(decoded, expected, &mut ctx);
     Ok(())
 }
 

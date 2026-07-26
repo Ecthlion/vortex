@@ -11993,6 +11993,7 @@ dependencies = [
  "vortex-fsst",
  "vortex-io",
  "vortex-layout",
+ "vortex-onpair",
  "vortex-runend",
  "vortex-session",
  "wasmtime",

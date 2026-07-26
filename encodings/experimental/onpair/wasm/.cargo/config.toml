@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright the Vortex contributors
+
+# `getrandom` has no backend for wasm32-unknown-unknown and refuses to compile without one. It is
+# reached only through `rand`, which `onpair` links for dictionary *training* — code a decoder
+# kernel never calls. Select the custom backend and satisfy it with the shim in `src/lib.rs`.
+[build]
+rustflags = ['--cfg', 'getrandom_backend="custom"']
