@@ -12,10 +12,10 @@
 ///
 /// The host refuses to run a kernel whose recorded ABI version it does not understand.
 ///
-/// Version 3 replaced the two fixed result shapes with a decode plan and the three-bit
-/// parent-kind tag with the full [`crate::dtype`] channel. Both are wire-format changes, so
-/// a v2 kernel is rejected rather than misread.
-pub const ABI_VERSION: u32 = 3;
+/// The frame layouts, the decode plan encoding, and the [`crate::dtype`] grammar are all part of
+/// version 1. Any change to one of them is a wire-format change and bumps this constant, so a
+/// kernel built against a different version is rejected rather than misread.
+pub const ABI_VERSION: u32 = 1;
 
 /// Name of the host import module that the guest links against.
 pub const HOST_MODULE: &str = "vortex_host";

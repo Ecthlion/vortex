@@ -53,7 +53,7 @@ pure decode libraries so semantics match by construction:
 | Kernel crate | Encoding | Reuses |
 | --- | --- | --- |
 | `encodings/fastlanes/wasm` | `fastlanes.bitpacked` | the [`fastlanes`] crate's unpack kernels |
-| `encodings/runend/wasm` | `vortex.runend` | nothing — it gathers instead of decoding (5.3 KB) |
+| `encodings/runend/wasm` | `vortex.runend` | nothing — it gathers instead of decoding (5.9 KB) |
 | `encodings/fsst/wasm` | `vortex.fsst` | [`fsst`] (fsst-rs)'s `Decompressor` |
 
 The kernel crates are workspace-excluded (they carry their own size-optimized release profiles
@@ -187,7 +187,7 @@ naming rather than reading.
 `Values` children. `PlanBuilder` hands back a `NodeId` per node, which is the only way to name
 one — so a kernel cannot express a dangling or cyclic reference even by accident.
 
-## Host / guest ABI (`abi_version = 3`)
+## Host / guest ABI (`abi_version = 1`)
 
 All integers little-endian; the single linear memory is exported as `"memory"`. The ABI is
 **push-based**: there are no host callbacks during decode.
@@ -276,6 +276,31 @@ array a plan-level patch needs. The validity child carries through. Scope: 4-byt
 unrolled unpack code per width family. Blob: **~51 KB** (~35 KB once fastlanes-rs's
 `num-traits` edge stops linking `std`; the unpack kernels dominate the rest).
 
+This is the shape of a kernel that genuinely computes. It takes a buffer, reads it as typed words
+in place, and writes elements:
+
+```rust
+let packed = node.buffer(0)?;                       // host-uploaded, 8-byte aligned
+let (head, words, _) = unsafe { packed.align_to::<u32>() };
+guest_ensure!(head.is_empty(), "packed buffer must be 4-byte aligned");
+
+let mut out = alloc::vec![0u32; node.len];
+for chunk in 0..num_chunks {
+    let chunk_words = &words[chunk * words_per_chunk..(chunk + 1) * words_per_chunk];
+    // fastlanes::BitPacking — the same kernels the native encoding calls
+    unsafe { BitPacking::unchecked_unpack(bit_width, chunk_words, &mut out[dst..dst + CHUNK]) };
+}
+
+Ok(plan.materialized(DTypeExpr::parent(), Decoded::Primitive(DecodedPrimitive {
+    ptype, len: node.len, values, validity,
+})))
+```
+
+`Materialized` is the only opcode that moves bytes, and this is what it is for: there is no
+re-arrangement of an existing child that produces bit-unpacked output, so something has to compute
+it. `DTypeExpr::parent()` names the output type without the kernel having to know what it is — the
+buffer layout alone would not say whether those four-byte values are `u32`, `i32`, or `f32`.
+
 ### `vortex.fsst` (`encodings/fsst/wasm`)
 
 Parses `FSSTMetadata`; declares `[uncompressed_lengths, codes_offsets, validity]` children;
@@ -292,14 +317,85 @@ honoured — and returns the plan `take(child(VALUES), indices)`. The host resol
 in its own encoding and calls `ArrayRef::take`, which builds a lazy `DictArray`: no
 canonicalization, no copy, no materialized output.
 
+```rust
+fn children(header: &NodeHeader<'_>) -> GuestResult<Vec<ChildSpec>> {
+    Ok(alloc::vec![
+        // Read: the kernel needs the run ends to build indices.
+        ChildSpec::values(DTypeExpr::primitive(ends_ptype, false), meta.num_runs),
+        // Named only: same dtype as the parent, whatever that is, never copied in.
+        ChildSpec::reference(DTypeExpr::parent(), meta.num_runs),
+    ])
+}
+
+fn decode(node: &NodeView<'_>, plan: &mut PlanBuilder) -> GuestResult<NodeId> {
+    // ... expand run ends into one u32 run index per output row ...
+    let values = plan.child(VALUES);              // a reference, not data
+    let indices = plan.materialized(DTypeExpr::primitive(PType::U32, false), /* … */);
+    Ok(plan.take(values, indices))                // the host gathers, lazily
+}
+```
+
+The only thing the kernel materializes is the index array. The values never enter the sandbox.
+
 The consequences are worth stating plainly, because they are the argument for the whole design:
 
 - **The kernel is dtype-agnostic.** The *native* decoder needs three separate implementations
   (bool / primitive / varbinview) and `vortex_bail!`s on anything else. This kernel has none —
   run-end over strings works with zero string code in the guest, and is covered by a test.
-- **It is 5.3 KB**, versus 51 KB for bitpacked. Not decoding is cheap.
+- **It is 5.9 KB**, versus 51 KB for bitpacked. Not decoding is cheap.
 - **Validity falls out.** Run-end's output validity is the values' validity gathered through the
   same runs; `take` reproduces that, so the kernel never touches validity.
+
+### The counterfactual: run-end expanded inside the sandbox
+
+Nothing stops a kernel from doing the expansion itself. It is worth writing out, because the
+version that looks simpler is the one that loses capability.
+
+Only two lines change in `children` — `reference` becomes `values`, which obliges the host to
+canonicalize the child and copy every element into guest memory. Then `decode` expands run by run
+and returns a `Materialized` node instead of a `Take`:
+
+```rust
+let decoded = match node.child(VALUES)? {
+    ChildView::Primitive(values) => {
+        let width = values.ptype.byte_width();
+        let mut out: Vec<u8> = Vec::with_capacity(node.len * width);
+        for (run, end) in boundaries {
+            let value = &values.values[run * width..(run + 1) * width];
+            for _ in filled..end { out.extend_from_slice(value); }
+            filled = end;
+        }
+        Decoded::Primitive(DecodedPrimitive { ptype: values.ptype, len: node.len, values: out, .. })
+    }
+    ChildView::Bool(values) => { /* the same loop again, over a bitmap */ }
+    // Utf8, Binary, Decimal, List, Struct, Extension: no arm is possible.
+};
+Ok(plan.materialized(DTypeExpr::parent(), decoded))
+```
+
+That match needs no catch-all arm, and *that* is the finding: `ChildView` has exactly two variants,
+`Primitive` and `Bool`. A dtype the guest cannot read cannot be a `Values` child at all, so this
+kernel does not merely get slower on strings — it cannot be written for them. It has independently
+rediscovered the native decoder's limitation: `run_end_canonicalize` matches `Bool`, `Primitive`,
+`Utf8 | Binary`, and `vortex_bail!`s on the rest.
+
+The rest of the cost follows from the same choice:
+
+| | delegating (shipped) | expanded in-sandbox |
+| --- | --- | --- |
+| Dtypes supported | every one, including nested | primitive and bool |
+| Bytes crossing in | `num_runs` ends | `num_runs` ends **+ the whole values child** |
+| Bytes crossing out | `len` × 4 index bytes | `len` × element width |
+| Host work | `take` → a lazy `DictArray` | copy the guest's output |
+| Guest code | one loop, no dtype dispatch | one loop per dtype family |
+| Compiled size | 5.9 KB | 6.8 KB |
+
+The output-side byte counts are the same order, so this is not principally about the index array:
+it is that delegating keeps the *input* out of the sandbox and leaves the output unmaterialized
+until the scan asks for it. A filter that prunes the chunk pays for neither.
+
+The in-sandbox version is the right choice exactly when there is no re-arrangement to delegate —
+which is bitpacked's situation, and why both opcodes exist.
 
 ## The plan vocabulary
 
@@ -384,11 +480,12 @@ capped at a multiple of the node's own length.
 
 ## The dtype channel
 
-ABI v2 gave the guest three bits of parent dtype: primitive, bool, utf8, or `Other`. Anything else
-was fatal, not slow — `datetimeparts` needs a Timestamp's `TimeUnit` and timezone, `decimal` needs
-precision and scale, `fixed_size_list` needs its size, and none of them could see any of it.
+The obvious cheap thing to send a guest is a coarse kind tag — primitive, bool, utf8, or *other*.
+It does not work: anything outside the enumerated set is then fatal rather than slow.
+`datetimeparts` needs a Timestamp's `TimeUnit` and timezone, `decimal` needs precision and scale,
+`fixed_size_list` needs its size, and a kind tag shows none of it.
 
-v3 sends a real type, in a compact preorder encoding with a tag byte per node
+So the ABI sends a real type, in a compact preorder encoding with a tag byte per node
 (`vortex-wasm-guest/src/dtype.rs` holds the grammar). It covers every `DType` variant.
 
 The part that makes it *complete* rather than merely wide is **derivations**. A literal is not
@@ -486,7 +583,7 @@ fixable upstream (`num-traits` default features in fastlanes-rs).
    and this boundary carries no schema — see
    [the array boundary](#array-boundary-vortexs-own-layouts-not-arrow).
 3. **Session-level wasm encodings (done):** `WasmLayout` removed. Kernels decode the **real
-   serialized parts** (ABI v2: `vx_children` + pushed `vx_decode` frame);
+   serialized parts** (`vx_children` plus the pushed `vx_decode` frame);
    [`WasmEncodingPlugin`] registers under the encoding's id and returns decoded arrays;
    [`register_wasm_encodings`] merges kernels into a session with native-supersedes semantics.
    Kernels live alongside their encodings (`encodings/fastlanes/wasm`, `encodings/fsst/wasm`)
@@ -506,11 +603,11 @@ fixable upstream (`num-traits` default features in fastlanes-rs).
    writer, and loader-based registration at file-open — opt-in, file-scoped, and fetching only the
    kernels the reader actually lacks (see above). A `vx_abi_version` guest export makes a stale
    kernel a clear error rather than a misread frame.
-7. **Plan vocabulary and dtype channel (done, ABI v3):** `vx_decode` now returns a flat postorder
+7. **Plan vocabulary and dtype channel (done):** `vx_decode` returns a flat postorder
    [plan](#the-plan-vocabulary) — `Materialized`, `Child`, `Take`, `Slice`, `Concat`, `Constant`,
    `SetValidity` — each opcode one `vortex-array` constructor, evaluated in a single non-recursive
    forward pass with per-node validation and an output budget. Patching is guest-side sugar over
-   `take`+`concat` rather than a host primitive. The three-bit parent-kind tag became the full
+   `take`+`concat` rather than a host primitive. Types cross in the full
    [dtype channel](#the-dtype-channel), with derivations so a kernel can name types it cannot
    construct.
 8. **Breadth (next):** more kernels (dict, ALP, sparse), the missing native arithmetic ops,

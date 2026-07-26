@@ -188,8 +188,8 @@ impl<'a> NodeView<'a> {
 
     /// The node's dtype, in full.
     ///
-    /// Unlike ABI v2's three-bit kind tag, this is the real type: a kernel can walk a struct's
-    /// fields, read a decimal's precision, or look through an extension type to its storage.
+    /// The real type, not a coarse kind tag: a kernel can walk a struct's fields, read a decimal's
+    /// precision, or look through an extension type to its storage.
     pub fn dtype(&self) -> GuestResult<DTypeView<'a>> {
         DTypeView::new(self.dtype)
     }

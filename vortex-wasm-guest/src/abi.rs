@@ -21,10 +21,10 @@
 
 /// Host/guest ABI version.
 ///
-/// Bumped to 3 for the plan vocabulary and the full dtype channel: `vx_decode` now returns a
-/// [`plan`](crate::plan) rather than one of two fixed result shapes, and both frames carry a real
-/// encoded dtype rather than a three-bit kind tag.
-pub const ABI_VERSION: u32 = 3;
+/// The host refuses to run a kernel whose declared version it does not implement. Every layout in
+/// this module is part of version 1, so any change to a frame, the [`plan`](crate::plan) encoding,
+/// or the [`dtype`](crate::dtype) grammar bumps it.
+pub const ABI_VERSION: u32 = 1;
 
 /// Host import module name the guest links against.
 pub const HOST_MODULE: &str = "vortex_host";

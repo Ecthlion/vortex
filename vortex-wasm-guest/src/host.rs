@@ -3,7 +3,7 @@
 
 //! Guest allocator API.
 //!
-//! The v2 ABI has no host callbacks during decode — the host pushes buffers and decoded children
+//! The ABI has no host callbacks during decode — the host pushes buffers and decoded children
 //! into guest memory up front — so the only export the SDK needs beyond the entry points is the
 //! allocator backing `vx_alloc`.
 
