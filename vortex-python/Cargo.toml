@@ -34,6 +34,7 @@ arrow-array = { workspace = true }
 arrow-data = { workspace = true }
 arrow-schema = { workspace = true }
 bytes = { workspace = true }
+futures = { workspace = true, features = ["std", "async-await"] }
 itertools = { workspace = true }
 log = { workspace = true }
 object_store = { workspace = true, features = [

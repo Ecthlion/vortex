@@ -11431,6 +11431,7 @@ dependencies = [
  "arrow-data 59.3.0",
  "arrow-schema 59.3.0",
  "bytes",
+ "futures",
  "itertools 0.14.0",
  "log",
  "object_store",

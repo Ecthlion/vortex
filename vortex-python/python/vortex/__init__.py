@@ -6,7 +6,7 @@ import importlib.metadata
 import importlib.util
 from types import ModuleType
 
-from . import _lib, arrays, dataset, expr, file, io, ray, registry, scan
+from . import _lib, arrays, dataset, expr, file, files, io, ray, registry, scan
 from ._lib.arrays import (
     AlpArray,
     AlpRdArray,
@@ -89,6 +89,7 @@ from .arrays import (
     array,
 )
 from .file import VortexFile, open
+from .files import VortexFiles, open_files
 from .scan import RepeatedScan
 
 _ = _lib  # Ensure we eagerly import the Vortex native library.
@@ -137,6 +138,7 @@ __all__ = [
     "dataset",
     "expr",
     "file",
+    "files",
     "scan",
     "io",
     "registry",
@@ -219,6 +221,8 @@ __all__ = [
     # File
     "VortexFile",
     "open",
+    "VortexFiles",
+    "open_files",
     # Iterator
     "ArrayIterator",
     # Scan

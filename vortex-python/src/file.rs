@@ -319,6 +319,13 @@ fn scan_builder(
 
 pub struct PyIntoProjection(Expression);
 
+impl PyIntoProjection {
+    /// The projection expression.
+    pub fn into_inner(self) -> Expression {
+        self.0
+    }
+}
+
 impl<'py> FromPyObject<'_, 'py> for PyIntoProjection {
     type Error = PyErr;
 

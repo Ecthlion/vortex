@@ -148,7 +148,11 @@ impl MultiFileDataSource {
                         unreachable!("local_fs is set when any glob lacks a filesystem")
                     });
                 async move {
-                    let files: Vec<FileListing> = fs.glob(&glob)?.try_collect().await?;
+                    let mut files: Vec<FileListing> = fs.glob(&glob)?.try_collect().await?;
+                    // Listing order is filesystem-dependent, so sort by path to give every
+                    // caller a stable partition order (and therefore stable partition indices)
+                    // for the same set of files.
+                    files.sort_unstable_by(|a, b| a.path.cmp(&b.path));
                     Ok::<_, VortexError>(
                         files
                             .into_iter()

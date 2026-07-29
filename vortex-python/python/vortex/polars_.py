@@ -1,16 +1,113 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+from __future__ import annotations
+
 import json
 import operator
-from collections.abc import Callable
-from typing import Any, cast
+from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import polars as pl
+import pyarrow as pa
 
 import vortex.expr as ve
 
 from ._lib import dtype as _dtype
+
+if TYPE_CHECKING:
+    from .type_aliases import IntoProjection, RecordBatchReader
+
+
+class _ToArrow(Protocol):
+    """The subset of the Vortex reader APIs that :func:`lazy_frame` scans through."""
+
+    def __call__(
+        self,
+        projection: IntoProjection = None,
+        *,
+        expr: ve.Expr | None = None,
+        limit: int | None = None,
+    ) -> RecordBatchReader: ...
+
+
+def lazy_frame(to_arrow: _ToArrow, schema: pa.Schema) -> pl.LazyFrame:
+    """Register a Polars IO source that scans Vortex, pruning columns and pushing down predicates.
+
+    Predicates that Vortex cannot represent are applied here instead of being pushed into the
+    scan. Polars does not re-check a predicate the IO source declined, so leaving one unapplied
+    would return rows the query excluded.
+
+    Parameters
+    ----------
+    to_arrow :
+        Called with the columns and predicate Polars pushed down, returning a
+        :class:`pyarrow.RecordBatchReader`.
+    schema : :class:`pyarrow.Schema`
+        The schema of the unprojected source.
+    """
+    from polars.io.plugins import register_io_source
+
+    def _io_source(
+        with_columns: list[str] | None,
+        predicate: pl.Expr | None,
+        n_rows: int | None,
+        _batch_size: int | None,
+    ) -> Iterator[pl.DataFrame]:
+        # TODO(ngates): split a conjunction so the convertible terms can still be pushed down.
+        pushdown, residual = _split_predicate(predicate)
+
+        projection = with_columns
+        if residual is not None and projection is not None:
+            # The residual filter runs here, so the columns it reads must be scanned even when
+            # the query does not select them.
+            projection = list(dict.fromkeys([*projection, *residual.meta.root_names()]))
+
+        # A limit may only be pushed down when the scan applies the whole predicate, otherwise it
+        # would discard rows before the residual filter has run.
+        reader = to_arrow(projection, expr=pushdown, limit=n_rows if residual is None else None)
+
+        def to_frame(batch: pa.RecordBatch) -> pl.DataFrame:
+            # TODO(ngates): set sortedness on DataFrame based on stats?
+            df = pl.DataFrame._from_arrow(batch, rechunk=False)
+            if residual is None:
+                return df
+            df = df.filter(residual)
+            return df if with_columns is None else df.select(with_columns)
+
+        remaining = n_rows
+        for batch in reader:
+            df = to_frame(batch)
+            if remaining is not None:
+                df = df.head(remaining)
+                remaining -= len(df)
+            yield df
+            if remaining == 0:
+                return
+
+        # Make sure we always yield at least one empty DataFrame
+        yield to_frame(
+            pa.RecordBatch.from_arrays(
+                [pa.array([], type=field.type) for field in reader.schema],
+                schema=reader.schema,
+            )
+        )
+
+    # https://github.com/pola-rs/polars/pull/24125
+    return register_io_source(_io_source, schema=schema)  # ty: ignore[invalid-argument-type]
+
+
+def _split_predicate(predicate: pl.Expr | None) -> tuple[ve.Expr | None, pl.Expr | None]:
+    """Split a pushed-down predicate into the part Vortex evaluates and the part Polars does.
+
+    Returns ``(pushdown, residual)``, exactly one of which is set when ``predicate`` is given.
+    """
+    if predicate is None:
+        return None, None
+    try:
+        return polars_to_vortex(predicate), None
+    except (NotImplementedError, ValueError):
+        return None, predicate
 
 
 def polars_to_vortex(expr: pl.Expr) -> ve.Expr:

@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from typing import TYPE_CHECKING, final
 
 import pyarrow as pa
@@ -234,36 +233,10 @@ class VortexFile:
         return VortexDataset(self._file.to_dataset())
 
     def to_polars(self) -> polars.LazyFrame:
-        """Read the Vortex file as a pl.LazyFrame, supporting column pruning and predicate pushdown."""
-        import polars as pl
-        from polars.io.plugins import register_io_source
+        """Read the Vortex file as a pl.LazyFrame, supporting column pruning and predicate pushdown.
 
-        from vortex.polars_ import polars_to_vortex
+        See also: :meth:`vortex.VortexFiles.to_polars`, which reads a directory of files.
+        """
+        from vortex.polars_ import lazy_frame
 
-        schema = self.dtype.to_arrow_schema()
-
-        def _io_source(
-            with_columns: list[str] | None,
-            predicate: pl.Expr | None,
-            n_rows: int | None,
-            _batch_size: int | None,
-        ) -> Iterator[pl.DataFrame]:
-            vx_predicate: Expr | None = None if predicate is None else polars_to_vortex(predicate)
-
-            reader = self.to_arrow(projection=with_columns, expr=vx_predicate, limit=n_rows)
-
-            for batch in reader:
-                batch = pl.DataFrame._from_arrow(batch, rechunk=False)
-                # TODO(ngates): set sortedness on DataFrame based on stats?
-                yield batch
-
-            # Make sure we always yield at least one empty DataFrame
-            yield pl.DataFrame._from_arrow(
-                data=pa.RecordBatch.from_arrays(
-                    [pa.array([], type=field.type) for field in reader.schema],
-                    schema=reader.schema,
-                ),
-            )
-
-        # https://github.com/pola-rs/polars/pull/24125
-        return register_io_source(_io_source, schema=schema)  # ty: ignore[invalid-argument-type]
+        return lazy_frame(self.to_arrow, self.dtype.to_arrow_schema())

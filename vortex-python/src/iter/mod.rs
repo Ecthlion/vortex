@@ -12,6 +12,7 @@ use arrow_array::RecordBatchReader;
 use arrow_array::cast::AsArray;
 use arrow_schema::ArrowError;
 use arrow_schema::Field;
+use arrow_schema::SchemaRef;
 use parking_lot::Mutex;
 use pyo3::Bound;
 use pyo3::PyResult;
@@ -43,6 +44,31 @@ pub(crate) fn init(py: Python, parent: &Bound<PyModule>) -> PyResult<()> {
     m.add_class::<PyArrayIterator>()?;
 
     Ok(())
+}
+
+/// Adapt an [`ArrayIterator`] into a [`RecordBatchReader`] returning batches of `schema`.
+///
+/// The conversion runs lazily on the thread that pulls from the reader.
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn record_batch_reader(
+    iter: Box<dyn ArrayIterator + Send>,
+    schema: SchemaRef,
+) -> Box<dyn RecordBatchReader + Send> {
+    let target = Field::new_struct("", schema.fields().clone(), false);
+
+    Box::new(RecordBatchIterator::new(
+        iter.map(move |chunk| {
+            let target = target.clone();
+            session().arrow().execute_arrow(
+                chunk?,
+                Some(&target),
+                &mut session().create_execution_ctx(),
+            )
+        })
+        .map(|chunk| chunk.map_err(|e| ArrowError::ExternalError(Box::new(e))))
+        .map(|array| array.map(|a| RecordBatch::from(a.as_struct().clone()))),
+        schema,
+    ))
 }
 
 #[pyclass(name = "ArrayIterator", module = "vortex", frozen)]
@@ -113,10 +139,8 @@ impl PyArrayIterator {
     /// Convert the :class:`vortex.ArrayIterator` into a :class:`pyarrow.RecordBatchReader`.
     ///
     /// Note that this performs the conversion on the current thread.
-    #[allow(clippy::disallowed_methods)]
     fn to_arrow(slf: Bound<Self>) -> PyVortexResult<Py<PyAny>> {
         let schema = Arc::new(session().arrow().to_arrow_schema(slf.get().dtype())?);
-        let target = Field::new_struct("", schema.fields().clone(), false);
 
         let iter = slf.get().take().unwrap_or_else(|| {
             Box::new(ArrayIteratorAdapter::new(
@@ -125,22 +149,7 @@ impl PyArrayIterator {
             ))
         });
 
-        let record_batch_reader: Box<dyn RecordBatchReader + Send> =
-            Box::new(RecordBatchIterator::new(
-                iter.map(move |chunk| {
-                    let target = target.clone();
-                    session().arrow().execute_arrow(
-                        chunk?,
-                        Some(&target),
-                        &mut session().create_execution_ctx(),
-                    )
-                })
-                .map(|chunk| chunk.map_err(|e| ArrowError::ExternalError(Box::new(e))))
-                .map(|array| array.map(|a| RecordBatch::from(a.as_struct().clone()))),
-                schema,
-            ));
-
-        Ok(record_batch_reader.into_pyarrow(slf.py())?)
+        Ok(record_batch_reader(iter, schema).into_pyarrow(slf.py())?)
     }
 
     /// Create a :class:`vortex.ArrayIterator` from an iterator of :class:`vortex.Array`.
