@@ -9,6 +9,7 @@ import pyarrow as pa
 from vortex.type_aliases import IntoProjection
 
 from . import CosStore, HfStore
+from .dataset import VortexDataset
 from .dtype import DType
 from .expr import Expr
 from .iter import ArrayIterator
@@ -39,6 +40,7 @@ class VortexFiles:
         schema: pa.Schema | None = None,
         ordered: bool = True,
     ) -> pa.RecordBatchReader: ...
+    def to_dataset(self) -> VortexDataset: ...
 
 def open_files(
     paths: str | Sequence[str],

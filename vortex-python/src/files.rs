@@ -46,6 +46,7 @@ use crate::arrow::FromPyArrow;
 use crate::arrow::IntoPyArrow;
 use crate::arrow::ToPyArrow;
 use crate::current_runtime;
+use crate::dataset::PyVortexDataset;
 use crate::dtype::PyDType;
 use crate::error::PyVortexResult;
 use crate::expr::PyExpr;
@@ -199,10 +200,12 @@ impl PyVortexFiles {
         Ok(slf.py().detach(move || {
             let iter = array_iter(
                 &source,
-                select(FieldNames::empty(), root()),
-                filter,
-                None,
-                false,
+                MultiScanOptions {
+                    projection: select(FieldNames::empty(), root()),
+                    filter,
+                    ordered: false,
+                    ..Default::default()
+                },
             )?;
             iter.map_ok(|array| array.len() as u64)
                 .process_results(|iter| iter.sum::<u64>())
@@ -223,7 +226,16 @@ impl PyVortexFiles {
         let filter = expr.map(|e| e.into_inner());
 
         slf.py().detach(move || {
-            let iter = array_iter(&source, projection, filter, limit, ordered)?;
+            let iter = array_iter(
+                &source,
+                MultiScanOptions {
+                    projection,
+                    filter,
+                    limit,
+                    ordered,
+                    ..Default::default()
+                },
+            )?;
             Ok(PyArrayIterator::new(Box::new(iter)))
         })
     }
@@ -247,7 +259,16 @@ impl PyVortexFiles {
             .map(Arc::new);
 
         let reader = slf.py().detach(move || {
-            let iter = array_iter(&source, projection, filter, limit, ordered)?;
+            let iter = array_iter(
+                &source,
+                MultiScanOptions {
+                    projection,
+                    filter,
+                    limit,
+                    ordered,
+                    ..Default::default()
+                },
+            )?;
             let schema = match schema {
                 Some(schema) => schema,
                 None => Arc::new(session().arrow().to_arrow_schema(iter.dtype())?),
@@ -257,27 +278,60 @@ impl PyVortexFiles {
 
         Ok(reader.into_pyarrow(slf.py())?)
     }
+
+    /// Scan these files using the :class:`pyarrow.dataset.Dataset` API.
+    fn to_dataset(&self) -> PyVortexResult<PyVortexDataset> {
+        Ok(PyVortexDataset::try_new_multi(self.source.clone())?)
+    }
+}
+
+/// Options for scanning a [`MultiLayoutDataSource`] into chunks with [`array_iter`].
+pub(crate) struct MultiScanOptions {
+    /// The projection expression, defaulting to all columns.
+    pub(crate) projection: Expression,
+    /// The predicate used to filter rows.
+    pub(crate) filter: Option<Expression>,
+    /// The maximum number of rows to read after filtering.
+    pub(crate) limit: Option<u64>,
+    /// Restrict the scan to a single partition (one file), as used by dataset fragments.
+    pub(crate) partition: Option<u64>,
+    /// Slice chunks larger than this many rows.
+    pub(crate) batch_size: Option<usize>,
+    /// Whether chunks are yielded in file order, or interleaved as files finish.
+    pub(crate) ordered: bool,
+}
+
+impl Default for MultiScanOptions {
+    fn default() -> Self {
+        Self {
+            projection: root(),
+            filter: None,
+            limit: None,
+            partition: None,
+            batch_size: None,
+            ordered: true,
+        }
+    }
 }
 
 /// Build a blocking iterator over the chunks of every file in the data source.
 ///
 /// Partitions are flattened in order when `ordered`, and otherwise interleaved so that files are
 /// read concurrently.
-fn array_iter(
+pub(crate) fn array_iter(
     source: &MultiLayoutDataSource,
-    projection: Expression,
-    filter: Option<Expression>,
-    limit: Option<u64>,
-    ordered: bool,
+    options: MultiScanOptions,
 ) -> VortexResult<Box<dyn ArrayIterator + Send>> {
     let source = source.clone();
+    let ordered = options.ordered;
     // The limit is pushed into each partition, which bounds the work per file, but it must also
     // be applied across the concatenated partitions to bound the total row count.
     let request = ScanRequest {
-        projection,
-        filter,
-        limit,
+        projection: options.projection,
+        filter: options.filter,
+        limit: options.limit,
         ordered,
+        partition_range: options.partition.map(|i| i..i + 1),
         ..Default::default()
     };
 
@@ -293,13 +347,36 @@ fn array_iter(
     } else {
         partitions.try_flatten_unordered(None).boxed()
     };
-    let chunks = truncate(chunks, limit);
+    let chunks = truncate(chunks, options.limit);
+    let chunks = split_larger(chunks, options.batch_size);
 
     let stream = ArrayStreamAdapter::new(dtype.clone(), chunks);
     Ok(Box::new(ArrayIteratorAdapter::new(
         dtype,
         runtime.block_on_stream(stream),
     )))
+}
+
+/// Slice chunks larger than `batch_size` rows into consecutive chunks of at most that many.
+fn split_larger(
+    chunks: stream::BoxStream<'static, VortexResult<ArrayRef>>,
+    batch_size: Option<usize>,
+) -> stream::BoxStream<'static, VortexResult<ArrayRef>> {
+    let Some(batch_size) = batch_size.map(|b| b.max(1)) else {
+        return chunks;
+    };
+
+    chunks
+        .map_ok(move |chunk| {
+            let len = chunk.len();
+            stream::iter(
+                (0..len)
+                    .step_by(batch_size)
+                    .map(move |start| chunk.slice(start..(start + batch_size).min(len))),
+            )
+        })
+        .try_flatten()
+        .boxed()
 }
 
 /// Stop the stream once `limit` rows have been yielded, slicing the chunk that crosses the limit.

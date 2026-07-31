@@ -147,3 +147,81 @@ def test_mismatched_dtypes(tmp_path: Path):
     vx.io.write(vx.array(pa.table({"b": pa.array(["x"])})), str(tmp_path / "b.vortex"))
     with pytest.raises(Exception, match="dtype mismatch"):
         _ = vx.open_files(f"{tmp_path}/").read_all()
+
+
+class TestDataset:
+    """A multi-file :class:`vortex.dataset.VortexDataset`, from :meth:`VortexFiles.to_dataset`.
+
+    Implementing the :class:`pyarrow.dataset.Dataset` interface makes a directory of Vortex
+    files usable from DuckDB, Polars, pandas and anything else that consumes Arrow datasets.
+    """
+
+    @pytest.fixture(scope="class")
+    def ds(self, directory: Path) -> vx.dataset.VortexDataset:
+        return vx.open_files(str(directory)).to_dataset()
+
+    def test_is_a_pyarrow_dataset(self, ds: vx.dataset.VortexDataset):
+        import pyarrow.dataset
+
+        assert isinstance(ds, pyarrow.dataset.Dataset)
+
+    def test_schema(self, ds: vx.dataset.VortexDataset):
+        assert ds.schema.names == ["index", "name"]
+
+    def test_count_rows(self, ds: vx.dataset.VortexDataset):
+        assert ds.count_rows() == FILE_COUNT * ROWS_PER_FILE
+
+    def test_count_rows_with_filter(self, ds: vx.dataset.VortexDataset):
+        import pyarrow.compute as pc
+
+        assert ds.count_rows(filter=pc.field("index") < 150) == 150
+
+    def test_to_table(self, ds: vx.dataset.VortexDataset):
+        table = ds.to_table(columns=["index"], filter=ve.column("index") >= 250)
+        assert table.column_names == ["index"]
+        assert table.column("index").to_pylist() == list(range(250, 300))
+
+    def test_to_batches_respects_batch_size(self, ds: vx.dataset.VortexDataset):
+        batches = list(ds.to_batches(batch_size=64))
+        assert all(len(batch) <= 64 for batch in batches)
+        assert sum(len(batch) for batch in batches) == FILE_COUNT * ROWS_PER_FILE
+
+    def test_head(self, ds: vx.dataset.VortexDataset):
+        assert ds.head(3).column("index").to_pylist() == [0, 1, 2]
+
+    def test_fragments(self, ds: vx.dataset.VortexDataset):
+        fragments = list(ds.get_fragments())
+        assert len(fragments) == FILE_COUNT
+
+        assert [f.count_rows() for f in fragments] == [ROWS_PER_FILE] * FILE_COUNT
+        table = fragments[1].to_table(columns=["index"])
+        assert table.column("index").to_pylist() == list(range(ROWS_PER_FILE, 2 * ROWS_PER_FILE))
+
+    def test_fragments_concatenate_to_the_dataset(self, ds: vx.dataset.VortexDataset):
+        tables = [fragment.to_table() for fragment in ds.get_fragments()]
+        assert pa.concat_tables(tables) == ds.to_table()
+
+    def test_take_is_unsupported(self, ds: vx.dataset.VortexDataset):
+        with pytest.raises(Exception, match="indices are not supported"):
+            _ = ds.take(pa.array([0, 150]))
+
+    def test_row_range_is_unsupported(self, ds: vx.dataset.VortexDataset):
+        with pytest.raises(Exception, match="row_range is not supported"):
+            _ = ds.to_table(_row_range=(0, 10))
+
+    def test_duckdb(self, ds: vx.dataset.VortexDataset):  # used by duckdb via SQL
+        import duckdb
+
+        con = duckdb.connect()
+        row = con.execute('SELECT count(*) FROM ds WHERE "index" >= 250').fetchone()
+        assert row == (50,)
+
+    def test_polars(self, ds: vx.dataset.VortexDataset):
+        import polars as pl
+
+        df = pl.scan_pyarrow_dataset(ds).filter(pl.col("index") < 150).select("name").collect()
+        assert df["name"].to_list() == [f"row-{i}" for i in range(150)]
+
+    def test_pandas(self, ds: vx.dataset.VortexDataset):
+        df = ds.to_table(columns=["index"]).to_pandas()
+        assert df["index"].sum() == sum(range(FILE_COUNT * ROWS_PER_FILE))

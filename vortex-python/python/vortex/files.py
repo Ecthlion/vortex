@@ -13,6 +13,7 @@ from ._lib.arrays import Array
 from ._lib.dtype import DType
 from ._lib.expr import Expr
 from ._lib.iter import ArrayIterator
+from .dataset import VortexDataset
 from .store import (
     AzureStore,
     GCSStore,
@@ -153,6 +154,23 @@ class VortexFiles:
     def read_all(self, projection: IntoProjection = None, *, expr: Expr | None = None) -> Array:
         """Read every file into a single :class:`vortex.Array`."""
         return self.scan(projection, expr=expr).read_all()
+
+    def to_dataset(self) -> VortexDataset:
+        """Scan these files using the :class:`pyarrow.dataset.Dataset` API.
+
+        The returned :class:`.VortexDataset` works anywhere a :class:`pyarrow.dataset.Dataset`
+        does - DuckDB, Polars (``polars.scan_pyarrow_dataset``), pandas, and others - with
+        column selection and row filters pushed into the scan. Each file appears as one
+        :class:`.VortexFragment`.
+
+        Examples
+        --------
+        >>> import duckdb
+        >>> import vortex as vx
+        >>> ds = vx.open_files("nyc_taxi/").to_dataset() # doctest: +SKIP
+        >>> duckdb.sql("SELECT count(*) FROM ds WHERE passenger_count > 2") # doctest: +SKIP
+        """
+        return VortexDataset(self._files.to_dataset())
 
     def to_polars(self, *, ordered: bool = True) -> polars.LazyFrame:
         """Read the files as a ``polars.LazyFrame``, supporting column pruning and predicate pushdown.

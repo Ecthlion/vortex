@@ -81,6 +81,7 @@ class VortexDataset(pyarrow.dataset.Dataset):
         cache_metadata: bool | None = None,
         memory_pool: pyarrow.MemoryPool | None = None,
         _row_range: tuple[int, int] | None = None,
+        _partition: int | None = None,
     ) -> int:
         """Count the number of rows in this dataset."""
         if batch_readahead is not None:
@@ -94,7 +95,10 @@ class VortexDataset(pyarrow.dataset.Dataset):
         del memory_pool
         with _temporary_worker_threads(use_threads):
             return self._dataset.count_rows(
-                row_filter=self._filter_expression(filter), split_by=batch_size, row_range=_row_range
+                row_filter=self._filter_expression(filter),
+                split_by=batch_size,
+                row_range=_row_range,
+                partition=_partition,
             )
 
     def _filter_expression(self, expression: pyarrow.dataset.Expression | Expr | None) -> Expr | None:
@@ -116,10 +120,15 @@ class VortexDataset(pyarrow.dataset.Dataset):
 
     @override
     def get_fragments(self, filter: pyarrow.dataset.Expression | Expr | None = None) -> Iterator[VortexFragment]:
-        """A fragment for each file in the Dataset."""
+        """A fragment for each file of a multi-file Dataset, or for each split of a single file."""
 
-        for left, right in self._dataset.splits():
-            yield VortexFragment(self, (left, right))
+        partitions = self._dataset.partition_count()
+        if partitions is None:
+            for left, right in self._dataset.splits():
+                yield VortexFragment(self, _row_range=(left, right))
+        else:
+            for partition in range(partitions):
+                yield VortexFragment(self, _partition=partition)
 
     @override
     def head(
@@ -135,6 +144,7 @@ class VortexDataset(pyarrow.dataset.Dataset):
         cache_metadata: bool | None = None,
         memory_pool: pyarrow.MemoryPool | None = None,
         _row_range: tuple[int, int] | None = None,
+        _partition: int | None = None,
     ) -> pyarrow.Table:
         """Load the first `num_rows` of the dataset.
 
@@ -186,6 +196,7 @@ class VortexDataset(pyarrow.dataset.Dataset):
                     columns=columns,
                     row_filter=self._filter_expression(filter),
                     row_range=_row_range,
+                    partition=_partition,
                 )
                 .slice(0, num_rows)
                 .to_arrow_table()
@@ -237,6 +248,7 @@ class VortexDataset(pyarrow.dataset.Dataset):
         cache_metadata: bool | None = None,
         memory_pool: pyarrow.MemoryPool | None = None,
         _row_range: tuple[int, int] | None = None,
+        _partition: int | None = None,
     ) -> pyarrow.dataset.Scanner:
         """Construct a :class:`.pyarrow.dataset.Scanner`.
 
@@ -278,6 +290,7 @@ class VortexDataset(pyarrow.dataset.Dataset):
             cache_metadata,
             memory_pool,
             _row_range,
+            _partition,
         )
 
     @override
@@ -310,6 +323,7 @@ class VortexDataset(pyarrow.dataset.Dataset):
         cache_metadata: bool | None = None,
         memory_pool: pyarrow.MemoryPool | None = None,
         _row_range: tuple[int, int] | None = None,
+        _partition: int | None = None,
     ) -> pyarrow.Table:
         """Load a subset of rows identified by their absolute indices.
 
@@ -349,6 +363,7 @@ class VortexDataset(pyarrow.dataset.Dataset):
                 row_filter=self._filter_expression(filter),
                 indices=array(indices.cast(pa.uint64())),
                 row_range=_row_range,
+                partition=_partition,
             ).to_arrow_table()
 
     def to_record_batch_reader(
@@ -363,6 +378,7 @@ class VortexDataset(pyarrow.dataset.Dataset):
         cache_metadata: bool | None = None,
         memory_pool: pyarrow.MemoryPool | None = None,
         _row_range: tuple[int, int] | None = None,
+        _partition: int | None = None,
     ) -> pyarrow.RecordBatchReader:
         """Construct a :class:`.pyarrow.RecordBatchReader`.
 
@@ -404,7 +420,11 @@ class VortexDataset(pyarrow.dataset.Dataset):
             raise ValueError("empty projections are not currently supported")
         del memory_pool
         reader = self._dataset.to_record_batch_reader(
-            columns=columns, row_filter=self._filter_expression(filter), split_by=batch_size, row_range=_row_range
+            columns=columns,
+            row_filter=self._filter_expression(filter),
+            split_by=batch_size,
+            row_range=_row_range,
+            partition=_partition,
         )
         return pyarrow.RecordBatchReader.from_batches(
             reader.schema, _read_batches_with_temporary_worker_threads(reader, use_threads)
@@ -423,6 +443,7 @@ class VortexDataset(pyarrow.dataset.Dataset):
         cache_metadata: bool | None = None,
         memory_pool: pyarrow.MemoryPool | None = None,
         _row_range: tuple[int, int] | None = None,
+        _partition: int | None = None,
     ) -> Iterator[pyarrow.RecordBatch]:
         """Construct an iterator of :class:`.pyarrow.RecordBatch`.
 
@@ -465,6 +486,7 @@ class VortexDataset(pyarrow.dataset.Dataset):
             cache_metadata,
             memory_pool,
             _row_range,
+            _partition,
         )
         yield from record_batch_reader
 
@@ -481,6 +503,7 @@ class VortexDataset(pyarrow.dataset.Dataset):
         cache_metadata: bool | None = None,
         memory_pool: pyarrow.MemoryPool | None = None,
         _row_range: tuple[int, int] | None = None,
+        _partition: int | None = None,
     ) -> pyarrow.Table:
         """Construct an Arrow :class:`.pyarrow.Table`.
 
@@ -531,7 +554,10 @@ class VortexDataset(pyarrow.dataset.Dataset):
 
         with _temporary_worker_threads(use_threads):
             return self._dataset.to_array(
-                columns=columns, row_filter=self._filter_expression(filter), row_range=_row_range
+                columns=columns,
+                row_filter=self._filter_expression(filter),
+                row_range=_row_range,
+                partition=_partition,
             ).to_arrow_table()
 
 
@@ -546,10 +572,12 @@ class VortexFragment(pyarrow.dataset.Fragment):
     def __init__(
         self,
         dataset: VortexDataset,
-        _row_range: tuple[int, int],
+        _row_range: tuple[int, int] | None = None,
+        _partition: int | None = None,
     ) -> None:
         self._dataset = dataset
         self._row_range = _row_range
+        self._partition = _partition
 
     @property
     @override
@@ -593,6 +621,7 @@ class VortexFragment(pyarrow.dataset.Fragment):
             cache_metadata=cache_metadata,
             memory_pool=memory_pool,
             _row_range=self._row_range,
+            _partition=self._partition,
         )
 
     @override
@@ -623,6 +652,7 @@ class VortexFragment(pyarrow.dataset.Fragment):
             cache_metadata=cache_metadata,
             memory_pool=memory_pool,
             _row_range=self._row_range,
+            _partition=self._partition,
         )
 
     @override
@@ -653,6 +683,7 @@ class VortexFragment(pyarrow.dataset.Fragment):
             cache_metadata=cache_metadata,
             memory_pool=memory_pool,
             _row_range=self._row_range,
+            _partition=self._partition,
         )
 
     @override
@@ -698,6 +729,7 @@ class VortexFragment(pyarrow.dataset.Fragment):
             cache_metadata=cache_metadata,
             memory_pool=memory_pool,
             _row_range=self._row_range,
+            _partition=self._partition,
         )
 
     @override
@@ -727,6 +759,7 @@ class VortexFragment(pyarrow.dataset.Fragment):
             cache_metadata=cache_metadata,
             memory_pool=memory_pool,
             _row_range=self._row_range,
+            _partition=self._partition,
         )
 
     # regarding the ignore: https://github.com/zen-xu/pyarrow-stubs/pull/258
@@ -753,6 +786,7 @@ class VortexFragment(pyarrow.dataset.Fragment):
             cache_metadata=cache_metadata,
             memory_pool=memory_pool,
             _row_range=self._row_range,
+            _partition=self._partition,
         )
 
 
@@ -802,6 +836,7 @@ class VortexScanner(pyarrow.dataset.Scanner):
         cache_metadata: bool | None = None,
         memory_pool: pyarrow.MemoryPool | None = None,
         _row_range: tuple[int, int] | None = None,
+        _partition: int | None = None,
     ) -> None:
         self._dataset = dataset
         self._columns = columns
@@ -814,6 +849,7 @@ class VortexScanner(pyarrow.dataset.Scanner):
         self._cache_metadata = cache_metadata
         self._memory_pool = memory_pool
         self._row_range = _row_range
+        self._partition = _partition
 
     @property
     def schema(self) -> pyarrow.Schema:
@@ -844,6 +880,7 @@ class VortexScanner(pyarrow.dataset.Scanner):
             self._cache_metadata,
             self._memory_pool,
             self._row_range,
+            self._partition,
         )
 
     @override
@@ -872,6 +909,7 @@ class VortexScanner(pyarrow.dataset.Scanner):
             self._cache_metadata,
             self._memory_pool,
             self._row_range,
+            self._partition,
         )
 
     @override
@@ -899,6 +937,7 @@ class VortexScanner(pyarrow.dataset.Scanner):
             self._cache_metadata,
             self._memory_pool,
             self._row_range,
+            self._partition,
         )
 
     @override
@@ -922,6 +961,7 @@ class VortexScanner(pyarrow.dataset.Scanner):
             self._cache_metadata,
             self._memory_pool,
             self._row_range,
+            self._partition,
         )
 
     @override
@@ -945,4 +985,5 @@ class VortexScanner(pyarrow.dataset.Scanner):
             self._cache_metadata,
             self._memory_pool,
             self._row_range,
+            self._partition,
         )

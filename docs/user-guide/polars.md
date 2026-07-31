@@ -57,6 +57,12 @@ lf.filter(pl.col("passenger_count") > 2).select("fare_amount").collect()
 Rows are returned in file order, sorted by path. Pass `to_polars(ordered=False)` to read files
 concurrently instead, which is faster but leaves the row order unspecified.
 
+Alternatively, {meth}`.VortexFiles.to_dataset` exposes the same files through the
+{class}`pyarrow.dataset.Dataset` interface, which Polars consumes via
+`polars.scan_pyarrow_dataset`. Prefer `to_polars()` for Polars specifically - it pushes
+richer predicates - and `to_dataset()` when the same object also needs to feed DuckDB, pandas, or
+another Arrow dataset consumer.
+
 ## Unsupported predicates
 
 Only some Polars expressions can be translated into Vortex expressions and pushed into the scan.

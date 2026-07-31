@@ -26,6 +26,17 @@ convert:
 {meth}`.ArrayIterator.read_all` collects all batches into a single in-memory {class}`.Array`, and
 {meth}`.Array.to_pandas` converts it to a DataFrame.
 
+## Reading a Directory of Vortex Files
+
+{func}`vortex.open_files` gathers a directory, glob pattern, or list of Vortex files into a single
+table, which reads into pandas the same way:
+
+```python
+import vortex as vx
+
+df = vx.open_files("nyc_taxi/").read_all().to_pandas()
+```
+
 ## Converting In-Memory Arrays
 
 {meth}`.Array.to_pandas` converts any struct-typed Vortex array into a Pandas DataFrame:
