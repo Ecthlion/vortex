@@ -150,3 +150,24 @@ class TestUnsupportedPredicate:
 def test_scan_directory_unordered(directory: Path):
     df = vx.open_files(str(directory)).to_polars(ordered=False).collect()
     assert sorted(df["index"].to_list()) == list(range(4_000))
+
+
+def test_scan_polars_single_file(directory: Path):
+    df = vx.scan_polars(directory / "part-0.vortex").collect()
+    assert df["index"].to_list() == list(range(1_000))
+
+
+def test_scan_polars_directory(directory: Path):
+    """The direct equivalent of ``pl.scan_parquet("dir/")``."""
+    df = vx.scan_polars(directory).filter(pl.col("index") >= 3_500).select("index").collect()
+    assert df["index"].to_list() == list(range(3_500, 4_000))
+
+
+def test_scan_polars_list(directory: Path):
+    df = vx.scan_polars([directory / "part-0.vortex", directory / "part-2.vortex"]).collect()
+    assert df["index"].to_list() == [*range(1_000), *range(2_000, 3_000)]
+
+
+def test_scan_polars_unordered(directory: Path):
+    df = vx.scan_polars(directory, ordered=False).collect()
+    assert sorted(df["index"].to_list()) == list(range(4_000))

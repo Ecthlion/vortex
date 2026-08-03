@@ -225,3 +225,39 @@ class TestDataset:
     def test_pandas(self, ds: vx.dataset.VortexDataset):
         df = ds.to_table(columns=["index"]).to_pandas()
         assert df["index"].sum() == sum(range(FILE_COUNT * ROWS_PER_FILE))
+
+
+class TestOpenDataset:
+    """`vx.open_dataset` dispatches on its argument: a literal single file, or many files."""
+
+    def test_single_file(self, directory: Path):
+        ds = vx.open_dataset(directory / "part-0.vortex")
+        assert ds.count_rows() == ROWS_PER_FILE
+        # Dispatching to the single-file implementation keeps random access working.
+        assert ds.take(pa.array([0, 5])).column("index").to_pylist() == [0, 5]
+
+    def test_directory(self, directory: Path):
+        ds = vx.open_dataset(directory)
+        assert ds.count_rows() == FILE_COUNT * ROWS_PER_FILE
+        assert len(list(ds.get_fragments())) == FILE_COUNT
+
+    def test_glob(self, directory: Path):
+        ds = vx.open_dataset(f"{directory}/*.vortex")
+        assert ds.count_rows() == FILE_COUNT * ROWS_PER_FILE
+
+    def test_list(self, directory: Path):
+        ds = vx.open_dataset([directory / f"part-{i}.vortex" for i in range(FILE_COUNT)])
+        assert ds.count_rows() == FILE_COUNT * ROWS_PER_FILE
+
+    def test_file_url(self, directory: Path):
+        ds = vx.open_dataset((directory / "part-0.vortex").as_uri())
+        assert ds.count_rows() == ROWS_PER_FILE
+
+    def test_glob_disabled_reads_a_literal_path(self, tmp_path: Path):
+        path = tmp_path / "part[0].vortex"
+        vx.io.write(vx.array(pa.table({"index": pa.array([1, 2], type=pa.int64())})), str(path))
+
+        assert vx.open_dataset(path, glob=False).count_rows() == 2
+        # With globbing on, "[0]" is a character class that matches "part0.vortex" instead.
+        with pytest.raises(Exception, match="No files matched"):
+            _ = vx.open_dataset(path)

@@ -48,9 +48,12 @@ Here's a basic example of using the Vortex Python API to write and read a Vortex
     # Write a Vortex file from a PyArrow table
     vortex.io.write_path(my_table, "data.vortex")
 
-    # Read a Vortex file
-    dataset = vortex.dataset("data.vortex")
-    table = dataset.to_arrow()
+    # Read one file - or a directory of files - as a pyarrow Dataset
+    dataset = vortex.open_dataset("data.vortex")
+    table = dataset.to_table()
+
+    # Or scan lazily into Polars
+    lf = vortex.scan_polars("data/")
 
 
 API Reference

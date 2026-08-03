@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import os
 from typing import TYPE_CHECKING, final
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import pyarrow as pa
 
@@ -14,24 +16,58 @@ from ._lib.dtype import DType
 from ._lib.expr import Expr
 from ._lib.iter import ArrayIterator
 from .dataset import VortexDataset
-from .store import (
-    AzureStore,
-    GCSStore,
-    HTTPStore,
-    LocalStore,
-    MemoryStore,
-    S3Store,
-)
-from .type_aliases import IntoProjection, RecordBatchReader
+from .file import VortexFile
+from .file import open as open_file
+from .type_aliases import IntoPaths, IntoProjection, IntoStore, RecordBatchReader
 
 if TYPE_CHECKING:
     import polars
 
+_GLOB_CHARS = "*?["
+
+
+def _normalize_paths(paths: IntoPaths) -> str | list[str]:
+    if isinstance(paths, (str, os.PathLike)):
+        return os.fspath(paths)
+    return [os.fspath(p) for p in paths]
+
+
+def _names_many(path: str, *, glob: bool, local: bool) -> bool:
+    """Whether `path` names many files (a directory or a glob pattern) rather than one file.
+
+    Remote paths cannot be probed, so a remote directory is only recognized by its trailing
+    slash. `local` is False when an explicit store makes paths store-relative.
+    """
+    if glob and any(c in path for c in _GLOB_CHARS):
+        return True
+    if path.endswith("/"):
+        return True
+    if not local:
+        return False
+
+    parsed = urlparse(path)
+    if parsed.scheme == "file":
+        return os.path.isdir(url2pathname(parsed.path))
+    # A single-letter scheme is a Windows drive prefix, not a URL scheme.
+    if len(parsed.scheme) > 1:
+        return False
+    return os.path.isdir(path)
+
+
+def _open_source(paths: IntoPaths, *, store: IntoStore, glob: bool) -> VortexFile | VortexFiles:
+    """Open `paths` as a single :class:`.VortexFile` or a multi-file :class:`.VortexFiles`."""
+    paths = _normalize_paths(paths)
+    if not isinstance(paths, str):
+        return open_files(paths, store=store)
+    if _names_many(paths, glob=glob, local=store is None):
+        return open_files(paths, store=store)
+    return open_file(paths, store=store)
+
 
 def open_files(
-    paths: str | Sequence[str],
+    paths: IntoPaths,
     *,
-    store: AzureStore | GCSStore | HTTPStore | LocalStore | MemoryStore | S3Store | None = None,
+    store: IntoStore = None,
 ) -> VortexFiles:
     """
     Lazily open many Vortex files as a single table.
@@ -40,7 +76,7 @@ def open_files(
 
     Parameters
     ----------
-    paths : :class:`str` | Sequence[:class:`str`]
+    paths : :class:`str` | :class:`os.PathLike` | Sequence[:class:`str` | :class:`os.PathLike`]
         A directory, a glob pattern, a single file, or a sequence of any of those. Local paths
         and URLs are both accepted. A directory - either an existing local directory or any path
         ending in ``/`` - is expanded to the ``*.vortex`` files it contains, recursively.
@@ -65,7 +101,7 @@ def open_files(
 
     See also: :func:`vortex.open`
     """
-    return VortexFiles(_files.open_files(paths, store=store))
+    return VortexFiles(_files.open_files(_normalize_paths(paths), store=store))
 
 
 @final
@@ -201,3 +237,86 @@ class VortexFiles:
             return self.to_arrow(projection, expr=expr, limit=limit, ordered=ordered)
 
         return lazy_frame(to_arrow, self.dtype.to_arrow_schema())
+
+
+def open_dataset(
+    paths: IntoPaths,
+    *,
+    store: IntoStore = None,
+    glob: bool = True,
+) -> VortexDataset:
+    """Open one Vortex file, or many, as a :class:`pyarrow.dataset.Dataset`.
+
+    Accepts everything :func:`vortex.open_files` does - a directory, a glob pattern, or a list
+    of files - as well as a single file, and returns a :class:`.VortexDataset` usable from
+    DuckDB, Polars (``polars.scan_pyarrow_dataset``), pandas, and other Arrow dataset consumers.
+
+    A single file keeps the full dataset feature set, including :meth:`.VortexDataset.take` and
+    row-range fragments; a multi-file dataset exposes one fragment per file.
+
+    Parameters
+    ----------
+    paths : :class:`str` | :class:`os.PathLike` | Sequence[:class:`str` | :class:`os.PathLike`]
+        A single file, a directory, a glob pattern, or a sequence of any of those. Local paths
+        and URLs are both accepted. A remote directory must end in ``/`` to be recognized.
+    store :
+        An object store created from the `vortex.store` package. By default the store is inferred
+        from each path. When given, paths are resolved relative to the store.
+    glob : :class:`bool`
+        If ``False``, a path is never interpreted as a glob pattern. Use this to open a file
+        whose name contains ``*``, ``?`` or ``[``.
+
+    Examples
+    --------
+    >>> import duckdb
+    >>> import vortex as vx
+    >>> ds = vx.open_dataset("nyc_taxi/") # doctest: +SKIP
+    >>> duckdb.sql("SELECT count(*) FROM ds WHERE passenger_count > 2") # doctest: +SKIP
+
+    See also: :func:`vortex.scan_polars`
+    """
+    return _open_source(paths, store=store, glob=glob).to_dataset()
+
+
+def scan_polars(
+    paths: IntoPaths,
+    *,
+    store: IntoStore = None,
+    glob: bool = True,
+    ordered: bool = True,
+) -> polars.LazyFrame:
+    """Lazily scan one Vortex file, or many, as a ``polars.LazyFrame``.
+
+    The Vortex equivalent of ``polars.scan_parquet``: accepts a single file, a directory, a
+    glob pattern, or a list of files, and returns a ``polars.LazyFrame`` with column pruning
+    and predicate pushdown.
+
+    Parameters
+    ----------
+    paths : :class:`str` | :class:`os.PathLike` | Sequence[:class:`str` | :class:`os.PathLike`]
+        A single file, a directory, a glob pattern, or a sequence of any of those. Local paths
+        and URLs are both accepted. A remote directory must end in ``/`` to be recognized.
+    store :
+        An object store created from the `vortex.store` package. By default the store is inferred
+        from each path. When given, paths are resolved relative to the store.
+    glob : :class:`bool`
+        If ``False``, a path is never interpreted as a glob pattern. Use this to open a file
+        whose name contains ``*``, ``?`` or ``[``.
+    ordered : :class:`bool`
+        If ``True``, rows are produced in file order, sorted by path. If ``False``, files are
+        read concurrently, which is faster but yields rows in a non-deterministic order.
+        Ignored for a single file, whose rows are always in file order.
+
+    Examples
+    --------
+    >>> import polars as pl
+    >>> import vortex as vx
+    >>> lf = vx.scan_polars("nyc_taxi/") # doctest: +SKIP
+    >>> lf.filter(pl.col("passenger_count") > 2).select("fare_amount").collect() # doctest: +SKIP
+
+    See also: :meth:`.VortexFile.to_polars`, :meth:`.VortexFiles.to_polars`
+    """
+    source = _open_source(paths, store=store, glob=glob)
+    if isinstance(source, VortexFiles):
+        return source.to_polars(ordered=ordered)
+    return source.to_polars()

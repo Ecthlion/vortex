@@ -34,34 +34,36 @@ shape: (3, 2)
 
 ## Scanning many files
 
-Where `polars.scan_parquet` accepts a directory or a glob pattern, use {func}`vortex.open_files`
-to gather many Vortex files into one {class}`.VortexFiles` and call
-{meth}`.VortexFiles.to_polars` on it. All files must share the same dtype, and the resulting
-{class}`polars.LazyFrame` prunes columns and pushes down predicates just as it does for a single
-file.
+Where `polars.scan_parquet` accepts a file, a directory, a glob pattern, or a list of files,
+{func}`vortex.scan_polars` accepts the same and returns a {class}`polars.LazyFrame` that prunes
+columns and pushes down predicates just as the single-file integration does. All files must
+share the same dtype.
 
 ```python
 import polars as pl
 import vortex as vx
 
 # A directory, scanned recursively for *.vortex files.
-lf = vx.open_files("nyc_taxi/").to_polars()
+lf = vx.scan_polars("nyc_taxi/")
 
-# Or an explicit glob pattern, or a list of paths.
-lf = vx.open_files("s3://bucket/nyc_taxi/year=2024/*.vortex").to_polars()
-lf = vx.open_files(["jan.vortex", "feb.vortex"]).to_polars()
+# Or a single file, a glob pattern, or a list of paths.
+lf = vx.scan_polars("jan.vortex")
+lf = vx.scan_polars("s3://bucket/nyc_taxi/year=2024/*.vortex")
+lf = vx.scan_polars(["jan.vortex", "feb.vortex"])
 
 lf.filter(pl.col("passenger_count") > 2).select("fare_amount").collect()
 ```
 
-Rows are returned in file order, sorted by path. Pass `to_polars(ordered=False)` to read files
-concurrently instead, which is faster but leaves the row order unspecified.
+Rows are returned in file order, sorted by path. Pass `ordered=False` to read files concurrently
+instead, which is faster but leaves the row order unspecified. For more control over the
+underlying files, {func}`vortex.open_files` returns the same table as a {class}`.VortexFiles`,
+whose {meth}`.VortexFiles.to_polars` produces an identical LazyFrame.
 
-Alternatively, {meth}`.VortexFiles.to_dataset` exposes the same files through the
-{class}`pyarrow.dataset.Dataset` interface, which Polars consumes via
-`polars.scan_pyarrow_dataset`. Prefer `to_polars()` for Polars specifically - it pushes
-richer predicates - and `to_dataset()` when the same object also needs to feed DuckDB, pandas, or
-another Arrow dataset consumer.
+Alternatively, {func}`vortex.open_dataset` (or {meth}`.VortexFiles.to_dataset`) exposes the same
+files through the {class}`pyarrow.dataset.Dataset` interface, which Polars consumes via
+`polars.scan_pyarrow_dataset`. Prefer `scan_polars()` for Polars specifically - it pushes richer
+predicates - and a dataset when the same object also needs to feed DuckDB, pandas, or another
+Arrow dataset consumer.
 
 ## Unsupported predicates
 

@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright the Vortex contributors
+import os
+from collections.abc import Sequence
 from typing import TypeAlias
 
 import pyarrow as pa
@@ -7,10 +9,24 @@ import pyarrow as pa
 from ._lib.arrays import Array
 from ._lib.expr import Expr
 from ._lib.iter import ArrayIterator
+from .store import (
+    AzureStore,
+    CosStore,
+    GCSStore,
+    HfStore,
+    HTTPStore,
+    LocalStore,
+    MemoryStore,
+    S3Store,
+)
 
 # TypeAliases do not support __doc__.
 IntoProjection: TypeAlias = Expr | list[str] | None
 IntoArrayIterator: TypeAlias = Array | ArrayIterator | pa.Table | pa.RecordBatchReader
+IntoPaths: TypeAlias = str | os.PathLike[str] | Sequence[str | os.PathLike[str]]
+IntoStore: TypeAlias = (
+    AzureStore | CosStore | GCSStore | HfStore | HTTPStore | LocalStore | MemoryStore | S3Store | None
+)
 
 # If you make an intersphinx reference to pyarrow.RecordBatchReader in the return type of a function
 # *and also* use the IntoProjection type alias in a parameter type, Sphinx thinks the type alias
