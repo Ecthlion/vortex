@@ -25,6 +25,7 @@ use vortex_array::dtype::extension::ExtId;
 use vortex_array::dtype::extension::ExtVTable;
 use vortex_array::scalar::ScalarValue;
 use vortex_arrow::ArrowExport;
+use vortex_arrow::ArrowExportKey;
 use vortex_arrow::ArrowExportVTable;
 use vortex_arrow::ArrowImport;
 use vortex_arrow::ArrowImportVTable;
@@ -168,12 +169,8 @@ impl ExtVTable for WellKnownBinary {
 static ARROW_WKB: CachedId = CachedId::new(WkbType::NAME);
 
 impl ArrowExportVTable for WellKnownBinary {
-    fn arrow_ext_id(&self) -> Id {
-        *ARROW_WKB
-    }
-
-    fn vortex_id(&self) -> Id {
-        self.id()
+    fn export_key(&self) -> ArrowExportKey {
+        ArrowExportKey::arrow_extension(*ARROW_WKB, self.id())
     }
 
     fn to_arrow_field(
@@ -194,9 +191,12 @@ impl ArrowExportVTable for WellKnownBinary {
     fn execute_arrow(
         &self,
         array: ArrayRef,
-        target: &Field,
+        target: Option<&Field>,
         ctx: &mut ExecutionCtx,
     ) -> VortexResult<ArrowExport> {
+        let Some(target) = target else {
+            return Ok(ArrowExport::Unsupported(array));
+        };
         let is_wkb = array
             .dtype()
             .as_extension_opt()

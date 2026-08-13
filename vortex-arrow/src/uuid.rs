@@ -42,6 +42,7 @@ use vortex_session::registry::CachedId;
 use vortex_session::registry::Id;
 
 use crate::ArrowExport;
+use crate::ArrowExportKey;
 use crate::ArrowExportVTable;
 use crate::ArrowImport;
 use crate::ArrowImportVTable;
@@ -55,12 +56,8 @@ const UUID_BYTE_LEN: i32 = 16;
 static ARROW_UUID: CachedId = CachedId::new(ArrowUuid::NAME);
 
 impl ArrowExportVTable for Uuid {
-    fn arrow_ext_id(&self) -> Id {
-        *ARROW_UUID
-    }
-
-    fn vortex_id(&self) -> Id {
-        Uuid.id()
+    fn export_key(&self) -> ArrowExportKey {
+        ArrowExportKey::arrow_extension(*ARROW_UUID, Uuid.id())
     }
 
     // Encode all of these.
@@ -84,7 +81,7 @@ impl ArrowExportVTable for Uuid {
     fn execute_arrow(
         &self,
         array: ArrayRef,
-        _target: &Field,
+        _target: Option<&Field>,
         ctx: &mut ExecutionCtx,
     ) -> VortexResult<ArrowExport> {
         let is_uuid = array

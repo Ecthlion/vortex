@@ -30,7 +30,6 @@ use vortex_array::dtype::DecimalDType;
 use vortex_array::dtype::Nullability;
 use vortex_array::dtype::PType;
 use vortex_array::dtype::StructFields;
-use vortex_array::session::ArraySessionExt;
 #[expect(
     deprecated,
     reason = "benchmark comparing deprecated method with new one"
@@ -56,7 +55,7 @@ static SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
     let session = array_session();
     vortex_fsst::initialize(&session);
     vortex_onpair::initialize(&session);
-    session.arrays().register(Zstd);
+    vortex_zstd::initialize(&session);
     session
 });
 
@@ -160,10 +159,11 @@ const STRING_ENCODINGS: &[StringEncoding] = &[
 
 /// Encodings whose `append_to_builder` the builder benchmarks reach directly.
 ///
-/// The Arrow export cannot stand in for these: `execute_until` stops at the first canonical array,
-/// so a bare FSST/OnPair/Zstd root is canonicalized to `VarBinView` before any builder sees it.
-/// Only `Chunked`, `Constant` and `VarBin` roots reach an encoding's own `append_to_builder` that
-/// way, whereas the scan machinery appends encoded arrays into a builder directly.
+/// The Arrow export only partly overlaps: the `ByteArrayExporter` these encodings register appends
+/// an FSST/OnPair/Zstd root into a `VarBinBuilder` for the offsets-based Arrow types, but a `Dict`
+/// root, a view target, or anything behind a lazy operator still reaches a builder only after
+/// execution. The scan machinery appends encoded arrays into a builder directly, so that path is
+/// measured here.
 const BUILDER_STRING_ENCODINGS: &[StringEncoding] = &[
     StringEncoding::View,
     StringEncoding::Fsst,

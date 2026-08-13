@@ -39,6 +39,7 @@ use vortex_array::dtype::extension::ExtVTable;
 use vortex_array::scalar::ScalarValue;
 use vortex_array::validity::Validity;
 use vortex_arrow::ArrowExport;
+use vortex_arrow::ArrowExportKey;
 use vortex_arrow::ArrowExportVTable;
 use vortex_arrow::ArrowImport;
 use vortex_arrow::ArrowImportVTable;
@@ -244,12 +245,8 @@ impl LineStringData {
 }
 
 impl ArrowExportVTable for LineString {
-    fn arrow_ext_id(&self) -> Id {
-        *ARROW_LINESTRING
-    }
-
-    fn vortex_id(&self) -> Id {
-        self.id()
+    fn export_key(&self) -> ArrowExportKey {
+        ArrowExportKey::arrow_extension(*ARROW_LINESTRING, self.id())
     }
 
     fn to_arrow_field(
@@ -271,9 +268,12 @@ impl ArrowExportVTable for LineString {
     fn execute_arrow(
         &self,
         array: ArrayRef,
-        target: &Field,
+        target: Option<&Field>,
         ctx: &mut ExecutionCtx,
     ) -> VortexResult<ArrowExport> {
+        let Some(target) = target else {
+            return Ok(ArrowExport::Unsupported(array));
+        };
         let is_linestring = array
             .dtype()
             .as_extension_opt()
