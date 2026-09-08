@@ -254,7 +254,6 @@ impl VortexWriteOptions {
             None => WriteStrategyBuilder::default()
                 .with_btrblocks_builder(
                     BtrBlocksCompressorBuilder::default()
-                        .retain_allowed_encodings(&allowed_serialized_ids)
                         .allow_serialized_ids(&allowed_serialized_ids),
                 )
                 .build(),
