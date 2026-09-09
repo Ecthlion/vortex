@@ -57,7 +57,7 @@ use vortex_utils::aliases::dash_map::DashMap;
 use vortex_utils::aliases::dash_map::Entry;
 
 use crate::VortexAccessPlan;
-use crate::convert::exprs::ExpressionConvertor;
+use crate::convert::exprs::ExpressionConverter;
 use crate::convert::exprs::ProcessedProjection;
 use crate::convert::exprs::raw_projection;
 use crate::convert::schema::calculate_physical_schema;
@@ -102,7 +102,7 @@ pub(crate) struct VortexOpener {
     /// Whether the query has output ordering specified
     pub has_output_ordering: bool,
 
-    pub expression_convertor: Arc<dyn ExpressionConvertor>,
+    pub expression_converter: Arc<dyn ExpressionConverter>,
     pub file_metadata_cache: Option<Arc<FileMetadataCache>>,
     /// Whether to enable expression pushdown into the underlying Vortex scan.
     pub projection_pushdown: bool,
@@ -143,7 +143,7 @@ impl FileOpener for VortexOpener {
         let has_output_ordering = self.has_output_ordering;
         let scan_concurrency = self.scan_concurrency;
 
-        let expr_convertor = Arc::clone(&self.expression_convertor);
+        let expr_converter = Arc::clone(&self.expression_converter);
         let projection_pushdown = self.projection_pushdown;
 
         let predicate_creation_errors = MetricBuilder::new(&self.df_metrics)
@@ -281,7 +281,7 @@ impl FileOpener for VortexOpener {
                     ));
                 }
                 for expr in split_conjunction(filter) {
-                    let converted = expr_convertor
+                    let converted = expr_converter
                         .try_convert(expr, &this_file_schema)
                         .map_err(|e| {
                             exec_datafusion_err!(
@@ -321,13 +321,13 @@ impl FileOpener for VortexOpener {
                     leftover_projection: projection,
                 }
             } else if projection_pushdown {
-                expr_convertor.split_projection(
+                expr_converter.split_projection(
                     projection,
                     &this_file_schema,
                     output_schema.as_ref(),
                 )?
             } else {
-                expr_convertor.no_pushdown_projection(projection, &this_file_schema)?
+                expr_converter.no_pushdown_projection(projection, &this_file_schema)?
             };
 
             // The schema of the stream returned from the vortex scan.
@@ -686,7 +686,7 @@ mod tests {
 
     use super::*;
     use crate::VortexAccessPlan;
-    use crate::convert::exprs::DefaultExpressionConvertor;
+    use crate::convert::exprs::DefaultExpressionConverter;
     use crate::persistent::reader::DefaultVortexReaderFactory;
 
     static SESSION: LazyLock<VortexSession> = LazyLock::new(VortexSession::default);
@@ -867,7 +867,7 @@ mod tests {
             layout_readers: Default::default(),
             natural_splits: Default::default(),
             has_output_ordering: false,
-            expression_convertor: Arc::new(DefaultExpressionConvertor::default()),
+            expression_converter: Arc::new(DefaultExpressionConverter::default()),
             file_metadata_cache: None,
             projection_pushdown: false,
             scan_concurrency: None,
@@ -1195,7 +1195,7 @@ mod tests {
             layout_readers: Default::default(),
             natural_splits: Default::default(),
             has_output_ordering: false,
-            expression_convertor: Arc::new(DefaultExpressionConvertor::default()),
+            expression_converter: Arc::new(DefaultExpressionConverter::default()),
             file_metadata_cache: None,
             projection_pushdown: false,
             scan_concurrency: None,
@@ -1282,7 +1282,7 @@ mod tests {
             layout_readers: Default::default(),
             natural_splits: Default::default(),
             has_output_ordering: false,
-            expression_convertor: Arc::new(DefaultExpressionConvertor::default()),
+            expression_converter: Arc::new(DefaultExpressionConverter::default()),
             file_metadata_cache: None,
             projection_pushdown: false,
             scan_concurrency: None,
@@ -1436,7 +1436,7 @@ mod tests {
             layout_readers: Default::default(),
             natural_splits: Default::default(),
             has_output_ordering: false,
-            expression_convertor: Arc::new(DefaultExpressionConvertor::default()),
+            expression_converter: Arc::new(DefaultExpressionConverter::default()),
             file_metadata_cache: None,
             projection_pushdown: false,
             scan_concurrency: None,
@@ -1496,7 +1496,7 @@ mod tests {
             layout_readers: Default::default(),
             natural_splits: Default::default(),
             has_output_ordering: false,
-            expression_convertor: Arc::new(DefaultExpressionConvertor::default()),
+            expression_converter: Arc::new(DefaultExpressionConverter::default()),
             file_metadata_cache: None,
             projection_pushdown: false,
             scan_concurrency: None,
@@ -1703,7 +1703,7 @@ mod tests {
             layout_readers: Default::default(),
             natural_splits: Default::default(),
             has_output_ordering: false,
-            expression_convertor: Arc::new(DefaultExpressionConvertor::default()),
+            expression_converter: Arc::new(DefaultExpressionConverter::default()),
             file_metadata_cache: None,
             projection_pushdown: false,
             scan_concurrency: None,
@@ -1822,7 +1822,7 @@ mod tests {
             ))),
         ));
         assert!(
-            DefaultExpressionConvertor::default()
+            DefaultExpressionConverter::default()
                 .try_convert(&filter, &logical)?
                 .is_some()
         );
@@ -1853,7 +1853,7 @@ mod tests {
         );
         opener.projection = Vec::<ProjectionExpr>::new().into();
         // Force a supported physical expression to use the residual path.
-        opener.expression_convertor = Arc::new(ResidualConvertor);
+        opener.expression_converter = Arc::new(ResidualConverter);
         let batches = opener
             .open(PartitionedFile::new("literal.vortex", size))?
             .await?
@@ -1867,8 +1867,8 @@ mod tests {
         Ok(())
     }
 
-    struct ResidualConvertor;
-    impl ExpressionConvertor for ResidualConvertor {
+    struct ResidualConverter;
+    impl ExpressionConverter for ResidualConverter {
         fn try_convert(
             &self,
             _expr: &PhysicalExprRef,
@@ -1934,7 +1934,7 @@ mod tests {
             Arc::new(df_expr::Literal::new(ScalarValue::Int32(Some(1)))),
         ));
         let mut opener = make_opener(store, TableSchema::from(batch.schema()), Some(filter));
-        opener.expression_convertor = Arc::new(ResidualConvertor);
+        opener.expression_converter = Arc::new(ResidualConverter);
         let result = opener
             .open(PartitionedFile::new("filter-error.vortex", size))?
             .await?
@@ -1963,7 +1963,7 @@ mod tests {
                 false,
             ))))),
         );
-        opener.expression_convertor = Arc::new(ResidualConvertor);
+        opener.expression_converter = Arc::new(ResidualConverter);
         opener.projection = vec![ProjectionExpr {
             expr: Arc::new(SnapshotErrorExpr),
             alias: "failure".into(),
