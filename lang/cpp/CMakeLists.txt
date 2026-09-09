@@ -15,9 +15,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Standalone entry points own their defaults; otherwise inherit Vortex's marker.
 if(PROJECT_IS_TOP_LEVEL)
-    set(_vortex_top_level ON)
+  set(_vortex_top_level ON)
 elseif(NOT DEFINED _vortex_top_level)
-    set(_vortex_top_level OFF)
+  set(_vortex_top_level OFF)
 endif()
 
 # Vortex does not use C++ modules, so it does not require compiler-specific
@@ -26,11 +26,11 @@ set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 # A standalone configure writes compile_commands.json for editor tooling.
 if(PROJECT_IS_TOP_LEVEL)
-    set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+  set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 endif()
 
 if(_vortex_top_level AND NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Debug)
+  set(CMAKE_BUILD_TYPE Debug)
 endif()
 
 option(BUILD_SHARED_LIBS "Use shared libraries for Vortex builds, tests, and examples" OFF)
@@ -45,7 +45,7 @@ include(../../vortex-ffi/cmake/DebugInfo.cmake)
 # The Rust FFI archive comes from vortex-ffi. A standalone configure of this
 # directory adds it here; the repository root or a parent may already have.
 if(NOT TARGET Vortex::ffi_static)
-    add_subdirectory(../../vortex-ffi ffi)
+  add_subdirectory(../../vortex-ffi ffi)
 endif()
 
 # The C++ wrapper over the C FFI. Public headers live under include/.
@@ -71,68 +71,68 @@ target_link_libraries(vortex_cxx_shared PUBLIC Vortex::ffi_shared)
 add_library(Vortex::cpp_shared ALIAS vortex_cxx_shared)
 
 if(BUILD_SHARED_LIBS)
-    set_target_properties(vortex_cxx_static PROPERTIES EXCLUDE_FROM_ALL TRUE)
-    set(_vortex_cpp_target Vortex::cpp_shared)
+  set_target_properties(vortex_cxx_static PROPERTIES EXCLUDE_FROM_ALL TRUE)
+  set(_vortex_cpp_target Vortex::cpp_shared)
 else()
-    set_target_properties(vortex_cxx_shared PROPERTIES EXCLUDE_FROM_ALL TRUE)
-    set(_vortex_cpp_target Vortex::cpp_static)
+  set_target_properties(vortex_cxx_shared PROPERTIES EXCLUDE_FROM_ALL TRUE)
+  set(_vortex_cpp_target Vortex::cpp_static)
 endif()
 
 foreach(_target IN ITEMS vortex_cxx_static vortex_cxx_shared)
-    # Hide inline symbols in the shared library and when embedding the static archive.
-    set_target_properties(${_target} PROPERTIES VISIBILITY_INLINES_HIDDEN ON)
-    target_compile_features(${_target} PUBLIC cxx_std_20)
-    target_include_directories(${_target} PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-    # Warning policy must not propagate into consumers.
-    target_compile_options(${_target} PRIVATE -Wall -Wextra -Wpedantic)
-    if(VORTEX_WARNINGS_AS_ERRORS)
-        target_compile_options(${_target} PRIVATE -Werror)
-    endif()
+  # Hide inline symbols in the shared library and when embedding the static archive.
+  set_target_properties(${_target} PROPERTIES VISIBILITY_INLINES_HIDDEN ON)
+  target_compile_features(${_target} PUBLIC cxx_std_20)
+  target_include_directories(${_target} PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  # Warning policy must not propagate into consumers.
+  target_compile_options(${_target} PRIVATE -Wall -Wextra -Wpedantic)
+  if(VORTEX_WARNINGS_AS_ERRORS)
+    target_compile_options(${_target} PRIVATE -Werror)
+  endif()
 endforeach()
 
 # Test and example dependencies are fetched at configure time and never installed.
 if(VORTEX_BUILD_TESTS OR VORTEX_BUILD_EXAMPLES)
-    include(FetchContent)
+  include(FetchContent)
 
-    # Keep dependency warnings out of Vortex's warning policy.
-    set(NANOARROW_DEBUG_EXTRA_WARNINGS OFF)
-    FetchContent_Declare(
+  # Keep dependency warnings out of Vortex's warning policy.
+  set(NANOARROW_DEBUG_EXTRA_WARNINGS OFF)
+  FetchContent_Declare(
         Nanoarrow
         SYSTEM
         GIT_REPOSITORY https://github.com/apache/arrow-nanoarrow
         GIT_TAG apache-arrow-nanoarrow-0.8.0)
-    FetchContent_MakeAvailable(Nanoarrow)
-    # Suppress Nanoarrow warnings.
-    target_compile_options(nanoarrow_static PRIVATE -w)
-    target_compile_options(nanoarrow_shared PRIVATE -w)
+  FetchContent_MakeAvailable(Nanoarrow)
+  # Suppress Nanoarrow warnings.
+  target_compile_options(nanoarrow_static PRIVATE -w)
+  target_compile_options(nanoarrow_shared PRIVATE -w)
 
-    # arrow-nanoarrow creates a self-referential symlink:
-    # python/subprojects/arrow-nanoarrow -> ../..
-    if(IS_SYMLINK "${nanoarrow_SOURCE_DIR}/python/subprojects/arrow-nanoarrow")
-        file(REMOVE "${nanoarrow_SOURCE_DIR}/python/subprojects/arrow-nanoarrow")
-    endif()
+  # arrow-nanoarrow creates a self-referential symlink:
+  # python/subprojects/arrow-nanoarrow -> ../..
+  if(IS_SYMLINK "${nanoarrow_SOURCE_DIR}/python/subprojects/arrow-nanoarrow")
+    file(REMOVE "${nanoarrow_SOURCE_DIR}/python/subprojects/arrow-nanoarrow")
+  endif()
 endif()
 
 if(VORTEX_BUILD_TESTS)
-    FetchContent_Declare(
+  FetchContent_Declare(
         Catch
         SYSTEM
         GIT_REPOSITORY https://github.com/catchorg/Catch2.git
         GIT_TAG v3.8.1)
-    FetchContent_MakeAvailable(Catch)
-    # By path: Catch2 exports its module directory only to the directory that
-    # populated it, which may be vortex-ffi/test.
-    include("${catch_SOURCE_DIR}/extras/Catch.cmake")
+  FetchContent_MakeAvailable(Catch)
+  # By path: Catch2 exports its module directory only to the directory that
+  # populated it, which may be vortex-ffi/test.
+  include("${catch_SOURCE_DIR}/extras/Catch.cmake")
 
-    # Catch2's headers and library must agree on standard-dependent features.
-    target_compile_features(Catch2 PRIVATE cxx_std_20)
-    target_compile_definitions(Catch2 PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS)
+  # Catch2's headers and library must agree on standard-dependent features.
+  target_compile_features(Catch2 PRIVATE cxx_std_20)
+  target_compile_definitions(Catch2 PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS)
 
-    # Embedding parents must also call enable_testing() for ctest to find these.
-    enable_testing()
-    add_subdirectory(tests)
+  # Embedding parents must also call enable_testing() for ctest to find these.
+  enable_testing()
+  add_subdirectory(tests)
 endif()
 
 if(VORTEX_BUILD_EXAMPLES)
-    add_subdirectory(examples)
+  add_subdirectory(examples)
 endif()
