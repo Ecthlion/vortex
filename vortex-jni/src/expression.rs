@@ -65,6 +65,9 @@ use vortex::scalar_fn::fns::list_contains::ListContainsOptions;
 use vortex::scalar_fn::fns::literal::Literal;
 use vortex::scalar_fn::fns::merge::DuplicateHandling;
 use vortex::scalar_fn::fns::operators::Operator;
+use vortex_spatial::extension::SpatialMetadata;
+use vortex_spatial::extension::WellKnownBinary;
+use vortex_spatial::extension::Wkb;
 
 use crate::errors::JNIError;
 use crate::errors::try_or_throw;
@@ -110,6 +113,24 @@ fn parse_duplicate_handling(tag: jbyte) -> Result<DuplicateHandling, JNIError> {
         0 => DuplicateHandling::RightMost,
         1 => DuplicateHandling::Error,
         other => throw_runtime!("unknown duplicate handling code: {other}"),
+    })
+}
+
+/// Render an expression using its Rust `Display` impl.
+///
+/// Columns render as `$.name` and literals as their value. Every null literal renders as `null`
+/// whatever its dtype, but a wrapped value keeps its wrapper, so a null variant (`null`) and a
+/// variant holding null (`variant(null)`) — indistinguishable through the Java API — read
+/// differently here.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_vortex_jni_NativeExpression_display(
+    mut env: EnvUnowned,
+    _class: JClass,
+    pointer: jlong,
+) -> jni::sys::jstring {
+    try_or_throw(&mut env, |env| {
+        let expr = unsafe { expr_ref(pointer) };
+        Ok(env.new_string(expr.to_string())?.into_raw())
     })
 }
 
@@ -783,7 +804,87 @@ pub extern "system" fn Java_dev_vortex_jni_NativeExpression_literalUuid(
     })
 }
 
-/// Parse a nullable primitive [`DType`] from the wire-encoded byte tag.
+/// Build a Variant literal wrapping the value of the literal expression at `value`.
+///
+/// A Variant scalar carries a row-specific nested scalar, so the literal is spelled as a literal
+/// of the wrapped type. The wrapped scalar must be non-null or a `DType::Null` literal: a
+/// variant that is defined and holds null is spelled as a `DType::Null` inside a variant, which
+/// is distinct from a null variant (`literalNull` with the variant tag). A null of any other type
+/// is rejected by scalar validation, so it is built with `try_new` to surface that as an error
+/// rather than the panic `Scalar::variant` would raise across the JNI boundary.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_vortex_jni_NativeExpression_literalVariant(
+    mut env: EnvUnowned,
+    _class: JClass,
+    value: jlong,
+) -> jlong {
+    try_or_throw(&mut env, |_| {
+        let expr = unsafe { expr_ref(value) };
+        let scalar = expr
+            .as_opt::<Literal>()
+            .cloned()
+            .ok_or_else(|| -> JNIError {
+                vortex_err!("variant literal must wrap a literal, got {expr}").into()
+            })?;
+        let variant = Scalar::try_new(
+            DType::Variant(Nullability::NonNullable),
+            Some(ScalarValue::Variant(Box::new(scalar))),
+        )?;
+        Ok(into_raw(lit(variant)))
+    })
+}
+
+/// Build the `vortex.st.wkb` extension [`DType`] with the given CRS and nullability.
+fn wkb_dtype(crs: Option<String>, nullability: Nullability) -> Result<DType, JNIError> {
+    let ext =
+        ExtDType::<WellKnownBinary>::try_new(SpatialMetadata { crs }, DType::Binary(nullability))?;
+    Ok(DType::Extension(ext.erased()))
+}
+
+/// Build a geometry literal from an OGC Well-Known Binary payload.
+///
+/// The `crs` string is stored verbatim in the extension metadata and must match the column's for
+/// the literal to compare against it; pass null for an unreferenced geometry. Vortex models
+/// geography with the same `vortex.st.wkb` extension — it records a CRS but not an edge
+/// interpolation, so a geography value is spelled as a geometry literal here and its spherical
+/// edge semantics are not carried.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_vortex_jni_NativeExpression_literalGeometry(
+    mut env: EnvUnowned,
+    _class: JClass,
+    wkb: JByteArray,
+    crs: JString,
+    is_null_flag: jboolean,
+) -> jlong {
+    try_or_throw(&mut env, |env| {
+        let crs: Option<String> = if crs.is_null() {
+            None
+        } else {
+            Some(crs.try_to_string(env)?)
+        };
+        if is_null_flag {
+            return Ok(into_raw(lit(Scalar::null(wkb_dtype(
+                crs,
+                Nullability::Nullable,
+            )?))));
+        }
+        if wkb.is_null() {
+            throw_runtime!("geometry literal bytes must not be null");
+        }
+        let bytes = env.convert_byte_array(&wkb)?;
+        // Reject a malformed payload here rather than at scan time: the extension only validates
+        // that the storage is binary, so bad WKB would otherwise surface as a decode failure deep
+        // inside a spatial kernel.
+        Wkb::try_from_bytes(&bytes)?;
+        let dtype = wkb_dtype(crs, Nullability::NonNullable)?;
+        Ok(into_raw(lit(Scalar::try_new(
+            dtype,
+            Some(ScalarValue::Binary(bytes.into())),
+        )?)))
+    })
+}
+
+/// Parse a nullable [`DType`] from the wire-encoded byte tag.
 ///
 /// Tag values intentionally do not overlap with [`parse_time_unit`].
 /// See `dev.vortex.api.Expression.DType` on the Java side for the source of truth.
@@ -798,6 +899,11 @@ fn parse_null_dtype(tag: jbyte) -> Result<DType, JNIError> {
         6 => DType::Primitive(PType::F64, Nullability::Nullable),
         7 => DType::Utf8(Nullability::Nullable),
         8 => DType::Binary(Nullability::Nullable),
+        // `DType::Null` is the type whose only value is null: the Iceberg `unknown` type, and
+        // the element type of a variant-null. It has no non-null form and no nullability
+        // parameter.
+        9 => DType::Null,
+        10 => DType::Variant(Nullability::Nullable),
         other => throw_runtime!("unknown null dtype tag: {other}"),
     })
 }
