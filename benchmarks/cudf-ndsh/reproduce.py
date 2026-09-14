@@ -10,11 +10,11 @@ import json
 import math
 import os
 import platform
+import re
 import shlex
 import shutil
 import signal
 import subprocess
-import tarfile
 import time
 from pathlib import Path
 
@@ -22,12 +22,45 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 QUERIES = (1, 5, 6, 9, 10)
 TARGETS = ("NDSH_VORTEX_BUILD_SMOKE", "NDSH_VORTEX_IO_TEST", *(f"NDSH_Q{q:02}_NVBENCH" for q in QUERIES))
-RECIPE_FILES = (
-    "reproduce.py",
-    "build-lock.json",
-    "environment-linux-aarch64.lock",
-    "nvcc131-cudf-hook.cmake",
-    "upstream.patch",
+RECIPE_FILES = ("reproduce.py", "build-lock.json", "upstream.patch")
+BUILD_ENVIRONMENT = (
+    "PATH",
+    "LD_LIBRARY_PATH",
+    "LIBRARY_PATH",
+    "CPATH",
+    "C_INCLUDE_PATH",
+    "CPLUS_INCLUDE_PATH",
+    "CC",
+    "CXX",
+    "CUDACXX",
+    "CUDAHOSTCXX",
+    "NVCC_CCBIN",
+    "CFLAGS",
+    "CXXFLAGS",
+    "CPPFLAGS",
+    "LDFLAGS",
+    "CUDAFLAGS",
+    "NVCC_PREPEND_FLAGS",
+    "NVCC_APPEND_FLAGS",
+    "CMAKE_PREFIX_PATH",
+    "CMAKE_TOOLCHAIN_FILE",
+    "CUDA_VISIBLE_DEVICES",
+    "CUDA_DEVICE_ORDER",
+    "CUDAToolkit_ROOT",
+    "CUDA_PATH",
+    "CUDA_HOME",
+    "LIBCLANG_PATH",
+    "BINDGEN_EXTRA_CLANG_ARGS",
+    "PKG_CONFIG_PATH",
+    "PKG_CONFIG_LIBDIR",
+    "PKG_CONFIG_SYSROOT_DIR",
+    "CONDA_PREFIX",
+    "VIRTUAL_ENV",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "RUSTUP_TOOLCHAIN",
+    "RUSTC_WRAPPER",
+    "RUSTFLAGS",
 )
 
 
@@ -50,40 +83,25 @@ def git_output(path: Path, *args: str) -> str:
     ).strip()
 
 
-def locked_environment(prefix: Path):
-    """Require the explicit package set, rather than an ambient RAPIDS/Python environment."""
-    expected = {}
-    for line in (HERE / "environment-linux-aarch64.lock").read_text().splitlines():
-        if line.startswith("https://"):
-            package, sha256 = line.rsplit("/", 1)[1].split("#")
-            name = package.removesuffix(".conda").removesuffix(".tar.bz2")
-            expected[f"{name}.json"] = sha256
-    actual = {p.name: json.loads(p.read_text()).get("sha256") for p in (prefix / "conda-meta").glob("*.json")}
-    if not expected or actual != expected:
-        raise RuntimeError("Toolchain prefix differs from environment-linux-aarch64.lock; create a fresh prefix")
-    if any((prefix / "lib/python3.12/site-packages").glob("*.dist-info")):
-        raise RuntimeError("Use a fresh toolchain prefix without pip-installed packages")
-
-
 def environment(args: argparse.Namespace) -> dict[str, str]:
-    prefix, cuda = args.toolchain, args.cuda_root
-    return {
-        "HOME": str(Path.home()),
-        "PATH": os.pathsep.join(map(str, (prefix / "bin", cuda / "bin", Path.home() / ".cargo/bin", "/usr/bin", "/bin"))),
-        "LD_LIBRARY_PATH": os.pathsep.join(map(str, (prefix / "lib", cuda / "lib64"))),
-        "LANG": "C",
-        "LC_ALL": "C",
-        "GIT_EDITOR": "true",
-        "GIT_TERMINAL_PROMPT": "0",
-        "PYTHONNOUSERSITE": "1",
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "TMPDIR": str(args.work_dir / "tmp"),
-        "CARGO_BUILD_JOBS": str(args.cargo_jobs),
-        "NVCC_CCBIN": str(prefix / "bin/aarch64-conda-linux-gnu-g++"),
-        "LIBCLANG_PATH": str(args.libclang),
-        "FLATC": str(args.work_dir / "flatc-build/flatc"),
-        "PKG_CONFIG_PATH": str(prefix / "lib/pkgconfig"),
-    }
+    # Preserve the caller's build setup without collecting unrelated credentials.
+    selected = {name: os.environ[name] for name in BUILD_ENVIRONMENT if name in os.environ}
+    selected.setdefault("PATH", os.defpath)
+    selected.update(
+        {
+            "HOME": str(Path.home()),
+            "LANG": "C",
+            "LC_ALL": "C",
+            "GIT_EDITOR": "true",
+            "GIT_TERMINAL_PROMPT": "0",
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TMPDIR": str(args.work_dir / "tmp"),
+            "CARGO_BUILD_JOBS": str(args.cargo_jobs),
+            "FLATC": str(args.work_dir / "flatc-build/flatc"),
+        }
+    )
+    return selected
 
 
 class Runner:
@@ -157,21 +175,13 @@ class Runner:
         return path
 
 
-def identity(args: argparse.Namespace) -> dict:
+def identity() -> dict:
     if git_output(ROOT, "status", "--porcelain", "--untracked-files=all"):
         raise RuntimeError("Commit source changes before a reproducible build/run")
     return {
         "vortex_revision": git_output(ROOT, "rev-parse", "HEAD"),
         "inputs": {name: digest(HERE / name) for name in RECIPE_FILES},
         "cargo_lock": digest(ROOT / "Cargo.lock"),
-        "toolchain": str(args.toolchain),
-        "cuda_root": str(args.cuda_root),
-        "clangxx": str(args.clangxx),
-        "libclang": str(args.libclang),
-        "external_tools": {
-            str(path): digest(path)
-            for path in (args.cuda_root / "version.json", args.clangxx, args.libclang / "libclang.so")
-        },
     }
 
 
@@ -187,66 +197,26 @@ def initialize_work(work: Path, recipe: dict):
         save(marker, recipe)
 
 
-def configure_command(args: argparse.Namespace, lock: dict, nvcomp: Path) -> list[str | Path]:
-    work, prefix = args.work_dir, args.toolchain
+def configure_command(args: argparse.Namespace, lock: dict) -> list[str | Path]:
+    work = args.work_dir
     flags = {
         "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_C_COMPILER": prefix / "bin/aarch64-conda-linux-gnu-gcc",
-        "CMAKE_CXX_COMPILER": prefix / "bin/aarch64-conda-linux-gnu-g++",
-        "CMAKE_CUDA_HOST_COMPILER": prefix / "bin/aarch64-conda-linux-gnu-g++",
-        "CMAKE_CUDA_COMPILER": args.cuda_root / "bin/nvcc",
-        "CUDAToolkit_ROOT": args.cuda_root,
-        "CMAKE_MAKE_PROGRAM": prefix / "bin/ninja",
-        "CMAKE_PREFIX_PATH": prefix,
-        "Python_EXECUTABLE": prefix / "bin/python",
-        "Python3_EXECUTABLE": prefix / "bin/python",
-        "CMAKE_CUDA_ARCHITECTURES": lock["cuda_architectures"],
-        "CMAKE_C_FLAGS": "",
-        "CMAKE_CXX_FLAGS": "",
-        "CMAKE_CUDA_FLAGS": "",
-        "CMAKE_C_FLAGS_RELEASE": "-O3 -DNDEBUG",
-        "CMAKE_CXX_FLAGS_RELEASE": "-O3 -DNDEBUG",
-        "CMAKE_CUDA_FLAGS_RELEASE": "-O3 -DNDEBUG",
-        "CMAKE_FIND_USE_PACKAGE_REGISTRY": "OFF",
-        "CMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY": "OFF",
-        "CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH": "OFF",
         "BUILD_TESTS": "OFF",
         "BUILD_BENCHMARKS": "ON",
         "BUILD_SHARED_LIBS": "ON",
-        "CUDF_BUILD_TESTUTIL": "ON",
-        "CUDF_BUILD_STREAMS_TEST_UTIL": "ON",
-        "CUDF_BUILD_STATIC_DEPS": "ON",
-        "CUDF_KVIKIO_REMOTE_IO": "ON",
-        "CUDF_USE_PER_THREAD_DEFAULT_STREAM": "OFF",
-        "CUDF_LTO_ARCHITECTURE": "75",
-        "CUDA_ENABLE_LINEINFO": "OFF",
-        "CUDA_WARNINGS_AS_ERRORS": "ON",
-        "USE_NVTX": "ON",
-        "RMM_NVTX": "OFF",
         "CUDF_NDSH_WITH_VORTEX": "ON",
         "FETCHCONTENT_SOURCE_DIR_VORTEX": ROOT,
         "FETCHCONTENT_SOURCE_DIR_RAPIDS-CMAKE": work / "rapids-cmake",
         "RAPIDS_CMAKE_CPM_OVERRIDE_VERSION_FILE": HERE / "build-lock.json",
-        "CMAKE_PROJECT_CUDF_INCLUDE": HERE / "nvcc131-cudf-hook.cmake",
-        "nvcomp_DIR": nvcomp / "lib/cmake/nvcomp",
         "CPM_DOWNLOAD_LOCATION": work / "CPM.cmake",
-        "CPM_USE_LOCAL_PACKAGES": "OFF",
-        "CPM_LOCAL_PACKAGES_ONLY": "OFF",
-        "CPM_DOWNLOAD_ALL": "OFF",
         "CPM_dlpack_SOURCE": work / "dlpack",
         "CPM_xxhash_SOURCE": work / "xxhash",
         # Keep NVBench's hashed URL and PATCH_COMMAND together in its own declaration.
         "CPM_DOWNLOAD_nlohmann_json": "ON",
-        # CURL comes from the Conda lock; a missing package must not trigger a source fallback.
-        "CPM_DOWNLOAD_CURL": "OFF",
-        "CMAKE_REQUIRE_FIND_PACKAGE_CURL": "ON",
-        "CURL_NO_CURL_CMAKE": "ON",
-        "CURL_INCLUDE_DIR": prefix / "include",
-        "CURL_LIBRARY": prefix / "lib/libcurl.so",
     }
     flags.update({f"CPM_DOWNLOAD_{name}": "ON" for name in lock["packages"]})
     return [
-        prefix / "bin/cmake",
+        "cmake",
         "--fresh",
         "-S",
         work / "cudf/cpp",
@@ -254,37 +224,75 @@ def configure_command(args: argparse.Namespace, lock: dict, nvcomp: Path) -> lis
         work / "cudf-build",
         "-G",
         "Ninja",
+        *args.cmake_arg,
         *(f"-D{name}={value}" for name, value in flags.items()),
     ]
+
+
+def compiler_arguments(arguments: list[str]) -> list[str]:
+    # flatc is a native build tool; use the caller's host compiler selection too.
+    names = {
+        "CMAKE_C_COMPILER",
+        "CMAKE_CXX_COMPILER",
+        "CMAKE_C_COMPILER_ARG1",
+        "CMAKE_CXX_COMPILER_ARG1",
+        "CMAKE_TOOLCHAIN_FILE",
+        "CMAKE_SYSROOT",
+    }
+    return [arg for arg in arguments if arg[2:].split("=", 1)[0].split(":", 1)[0] in names]
+
+
+def record_toolchain(runner: Runner) -> dict:
+    cache = {}
+    for line in (runner.work / "cudf-build/CMakeCache.txt").read_text().splitlines():
+        if line and not line.startswith(("#", "//")) and "=" in line:
+            key, value = line.split("=", 1)
+            cache[key.split(":", 1)[0]] = value
+    names = (
+        "CMAKE_C_COMPILER",
+        "CMAKE_CXX_COMPILER",
+        "CMAKE_CUDA_COMPILER",
+        "CMAKE_CUDA_HOST_COMPILER",
+        "CMAKE_C_COMPILER_ARG1",
+        "CMAKE_CXX_COMPILER_ARG1",
+        "CMAKE_CUDA_COMPILER_ARG1",
+        "CMAKE_CUDA_HOST_COMPILER_ARG1",
+        "CMAKE_CUDA_ARCHITECTURES",
+        "CMAKE_TOOLCHAIN_FILE",
+        "CMAKE_SYSROOT",
+        "CUDAToolkit_BIN_DIR",
+        "CMAKE_C_FLAGS",
+        "CMAKE_CXX_FLAGS",
+        "CMAKE_CUDA_FLAGS",
+        "CMAKE_EXE_LINKER_FLAGS",
+        "CMAKE_C_FLAGS_RELEASE",
+        "CMAKE_CXX_FLAGS_RELEASE",
+        "CMAKE_CUDA_FLAGS_RELEASE",
+        "nvcomp_DIR",
+    )
+    selected = {name: cache[name] for name in names if cache.get(name)}
+    tools = {}
+    for name in ("CMAKE_C_COMPILER", "CMAKE_CXX_COMPILER", "CMAKE_CUDA_COMPILER", "CMAKE_CUDA_HOST_COMPILER"):
+        if selected.get(name):
+            compiler = Path(selected[name])
+            arguments = shlex.split(cache.get(f"{name}_ARG1", ""))
+            tools[name] = {
+                "version": runner.run(name.lower(), [compiler, *arguments, "--version"]),
+                "sha256": digest(compiler),
+            }
+    result = {"cache": selected, "tools": tools}
+    save(runner.logs / "toolchain.json", result)
+    nvcc = tools["CMAKE_CUDA_COMPILER"]["version"]
+    version = re.search(r"release\s+(\d+)\.(\d+)", nvcc)
+    if not version or tuple(map(int, version.groups())) < (12, 8):
+        raise RuntimeError("This benchmark recipe requires an NVIDIA CUDA toolkit >= 12.8")
+    return result
 
 
 def build(args: argparse.Namespace, lock: dict, runner: Runner, recipe: dict):
     # A failed rebuild must not leave the previous success marker usable by `run`.
     (runner.work / "build.json").unlink(missing_ok=True)
-    for name in ("include/curl/curl.h", "include/curl/curlver.h", "lib/libcurl.so", "lib/pkgconfig/libcurl.pc"):
-        if not (args.toolchain / name).is_file():
-            raise RuntimeError(f"Missing locked toolchain file: {name}")
-    nvcc = runner.run("nvcc-version", [args.cuda_root / "bin/nvcc", "--version"])
-    if f"V{lock['nvcc_version']}" not in nvcc:
-        raise RuntimeError(f"Expected NVCC {lock['nvcc_version']}")
-    toolkit = json.loads((args.cuda_root / "version.json").read_text())
-    if toolkit["cuda"]["version"] != lock["cuda_version"]:
-        raise RuntimeError(f"Expected CUDA toolkit {lock['cuda_version']}")
-    if toolkit["cuda_cudart"]["version"] != lock["cuda_runtime_version"]:
-        raise RuntimeError(f"Expected CUDA runtime {lock['cuda_runtime_version']}")
-    save(runner.logs / "cuda-version.json", toolkit)
-    runner.run(
-        "python-packages",
-        [
-            args.toolchain / "bin/python",
-            "-c",
-            "from importlib.metadata import distributions; "
-            "assert not list(distributions()), 'Use a toolchain prefix without additional Python packages'",
-        ],
-    )
-    clang = runner.run("clang-version", [args.clangxx, "--version"])
-    if f"version {lock['clang_version']}" not in clang:
-        raise RuntimeError(f"Expected Clang {lock['clang_version']}")
+    runner.run("cmake-version", ["cmake", "--version"])
     runner.run("rust-version", ["rustc", "--version"], ROOT)
     runner.run("cargo-version", ["cargo", "--version"], ROOT)
     cudf = runner.checkout("cudf", lock["cudf"], patched=True)
@@ -315,7 +323,7 @@ def build(args: argparse.Namespace, lock: dict, runner: Runner, recipe: dict):
         "status": git_output(cudf, "status", "--porcelain", "--untracked-files=all"),
     }:
         raise RuntimeError("Prepared cuDF source changed; use a new work directory")
-    cmake = args.toolchain / "bin/cmake"
+    cmake = "cmake"
     runner.run(
         "flatc-configure",
         [
@@ -327,7 +335,7 @@ def build(args: argparse.Namespace, lock: dict, runner: Runner, recipe: dict):
             "-G",
             "Ninja",
             "-DCMAKE_BUILD_TYPE=Release",
-            f"-DCMAKE_CXX_COMPILER={args.clangxx}",
+            *compiler_arguments(args.cmake_arg),
             "-DFLATBUFFERS_BUILD_FLATC=ON",
             "-DFLATBUFFERS_BUILD_FLATLIB=OFF",
             "-DFLATBUFFERS_BUILD_TESTS=OFF",
@@ -340,21 +348,18 @@ def build(args: argparse.Namespace, lock: dict, runner: Runner, recipe: dict):
     )
     if lock["flatc"]["version"] not in runner.run("flatc-version", [runner.env["FLATC"], "--version"]):
         raise RuntimeError("Unexpected Vortex flatc version")
-    archive = runner.download("nvcomp.tar.xz", lock["nvcomp"])
-    nvcomp = runner.work / lock["nvcomp"]["directory"]
-    if not nvcomp.exists():
-        with tarfile.open(archive) as source:
-            source.extractall(runner.work, filter="data")
+
     # cuCollections otherwise fetches its bootstrap from RAPIDS-CMake's moving main branch.
     cuco_bootstrap = runner.work / "cudf-build/_deps/cuco-build/CUCO_RAPIDS.cmake"
     cuco_bootstrap.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(runner.work / "rapids-cmake/RAPIDS.cmake", cuco_bootstrap)
-    runner.run("cudf-configure", configure_command(args, lock, nvcomp))
+    runner.run("cudf-configure", configure_command(args, lock))
+    toolchain = record_toolchain(runner)
     runner.run(
         "cudf-build",
         [cmake, "--build", runner.work / "cudf-build", "--target", *TARGETS, "--parallel", args.jobs],
     )
-    if identity(args) != recipe:
+    if identity() != recipe:
         raise RuntimeError("Vortex source changed during the build")
     save(
         runner.work / "build.json",
@@ -362,6 +367,9 @@ def build(args: argparse.Namespace, lock: dict, runner: Runner, recipe: dict):
             "recipe": recipe,
             "logs": str(runner.logs),
             "generator": "original",
+            "environment": runner.env,
+            "cmake_args": args.cmake_arg,
+            "toolchain": toolchain,
             "binaries": {name: digest(runner.work / "cudf-build/benchmarks" / name) for name in TARGETS},
             "libcudf": digest(runner.work / "cudf-build/libcudf.so"),
         },
@@ -468,10 +476,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("build", "run"))
     parser.add_argument("--work-dir", type=Path, default=ROOT / "build/cudf-ndsh-repro")
-    parser.add_argument("--toolchain", type=Path, required=True, help="Prefix created from environment-linux-aarch64.lock")
-    parser.add_argument("--cuda-root", type=Path, default=Path("/usr/local/cuda-13.1"))
-    parser.add_argument("--clangxx", type=Path, default=Path("/usr/bin/clang++"))
-    parser.add_argument("--libclang", type=Path, default=Path("/usr/lib/llvm-18/lib"))
+    parser.add_argument(
+        "--cmake-arg",
+        action="append",
+        default=[],
+        help="Build-only CMake definition, e.g. --cmake-arg=-DCMAKE_CUDA_ARCHITECTURES=90 (repeatable)",
+    )
     parser.add_argument("--jobs", type=int, default=2)
     parser.add_argument("--cargo-jobs", type=int, default=4)
     parser.add_argument("--timeout", type=int, default=1200, help="Maximum seconds per command; no automatic retries")
@@ -480,25 +490,35 @@ def main():
     parser.add_argument("--min-samples", type=int, default=3)
     parser.add_argument("--sample-timeout", type=int, default=30, help="NVBench timeout per state")
     args = parser.parse_args()
-    if platform.system() != "Linux" or platform.machine() != "aarch64":
-        parser.error("This lock targets Linux AArch64/SBSA")
+    if platform.system() != "Linux":
+        parser.error("cuDF/Vortex GPU benchmarks require Linux")
+    if any(not re.fullmatch(r"-D[A-Za-z_][A-Za-z_0-9-]*(?::[A-Za-z]+)?=.*", arg) for arg in args.cmake_arg):
+        parser.error("Pass each CMake definition as --cmake-arg=-DNAME=VALUE")
+    if args.action == "run" and args.cmake_arg:
+        parser.error("run uses the recorded build; --cmake-arg is build-only")
     if (
         not math.isfinite(args.scale_factor)
         or args.scale_factor <= 0
         or min(args.jobs, args.cargo_jobs, args.timeout, args.min_samples, args.sample_timeout) <= 0
     ):
         parser.error("Scale factor and command limits must be positive and finite")
-    for name in ("work_dir", "toolchain", "cuda_root", "clangxx", "libclang"):
-        # Preserve compiler symlink names: clang++ and clang select different driver modes.
-        setattr(args, name, Path(os.path.abspath(getattr(args, name))))
-    locked_environment(args.toolchain)
-    recipe = identity(args)
-    initialize_work(args.work_dir, recipe)
-    runner = Runner(args.work_dir, environment(args), args.timeout)
-    lock = json.loads((HERE / "build-lock.json").read_text())
+    args.work_dir = args.work_dir.resolve()
+    recipe = identity()
     if args.action == "build":
+        env = environment(args)
+        initialize_work(args.work_dir, {"source": recipe, "cmake_args": args.cmake_arg, "environment": env})
+        runner = Runner(args.work_dir, env, args.timeout)
+        lock = json.loads((HERE / "build-lock.json").read_text())
         build(args, lock, runner, recipe)
     else:
+        record = json.loads((args.work_dir / "build.json").read_text())
+        env = record["environment"].copy()
+        # ELF RUNPATH follows LD_LIBRARY_PATH; the library we verified must take precedence.
+        paths = [str(args.work_dir / "cudf-build")]
+        if env.get("LD_LIBRARY_PATH"):
+            paths.append(env["LD_LIBRARY_PATH"])
+        env["LD_LIBRARY_PATH"] = os.pathsep.join(paths)
+        runner = Runner(args.work_dir, env, args.timeout)
         benchmark(args, runner, recipe)
 
 

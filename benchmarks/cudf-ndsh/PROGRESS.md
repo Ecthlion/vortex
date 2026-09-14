@@ -25,10 +25,12 @@ Checkpoint: 2026-09-14 · branch `ad/cudf-ndsh-build-support`.
 
 ## Build and evidence
 
-[`reproduce.py`](reproduce.py), the dependency locks and the NVCC hook capture the
-clean Release build/run workflow; commands are in [README.md](README.md#build-from-a-clean-checkout).
-It builds its own cuDF library and benchmark executables. **The clean recipe and
-current-source runtime measurements are not yet validated.**
+[`reproduce.py`](reproduce.py) and the source dependency lock capture the Release
+build/run workflow; commands are in [README.md](README.md#build-from-a-clean-checkout).
+cuDF selects the toolchain from the caller's environment/CMake definitions; Vortex
+forwards that selection into Cargo. Compiler versions and flags are recorded with
+the build. **The clean recipe and current-source runtime measurements are not yet
+validated.** See [Validation](VALIDATION.md#current-build-status) for compiler limitations.
 
 Earlier source checkpoint `03fd6013e2687a11e35033ec7307ac909ee88f9d` built a Vortex
 Release archive and an isolated consumer: **75/75** objects, **4/4** archives and

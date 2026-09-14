@@ -53,63 +53,60 @@ collect separately labeled baselines.
 
 ## Build from a clean checkout
 
-[`reproduce.py`](reproduce.py) is the build/run entry point. It fetches pinned cuDF
-and dependencies, applies `upstream.patch`, and builds Release cuDF, CUDA-enabled
-Vortex, the smoke/adapter tests, and all five query executables through CMake.
-It uses the original generator and this Vortex checkout as the local source.
+[`reproduce.py`](reproduce.py) wraps cuDF's CMake build: it fetches pinned sources,
+applies `upstream.patch`, and builds Release cuDF, CUDA-enabled Vortex, the smoke/adapter
+tests and all five query executables. It uses the original generator.
 
-This recipe targets **Linux AArch64/SBSA with a Hopper GPU (SM90)**. Prerequisites:
+Start in a working **Linux cuDF development environment** with an NVIDIA CUDA toolkit
+**12.8 or newer**, a compatible host compiler/driver, CMake 4+, Ninja, Python 3.11+,
+Git and curl. Vortex also requires libclang and Rustup with the toolchain in
+[`rust-toolchain.toml`](../../rust-toolchain.toml). See
+[Validation](VALIDATION.md#current-build-status) for current compatibility evidence.
 
-- CUDA SDK **13.1.2** (NVCC 13.1.115, runtime 13.1.80), including NVRTC, cuFile and
-  NVML development files, plus a compatible NVIDIA driver. The default SDK path is
-  `/usr/local/cuda-13.1`.
-- Clang/libclang **18.1.3**, defaulting to `/usr/bin/clang++` and
-  `/usr/lib/llvm-18/lib/libclang.so`.
-- Rustup with the toolchain in [`rust-toolchain.toml`](../../rust-toolchain.toml),
-  Git, curl, glibc ≥2.28, and micromamba **2.6.2** for the explicit environment lock.
-- Network access for public source/package downloads and disk space for a full cuDF
-  build. Put the work directory on disk, not tmpfs, for cold-I/O measurements.
-
-From the Vortex root, with source changes committed:
+From the Vortex root, with source changes committed; this example selects Hopper:
 
 ```sh
-micromamba create -y -p build/cudf-ndsh-env \
-  --file benchmarks/cudf-ndsh/environment-linux-aarch64.lock
+python3 benchmarks/cudf-ndsh/reproduce.py build \
+  --cmake-arg=-DCMAKE_CUDA_ARCHITECTURES=90
 
-build/cudf-ndsh-env/bin/python benchmarks/cudf-ndsh/reproduce.py build \
-  --toolchain build/cudf-ndsh-env
-
-build/cudf-ndsh-env/bin/python benchmarks/cudf-ndsh/reproduce.py run \
-  --toolchain build/cudf-ndsh-env --scale-factor 1
+python3 benchmarks/cudf-ndsh/reproduce.py run --scale-factor 1
 ```
 
-The Conda lock supplies GCC/G++ **14.3.0**, CMake, Ninja, Python and host libraries;
-use a dedicated prefix without additional packages. [`build-lock.json`](build-lock.json)
-pins cuDF/RMM, RAPIDS-CMake, CPM and other C++ inputs. Vortex's Rust dependencies
-and build-time SDK downloads are specified by the checkout and `Cargo.lock`.
-The runner builds Vortex's **25.12.19** `flatc` separately from cuDF's **24.3.25**.
-[`nvcc131-cudf-hook.cmake`](nvcc131-cudf-hook.cmake) applies the compiler workaround
-only to cuDF's CUDA sources.
+The runner preserves build settings such as `CC`, `CXX`, `CUDACXX`, `CUDAHOSTCXX`,
+`CMAKE_PREFIX_PATH` and `LIBCLANG_PATH`. Additional CMake definitions can be passed
+with repeated `--cmake-arg=-DNAME=VALUE`, including `CMAKE_CUDA_COMPILER` and
+`CMAKE_CUDA_HOST_COMPILER`. Use absolute paths for file-valued definitions. Vortex's
+CMake-to-Cargo bridge forwards the selected toolkit, architectures and explicit CUDA
+host compiler. cuDF owns nvCOMP selection for the chosen environment.
 
-The default work directory is `build/cudf-ndsh-repro`. Change `--work-dir` for a new
-source revision; an existing directory must belong to the same recipe. SDK locations
-can be selected with `--cuda-root`, `--clangxx` and `--libclang`. Commands are bounded
-by `--timeout` (1,200 seconds each); `--jobs` defaults to 2 and `--cargo-jobs` to 4.
-If a build times out, inspect its log before explicitly rerunning with a larger limit.
+[`build-lock.json`](build-lock.json) pins cuDF/RMM, RAPIDS-CMake, CPM and the C++ source
+dependencies. System tools and libraries come from the caller's environment; their
+selected compiler paths, versions and flags are recorded with the build. Vortex's
+Rust dependencies and build-time SDK downloads are specified by the checkout and
+`Cargo.lock`. The runner builds Vortex's **25.12.19** `flatc` separately from cuDF's
+**24.3.25**.
+
+The default work directory is `build/cudf-ndsh-repro`. Use a new `--work-dir` when
+changing source, compiler settings or CMake definitions. Public downloads need network
+access. Allow disk space for a full cuDF build and put the work directory on disk,
+not tmpfs, for cold-I/O measurements. Commands are bounded by `--timeout` (1,200 seconds
+each); `--jobs` defaults to 2 and `--cargo-jobs` to 4. If a build times out, inspect its
+log before explicitly rerunning with a larger limit.
 
 ## Run and collect results
 
-`run` checks the recorded source revision and binary/library hashes, runs smoke and
-adapter checks, then runs Q1/Q5/Q6/Q9/Q10 **sequentially on device 0**. Each query
-covers Parquet/Vortex × read/full-query × warm/cold; Q9 covers all three existing
+`run` reuses the recorded build environment, giving the freshly built cuDF library
+precedence on the library search path. It checks source and binary/library hashes,
+runs smoke and adapter checks, then runs Q1/Q5/Q6/Q9/Q10 **sequentially on device 0**.
+Each query covers Parquet/Vortex × read/full-query × warm/cold; Q9 covers all three existing
 amount engines. Correctness checks and fixture generation remain outside timing.
 Use `--scale-factor 10` for SF10, or `--queries 6` for a focused run.
 
 Commands, selected environment and tool versions go under `<work-dir>/logs/`;
 benchmark JSON and build provenance go under `<work-dir>/results/`. Temporary fixtures
-use `<work-dir>/tmp/`, on the chosen filesystem. Missing, skipped
-or untimed states fail the run. Build artifacts and results are ignored; the recipe,
-locks and benchmark source patch are versioned. **The clean recipe has not yet been
+use `<work-dir>/tmp/`, on the chosen filesystem. Missing, skipped or untimed states fail
+the run. Build artifacts and results are ignored; the recipe, source lock and benchmark
+source patch are versioned. **The clean recipe has not yet been
 executed end to end**; recorded build evidence is in [Validation](VALIDATION.md).
 
 Prefix profiler launches with `env -u ANTHROPIC_API_KEY` and follow the

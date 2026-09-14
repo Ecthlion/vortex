@@ -6,11 +6,19 @@ Checkpoint: 2026-09-14. Pinned cuDF:
 
 ## Current build status
 
-The [clean build/run recipe](README.md#build-from-a-clean-checkout) captures the source
-pins, host environment, compiler workaround and commands. **It has not been executed
-end to end.** Current-source runtime validation, memcheck and performance measurements
-remain pending. The new RAPIDS-CMake pin defines the recipe going forward; historical
-build records do not establish which RAPIDS-CMake revision they used.
+The [clean build/run recipe](README.md#build-from-a-clean-checkout) pins source inputs
+and records the caller-selected toolchain. **It has not been executed end to end.**
+Current-source runtime validation, memcheck and performance measurements remain pending.
+The RAPIDS-CMake pin defines the recipe going forward; historical build records do not
+establish which RAPIDS-CMake revision they used.
+
+CUDA 12.8+ is the recipe's version floor, not a claim that every compiler release is
+validated. Recorded NVCC 13.1/GCC 14 probes fail in unmodified cuDF join code with a
+private `cudf::ast::literal::ast_scalar` access error at `std::bool_constant<true>`.
+A standalone standard-C++ reproducer has the same failure. NVCC 12.8 compiled the
+isolated probes; its complete cuDF/Vortex build is still unvalidated. This compiler
+issue needs a separate upstream resolution. Probe sources/logs are under ignored
+`build/cudf-ndsh-build/access-repro/`.
 
 ## Earlier isolated build
 
