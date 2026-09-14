@@ -22,7 +22,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 QUERIES = (1, 5, 6, 9, 10)
 TARGETS = ("NDSH_VORTEX_BUILD_SMOKE", "NDSH_VORTEX_IO_TEST", *(f"NDSH_Q{q:02}_NVBENCH" for q in QUERIES))
-RECIPE_FILES = ("reproduce.py", "build-lock.json", "upstream.patch")
+COMPILERS = ("CMAKE_C_COMPILER", "CMAKE_CXX_COMPILER", "CMAKE_CUDA_COMPILER", "CMAKE_CUDA_HOST_COMPILER")
 BUILD_ENVIRONMENT = (
     "PATH",
     "LD_LIBRARY_PATH",
@@ -178,10 +178,13 @@ class Runner:
 def identity() -> dict:
     if git_output(ROOT, "status", "--porcelain", "--untracked-files=all"):
         raise RuntimeError("Commit source changes before a reproducible build/run")
+    return {"vortex_revision": git_output(ROOT, "rev-parse", "HEAD")}
+
+
+def source_state(path: Path) -> dict[str, str]:
     return {
-        "vortex_revision": git_output(ROOT, "rev-parse", "HEAD"),
-        "inputs": {name: digest(HERE / name) for name in RECIPE_FILES},
-        "cargo_lock": digest(ROOT / "Cargo.lock"),
+        "diff": git_output(path, "diff", "--binary", "HEAD"),
+        "status": git_output(path, "status", "--porcelain", "--untracked-files=all"),
     }
 
 
@@ -249,14 +252,8 @@ def record_toolchain(runner: Runner) -> dict:
             key, value = line.split("=", 1)
             cache[key.split(":", 1)[0]] = value
     names = (
-        "CMAKE_C_COMPILER",
-        "CMAKE_CXX_COMPILER",
-        "CMAKE_CUDA_COMPILER",
-        "CMAKE_CUDA_HOST_COMPILER",
-        "CMAKE_C_COMPILER_ARG1",
-        "CMAKE_CXX_COMPILER_ARG1",
-        "CMAKE_CUDA_COMPILER_ARG1",
-        "CMAKE_CUDA_HOST_COMPILER_ARG1",
+        *COMPILERS,
+        *(f"{name}_ARG1" for name in COMPILERS),
         "CMAKE_CUDA_ARCHITECTURES",
         "CMAKE_TOOLCHAIN_FILE",
         "CMAKE_SYSROOT",
@@ -272,7 +269,7 @@ def record_toolchain(runner: Runner) -> dict:
     )
     selected = {name: cache[name] for name in names if cache.get(name)}
     tools = {}
-    for name in ("CMAKE_C_COMPILER", "CMAKE_CXX_COMPILER", "CMAKE_CUDA_COMPILER", "CMAKE_CUDA_HOST_COMPILER"):
+    for name in COMPILERS:
         if selected.get(name):
             compiler = Path(selected[name])
             arguments = shlex.split(cache.get(f"{name}_ARG1", ""))
@@ -304,25 +301,14 @@ def build(args: argparse.Namespace, lock: dict, runner: Runner, recipe: dict):
         runner.checkout(name, {"repository": package["git_url"], "commit": package["git_tag"]})
     runner.download("CPM.cmake", lock["cpm"])
     source_record = runner.work / "cudf-source.json"
-    if not source_record.exists():
+    if source_record.exists():
+        if json.loads(source_record.read_text()) != source_state(cudf):
+            raise RuntimeError("Prepared cuDF source changed; use a new work directory")
+    else:
         if git_output(cudf, "status", "--porcelain"):
             raise RuntimeError("cuDF checkout is not pristine")
-        runner.run("patch-check", ["git", "-C", cudf, "apply", "--check", HERE / "upstream.patch"])
         runner.run("patch", ["git", "-C", cudf, "apply", HERE / "upstream.patch"])
-        runner.run("patch-new-files", ["git", "-C", cudf, "add", "-N", "--", "cpp/benchmarks"])
-        save(
-            source_record,
-            {
-                "diff": git_output(cudf, "diff", "--binary", "HEAD"),
-                "status": git_output(cudf, "status", "--porcelain", "--untracked-files=all"),
-            },
-        )
-    recorded = json.loads(source_record.read_text())
-    if recorded != {
-        "diff": git_output(cudf, "diff", "--binary", "HEAD"),
-        "status": git_output(cudf, "status", "--porcelain", "--untracked-files=all"),
-    }:
-        raise RuntimeError("Prepared cuDF source changed; use a new work directory")
+        save(source_record, source_state(cudf))
     cmake = "cmake"
     runner.run(
         "flatc-configure",
@@ -408,11 +394,13 @@ def validate_results(data: dict, query: int, scale_factor: float):
         raise RuntimeError(f"Expected only ndsh_q{query}_local results")
     states = data["benchmarks"][0]["states"]
     engines = ("binaryop", "ast", "transform") if query == 9 else (None,)
-    expected = set(itertools.product(("parquet", "vortex"), ("read", f"q{query}"), ("warm", "cold"), engines))
-    actual = []
+    remaining = set(itertools.product(("parquet", "vortex"), ("read", f"q{query}"), ("warm", "cold"), engines))
     for state in states:
         axes = {axis["name"]: axis["value"] for axis in state["axis_values"]}
-        actual.append((axes["format"], axes["workload"], axes["cache"], axes.get("engine")))
+        key = (axes["format"], axes["workload"], axes["cache"], axes.get("engine"))
+        if key not in remaining:
+            raise RuntimeError(f"Duplicate or unexpected Q{query} state: {state['name']}")
+        remaining.remove(key)
         means = [
             float(item["value"])
             for summary in state["summaries"]
@@ -429,22 +417,30 @@ def validate_results(data: dict, query: int, scale_factor: float):
             or means[0] <= 0
         ):
             raise RuntimeError(f"Skipped, mismatched, or untimed state: {state['name']}")
-    if len(actual) != len(expected) or set(actual) != expected:
+    if remaining:
         raise RuntimeError(f"Incomplete Q{query} read/query × format × cache matrix")
 
 
-def benchmark(args: argparse.Namespace, runner: Runner, recipe: dict):
-    record = json.loads((runner.work / "build.json").read_text())
-    binaries = runner.work / "cudf-build/benchmarks"
+def benchmark(args: argparse.Namespace, recipe: dict):
+    work = args.work_dir
+    record = json.loads((work / "build.json").read_text())
+    binaries = work / "cudf-build/benchmarks"
     if (
         record["recipe"] != recipe
         or set(record["binaries"]) != set(TARGETS)
         or any(digest(binaries / name) != sha for name, sha in record["binaries"].items())
     ):
         raise RuntimeError("Build record or binaries changed; rebuild before benchmarking")
-    if digest(runner.work / "cudf-build/libcudf.so") != record["libcudf"]:
+    if digest(work / "cudf-build/libcudf.so") != record["libcudf"]:
         raise RuntimeError("libcudf changed since the recorded build")
-    results = runner.work / "results" / timestamp()
+    env = record["environment"].copy()
+    # ELF RUNPATH follows LD_LIBRARY_PATH; the library we verified must take precedence.
+    paths = [str(work / "cudf-build")]
+    if env.get("LD_LIBRARY_PATH"):
+        paths.append(env["LD_LIBRARY_PATH"])
+    env["LD_LIBRARY_PATH"] = os.pathsep.join(paths)
+    runner = Runner(work, env, args.timeout)
+    results = work / "results" / timestamp()
     results.mkdir(parents=True)
     save(results / "build.json", record)
     save(
@@ -511,15 +507,7 @@ def main():
         lock = json.loads((HERE / "build-lock.json").read_text())
         build(args, lock, runner, recipe)
     else:
-        record = json.loads((args.work_dir / "build.json").read_text())
-        env = record["environment"].copy()
-        # ELF RUNPATH follows LD_LIBRARY_PATH; the library we verified must take precedence.
-        paths = [str(args.work_dir / "cudf-build")]
-        if env.get("LD_LIBRARY_PATH"):
-            paths.append(env["LD_LIBRARY_PATH"])
-        env["LD_LIBRARY_PATH"] = os.pathsep.join(paths)
-        runner = Runner(args.work_dir, env, args.timeout)
-        benchmark(args, runner, recipe)
+        benchmark(args, recipe)
 
 
 if __name__ == "__main__":

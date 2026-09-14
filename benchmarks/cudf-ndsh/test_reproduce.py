@@ -31,12 +31,7 @@ def result_data(query: int) -> dict:
         ("warm", "cold"),
         engines,
     ):
-        axes = dict(
-            scale_factor="1",
-            format=fmt,
-            workload=workload,
-            cache=cache,
-        )
+        axes = dict(scale_factor="1", format=fmt, workload=workload, cache=cache)
         if engine is not None:
             axes["engine"] = engine
         states.append(
@@ -52,14 +47,7 @@ def result_data(query: int) -> dict:
                 ],
             }
         )
-    return {
-        "benchmarks": [
-            {
-                "name": f"ndsh_q{query}_local",
-                "states": states,
-            }
-        ]
-    }
+    return {"benchmarks": [{"name": f"ndsh_q{query}_local", "states": states}]}
 
 
 class ReproduceTests(unittest.TestCase):
@@ -76,8 +64,9 @@ class ReproduceTests(unittest.TestCase):
             queries=list(QUERIES),
             min_samples=3,
             sample_timeout=30,
+            timeout=60,
         )
-        self.recipe = {"inputs": {"reproduce.py": "original"}}
+        self.recipe = {"vortex_revision": "original"}
         self.runner = Mock(work=self.args.work_dir, logs=self.root)
 
     def write(self, path: Path, text: str = "fixture"):
@@ -108,7 +97,10 @@ class ReproduceTests(unittest.TestCase):
                     ("--timeout", "30"),
                 ):
                     self.assertEqual(command[command.index(flag) + 1], value)
-                reproduce.validate_results(result_data(query), query, 1.0)
+                data = result_data(query)
+                reproduce.validate_results(data, query, 1.0)
+                data["benchmarks"][0]["states"].reverse()
+                reproduce.validate_results(data, query, 1.0)
 
     def test_rejects_incomplete_skipped_and_untimed_matrices(self):
         for query, defect in itertools.product(
@@ -116,6 +108,11 @@ class ReproduceTests(unittest.TestCase):
             (
                 "missing",
                 "duplicate",
+                "extra",
+                "format",
+                "workload",
+                "cache",
+                "engine",
                 "skipped",
                 "untimed",
                 "wrong_timer",
@@ -136,6 +133,11 @@ class ReproduceTests(unittest.TestCase):
                     states.pop()
                 elif defect == "duplicate":
                     states[-1] = state
+                elif defect == "extra":
+                    states.append(state)
+                elif defect in ("format", "workload", "cache", "engine"):
+                    state["axis_values"] = [axis for axis in state["axis_values"] if axis["name"] != defect]
+                    state["axis_values"].append({"name": defect, "value": "unexpected"})
                 elif defect == "skipped":
                     state["is_skipped"] = True
                 elif defect == "untimed":
@@ -154,28 +156,50 @@ class ReproduceTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     reproduce.validate_results(data, query, 1.0)
 
-    def test_stale_binary_and_library_hashes_fail_before_gpu_calls(self):
+    def write_build_record(self, env: dict[str, str] | None = None):
         build = self.args.work_dir / "cudf-build"
-        binaries = {name: hashlib.sha256(b"fixture").hexdigest() for name in reproduce.TARGETS}
-        record = {
-            "recipe": self.recipe,
-            "binaries": binaries,
-            "libcudf": hashlib.sha256(b"fixture").hexdigest(),
-        }
-        self.write(self.args.work_dir / "build.json", json.dumps(record))
-        for path in [
-            *(build / "benchmarks" / name for name in binaries),
-            build / "libcudf.so",
-        ]:
-            self.write(path)
+        sha = hashlib.sha256(b"fixture").hexdigest()
+        for name in reproduce.TARGETS:
+            self.write(build / "benchmarks" / name)
+        self.write(build / "libcudf.so")
+        self.write(
+            self.args.work_dir / "build.json",
+            json.dumps(
+                {
+                    "recipe": self.recipe,
+                    "binaries": dict.fromkeys(reproduce.TARGETS, sha),
+                    "libcudf": sha,
+                    "environment": env or {},
+                }
+            ),
+        )
+
+    def test_stale_binary_and_library_hashes_fail_before_gpu_calls(self):
+        self.write_build_record()
+        build = self.args.work_dir / "cudf-build"
         for path in (build / "benchmarks/NDSH_Q09_NVBENCH", build / "libcudf.so"):
-            with self.subTest(path=path):
+            with self.subTest(path=path), patch.object(reproduce, "Runner") as runner:
                 self.write(path, "stale")
                 with self.assertRaisesRegex(RuntimeError, "changed"):
-                    reproduce.benchmark(self.args, self.runner, self.recipe)
-                self.assertEqual(self.runner.mock_calls, [])
+                    reproduce.benchmark(self.args, self.recipe)
+                runner.assert_not_called()
                 self.assertFalse((self.args.work_dir / "results").exists())
                 self.write(path)
+
+    def test_identity_requires_a_clean_revision(self):
+        with patch.object(reproduce, "git_output", side_effect=["", "revision"]) as git:
+            self.assertEqual(reproduce.identity(), {"vortex_revision": "revision"})
+        self.assertEqual(
+            git.call_args_list,
+            [
+                call(reproduce.ROOT, "status", "--porcelain", "--untracked-files=all"),
+                call(reproduce.ROOT, "rev-parse", "HEAD"),
+            ],
+        )
+        for status in (" M tracked", "?? untracked"):
+            with self.subTest(status=status), patch.object(reproduce, "git_output", return_value=status):
+                with self.assertRaisesRegex(RuntimeError, "Commit source changes"):
+                    reproduce.identity()
 
     def test_work_directory_ownership_and_recipe(self):
         work = self.args.work_dir
@@ -188,7 +212,7 @@ class ReproduceTests(unittest.TestCase):
         reproduce.initialize_work(owned, self.recipe)
         reproduce.initialize_work(owned, self.recipe)
         with self.assertRaisesRegex(RuntimeError, "changed"):
-            reproduce.initialize_work(owned, {"inputs": {"reproduce.py": "changed"}})
+            reproduce.initialize_work(owned, {"vortex_revision": "changed"})
         self.assertEqual(json.loads((owned / "recipe.json").read_text()), self.recipe)
 
     def test_release_configuration_preserves_source_pins_without_toolchain_defaults(self):
@@ -463,9 +487,10 @@ class ReproduceTests(unittest.TestCase):
             ],
         )
 
-    def test_main_run_reuses_build_environment_and_source_identity(self):
-        work = self.args.work_dir.resolve()
+    def test_benchmark_reuses_build_environment(self):
+        work = self.args.work_dir
         library_dir = str(work / "cudf-build")
+        self.args.queries = []
         for library_path, runtime_path in (
             (None, library_dir),
             ("recorded-lib", os.pathsep.join((library_dir, "recorded-lib"))),
@@ -474,29 +499,37 @@ class ReproduceTests(unittest.TestCase):
                 env = {"PATH": "recorded-bin"}
                 if library_path is not None:
                     env["LD_LIBRARY_PATH"] = library_path
-                record = {"environment": env.copy()}
-                source = json.dumps(record)
-                self.write(work / "build.json", source)
+                self.write_build_record(env)
+                source = (work / "build.json").read_text()
+                result = str(library_path)
                 with (
-                    patch("sys.argv", ["reproduce.py", "run", "--work-dir", str(work), "--timeout", "60"]),
-                    patch.object(reproduce.platform, "system", return_value="Linux"),
-                    patch.object(reproduce, "identity", autospec=True, return_value=self.recipe) as identity,
+                    patch.object(reproduce, "timestamp", return_value=result),
                     patch.object(reproduce, "environment", autospec=True) as environment,
-                    patch.object(reproduce.json, "loads", return_value=record),
                     patch.object(reproduce, "Runner", return_value=self.runner) as runner,
-                    patch.object(reproduce, "benchmark", autospec=True) as benchmark,
                 ):
-                    reproduce.main()
-                identity.assert_called_once_with()
+                    reproduce.benchmark(self.args, self.recipe)
                 environment.assert_not_called()
                 runner.assert_called_once_with(work, {**env, "LD_LIBRARY_PATH": runtime_path}, 60)
-                self.assertIsNot(runner.call_args.args[1], record["environment"])
-                self.assertEqual(record["environment"], env)
                 self.assertEqual((work / "build.json").read_text(), source)
-                run_args = benchmark.call_args.args[0]
-                self.assertEqual(run_args.work_dir, work)
-                self.assertEqual(run_args.cmake_arg, [])
-                benchmark.assert_called_once_with(run_args, self.runner, self.recipe)
+                self.assertEqual(
+                    json.loads((work / "results" / result / "build.json").read_text()), json.loads(source)
+                )
+
+    def test_main_run_dispatches_with_source_identity(self):
+        work = self.args.work_dir.resolve()
+        with (
+            patch("sys.argv", ["reproduce.py", "run", "--work-dir", str(work), "--timeout", "60"]),
+            patch.object(reproduce.platform, "system", return_value="Linux"),
+            patch.object(reproduce, "identity", autospec=True, return_value=self.recipe) as identity,
+            patch.object(reproduce, "benchmark", autospec=True) as benchmark,
+        ):
+            reproduce.main()
+        identity.assert_called_once_with()
+        run_args = benchmark.call_args.args[0]
+        self.assertEqual(run_args.work_dir, work)
+        self.assertEqual(run_args.cmake_arg, [])
+        self.assertEqual(run_args.timeout, 60)
+        benchmark.assert_called_once_with(run_args, self.recipe)
 
 
 if __name__ == "__main__":
