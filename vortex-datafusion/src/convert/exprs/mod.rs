@@ -65,8 +65,8 @@ pub struct ProcessedProjection {
 ///
 /// Custom converters implement a single schema-aware decision. Conversion should preserve
 /// DataFusion values, nulls, and evaluation errors; see [`DefaultExpressionConverter`] for
-/// the temporary arithmetic exception. Unsupported expressions remain in DataFusion,
-/// including when a file's schema adapter introduces them.
+/// the arithmetic and nested field access exceptions. Unsupported expressions remain in
+/// DataFusion, including when a file's schema adapter introduces them.
 ///
 /// # Implementing a custom converter
 ///
@@ -197,6 +197,9 @@ type Conversion<T> = Result<T, Unconverted>;
 ///
 /// Supported arithmetic is pushed down using Vortex semantics, including its checked
 /// integer arithmetic. Matching DataFusion's overflow behavior is deferred to a future patch.
+/// Nested struct field access also uses Vortex semantics: a null parent produces a null child,
+/// whereas DataFusion extracts the child without applying parent validity. These differences
+/// are accepted for both filters and projections.
 /// Other expressions require compatible SQL semantics or remain in DataFusion.
 pub struct DefaultExpressionConverter {
     /// Session used to resolve Arrow → Vortex dtypes through the extension
@@ -465,8 +468,6 @@ impl DefaultExpressionConverter {
                 return Err(exec_datafusion_err!("get_field requires a field path").into());
             }
             let mut source_type = source.data_type(schema)?;
-            let mut nullable = source.nullable(schema)?;
-            let mut nullable_struct = false;
             let mut names = Vec::with_capacity(paths.len());
             for path in paths {
                 let name = path
@@ -478,18 +479,11 @@ impl DefaultExpressionConverter {
                 let DataType::Struct(fields) = &source_type else {
                     return Err(Unconverted::Unsupported);
                 };
-                nullable_struct |= nullable;
                 let (_, field) = fields.find(name).ok_or_else(|| {
                     exec_datafusion_err!("get_field references missing field {name}")
                 })?;
-                nullable = field.is_nullable();
                 source_type = field.data_type().clone();
                 names.push(name);
-            }
-            // DataFusion extracts the child without applying parent struct validity;
-            // Vortex get_item masks the child when its parent is null.
-            if nullable_struct {
-                return Err(Unconverted::Unsupported);
             }
             let mut result = self.convert_expr(source, schema, input_dtype)?;
             for name in names {

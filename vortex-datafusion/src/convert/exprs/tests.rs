@@ -29,6 +29,7 @@ use insta::assert_snapshot;
 use rstest::rstest;
 use vortex::array::IntoArray;
 use vortex::array::arrays::ConstantArray;
+use vortex::array::arrays::PrimitiveArray;
 use vortex::extension::uuid::Uuid;
 use vortex::scalar::Scalar;
 use vortex::scalar_fn::fns::literal::Literal;
@@ -80,6 +81,25 @@ fn array_length_expr(args: Vec<Arc<dyn PhysicalExpr>>, schema: &Schema) -> Arc<d
         )
         .unwrap(),
     )
+}
+
+fn get_field_expr(
+    source: Arc<dyn PhysicalExpr>,
+    path: &[&str],
+    schema: &Schema,
+) -> DFResult<Arc<dyn PhysicalExpr>> {
+    let mut args = vec![source];
+    args.extend(path.iter().map(|name| {
+        Arc::new(df_expr::Literal::new(ScalarValue::Utf8(Some(
+            (*name).into(),
+        )))) as Arc<dyn PhysicalExpr>
+    }));
+    Ok(Arc::new(ScalarFunctionExpr::try_new(
+        Arc::new(ScalarUDF::from(GetFieldFunc::new())),
+        args,
+        schema,
+        Arc::new(ConfigOptions::new()),
+    )?))
 }
 
 /// Whether the default converter accepts `expr` for native evaluation against `schema`.
@@ -1430,6 +1450,95 @@ fn test_fallible_case_branch_is_residual() -> DFResult<()> {
 }
 
 #[rstest]
+#[case::non_nullable(None, None, vec![Some(10), Some(20), Some(30), Some(40)])]
+#[case::all_valid(
+    Some(vec![true; 4]),
+    Some(vec![true; 4]),
+    vec![Some(10), Some(20), Some(30), Some(40)],
+)]
+#[case::null_outer(
+    Some(vec![true, false, true, true]),
+    None,
+    vec![Some(10), None, Some(30), Some(40)],
+)]
+#[case::null_inner(
+    None,
+    Some(vec![true, true, false, true]),
+    vec![Some(10), Some(20), None, Some(40)],
+)]
+#[case::null_outer_and_inner(
+    Some(vec![true, false, true, true]),
+    Some(vec![true, true, false, true]),
+    vec![Some(10), None, None, Some(40)],
+)]
+fn test_native_nested_get_field(
+    #[case] outer_validity: Option<Vec<bool>>,
+    #[case] inner_validity: Option<Vec<bool>>,
+    #[case] mut expected: Vec<Option<i32>>,
+    #[values(false, true)] nullable_leaf: bool,
+    #[values(false, true)] flattened: bool,
+) -> anyhow::Result<()> {
+    let parents_all_valid = expected.iter().all(Option::is_some);
+    let nullable_outer = outer_validity.is_some();
+    let nullable_inner = inner_validity.is_some();
+    let mut values = vec![Some(10), Some(20), Some(30), Some(40)];
+    if nullable_leaf {
+        values[3] = None;
+        expected[3] = None;
+    }
+    let inner = Arc::new(StructArray::new(
+        vec![Field::new("leaf", DataType::Int32, nullable_leaf)].into(),
+        vec![Arc::new(arrow_array::Int32Array::from(values))],
+        inner_validity.map(NullBuffer::from),
+    ));
+    let outer = Arc::new(StructArray::new(
+        vec![Field::new(
+            "inner",
+            inner.data_type().clone(),
+            nullable_inner,
+        )]
+        .into(),
+        vec![inner],
+        outer_validity.map(NullBuffer::from),
+    ));
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "outer",
+        outer.data_type().clone(),
+        nullable_outer,
+    )]));
+    let batch = RecordBatch::try_new(schema, vec![outer])?;
+    let source = Arc::new(df_expr::Column::new("outer", 0));
+    let expr = if flattened {
+        get_field_expr(source, &["inner", "leaf"], &batch.schema())?
+    } else {
+        get_field_expr(
+            get_field_expr(source, &["inner"], &batch.schema())?,
+            &["leaf"],
+            &batch.schema(),
+        )?
+    };
+    let converted = convert(Arc::clone(&expr), &batch.schema())?;
+    assert_eq!(
+        converted,
+        get_item("leaf", get_item("inner", get_item("outer", root())))
+    );
+    if parents_all_valid {
+        return assert_native_matches(expr, batch);
+    }
+
+    let session = VortexSession::default();
+    let input = session
+        .arrow()
+        .from_arrow_record_batch(batch.clone(), &batch.schema())?;
+    assert_arrays_eq!(
+        input.apply(&converted)?,
+        PrimitiveArray::from_option_iter(expected),
+        &mut session.create_execution_ctx()
+    );
+    Ok(())
+}
+
+#[rstest]
 fn test_nested_functions_reject_unknown_children(
     #[values(false, true)] list: bool,
 ) -> DFResult<()> {
@@ -1476,6 +1585,10 @@ fn test_nested_functions_reject_unknown_children(
 #[case::column_path(vec![
     Arc::new(df_expr::Column::new("a", 0)) as Arc<dyn PhysicalExpr>,
     Arc::new(df_expr::Column::new("a", 0)),
+])]
+#[case::missing_field(vec![
+    Arc::new(df_expr::Column::new("a", 0)) as Arc<dyn PhysicalExpr>,
+    Arc::new(df_expr::Literal::new(ScalarValue::Utf8(Some("missing".into())))),
 ])]
 fn test_malformed_get_field_returns_error(
     #[case] args: Vec<Arc<dyn PhysicalExpr>>,
@@ -1557,7 +1670,16 @@ fn test_native_nested_list_length(
     )?);
     let length = array_length_expr(vec![get_field], &batch.schema());
     if nullable_parent {
-        assert!(!converts(&length, &batch.schema())?);
+        let converted = convert(length, &batch.schema())?;
+        let session = VortexSession::default();
+        let input = session
+            .arrow()
+            .from_arrow_record_batch(batch.clone(), &batch.schema())?;
+        assert_arrays_eq!(
+            input.apply(&converted)?,
+            PrimitiveArray::from_option_iter([Some(1u64), None, None]),
+            &mut session.create_execution_ctx()
+        );
         Ok(())
     } else {
         assert_native_matches(length, batch)
