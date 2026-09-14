@@ -422,6 +422,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_create_validity_single_element() {
         let len = 1;
         let logical_type = LogicalType::new(DUCKDB_TYPE::DUCKDB_TYPE_INTEGER);
@@ -440,6 +441,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_create_validity_single_element_valid() {
         let len = 1;
         let logical_type = LogicalType::new(DUCKDB_TYPE::DUCKDB_TYPE_INTEGER);

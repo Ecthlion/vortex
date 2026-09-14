@@ -442,6 +442,7 @@ mod tests {
     /// This simulates a compressor that doesn't preserve index values at null
     /// positions, which can happen when indices are further compressed and the
     /// compressor clobbers invalid entries with arbitrary data.
+    #[expect(deprecated)]
     fn with_random_invalid_indices(
         rle: &RLEArray,
         ctx: &mut ExecutionCtx,

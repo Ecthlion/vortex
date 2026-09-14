@@ -709,6 +709,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_basic_append_and_nulls() {
         let mut ctx = array_session().create_execution_ctx();
         let dtype: Arc<DType> = Arc::new(I32.into());
@@ -861,6 +862,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_builder_trait_methods() {
         let mut ctx = array_session().create_execution_ctx();
         let dtype: Arc<DType> = Arc::new(I32.into());
@@ -919,6 +921,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_extend_from_array() {
         let mut ctx = array_session().create_execution_ctx();
         let dtype: Arc<DType> = Arc::new(I32.into());
@@ -1120,6 +1123,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_extend_from_array_overlapping_listview() {
         let mut ctx = array_session().create_execution_ctx();
         let dtype: Arc<DType> = Arc::new(I32.into());

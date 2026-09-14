@@ -228,6 +228,7 @@ impl Validity {
     )]
     #[inline]
     #[allow(clippy::disallowed_methods)]
+    #[expect(deprecated)]
     pub fn is_valid(&self, index: usize) -> VortexResult<bool> {
         self.execute_is_valid(index, &mut legacy_session().create_execution_ctx())
     }
@@ -239,6 +240,7 @@ impl Validity {
     )]
     #[inline]
     #[allow(clippy::disallowed_methods)]
+    #[expect(deprecated)]
     pub fn is_null(&self, index: usize) -> VortexResult<bool> {
         self.execute_is_null(index, &mut legacy_session().create_execution_ctx())
     }

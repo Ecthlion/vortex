@@ -553,6 +553,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_nullable_lists_non_nullable_elements() {
         let mut ctx = array_session().create_execution_ctx();
         let dtype: Arc<DType> = Arc::new(DType::Primitive(I32, NonNullable));
@@ -691,6 +692,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_append_nulls() {
         let mut ctx = array_session().create_execution_ctx();
         // Elements must be nullable if we're going to append null lists
@@ -726,6 +728,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_append_scalar_nulls() {
         let mut ctx = array_session().create_execution_ctx();
         // Elements must be nullable if we're going to append null lists
@@ -815,6 +818,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_extend_from_array() {
         let mut ctx = array_session().create_execution_ctx();
         let dtype: Arc<DType> = Arc::new(I32.into());
@@ -895,6 +899,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_extend_degenerate_arrays() {
         let mut ctx = array_session().create_execution_ctx();
         let dtype: Arc<DType> = Arc::new(I32.into());
@@ -1020,6 +1025,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_mixed_operations() {
         let mut ctx = array_session().create_execution_ctx();
         // Use nullable elements since we'll be appending nulls

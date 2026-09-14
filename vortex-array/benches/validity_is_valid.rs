@@ -41,6 +41,7 @@ static SESSION: LazyLock<VortexSession> = LazyLock::new(array_session);
 /// Per-element validity check over array-backed validity (the antipattern). This mirrors the
 /// deprecated `Validity::is_valid(i)`: a fresh `ExecutionCtx` plus a scalar lookup on every call.
 #[divan::bench(args = SIZES)]
+#[expect(deprecated)]
 fn is_valid_per_element(bencher: Bencher, len: usize) {
     let validity = array_validity(len);
     bencher

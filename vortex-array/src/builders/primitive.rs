@@ -696,6 +696,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_append_scalar() {
         use crate::dtype::DType;
         use crate::scalar::Scalar;

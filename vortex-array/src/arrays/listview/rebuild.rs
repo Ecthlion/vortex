@@ -505,6 +505,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_rebuild_flatten_with_nullable() -> VortexResult<()> {
         use crate::arrays::BoolArray;
 
@@ -547,6 +548,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_rebuild_flatten_null_row_uses_valid_empty_range() -> VortexResult<()> {
         let elements = PrimitiveArray::from_iter(vec![1i32, 2, 3, 4]).into_array();
         let offsets = PrimitiveArray::from_iter(vec![0u32, 1, 2]).into_array();
