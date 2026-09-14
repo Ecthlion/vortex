@@ -492,6 +492,18 @@ fn date_timestamp_comparison<'a>(
     Some((date, op, literal))
 }
 
+/// Whether `value` is a comparison that [`date_timestamp_comparison`] rewrites into a `DATE`
+/// bound.
+///
+/// `pushdown_complex_filter` needs this to decide what to report back to DuckDB; see the
+/// Deliminator note there.
+pub fn is_folded_date_comparison(value: &duckdb::ExpressionRef) -> bool {
+    matches!(
+        value.as_class(),
+        Some(BoundComparison(compare)) if date_timestamp_comparison(&compare).is_some()
+    )
+}
+
 // We limit casting to Primitive types, because some conversions yield an error
 // like vortex.date[days](i32) -> vortex.timestamp[µs](i64?). However, when we
 // push down the cast, we don't have access to column's dtype, so we need to

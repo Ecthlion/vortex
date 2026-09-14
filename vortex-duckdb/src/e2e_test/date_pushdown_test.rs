@@ -1,18 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-//! Pushdown tests for `DATE` columns compared against `TIMESTAMP` bounds.
+//! Result-level tests for `DATE` columns compared against `TIMESTAMP` bounds.
 //!
 //! DuckDB widens a `DATE` column to `TIMESTAMP` whenever the other side is one, which is what
-//! `date '1993-07-01' + interval '3' month` produces. The scan only sees a column reference
-//! once that cast has been folded into the literal, so every filter here has to both push and
-//! keep counting what DuckDB itself counts.
+//! `date '1993-07-01' + interval '3' month` produces. `convert::expr` folds that cast into the
+//! literal so the bound can reach the scan as a `DATE` comparison.
+//!
+//! These tests pin the *semantics* of that rewrite: every bound is evaluated against both a
+//! Vortex file and a native DuckDB table built from the same rows, so DuckDB is the oracle.
+//! They cover each operator at midnight, strictly inside a day, reversed operand order, and
+//! `TIMESTAMP WITH TIME ZONE`.
+//!
+//! They do not pin *where* the bound runs. On a small single-table scan DuckDB converts these
+//! bounds into table filters itself, without reaching the fold, so a plan assertion here would
+//! pass whether or not the fold exists. The proof that the fold reaches the scan lives in the
+//! checked-in TPC-H plans instead — `slt/tpch/duckdb/plans/q4.slt.no` and its q15 and q20
+//! siblings assert `($.o_orderdate < 1993-10-01)` in the scan's own filter list.
 
 use num_traits::AsPrimitive;
 use rstest::rstest;
 use tempfile::NamedTempFile;
 
-use crate::cpp::duckdb_string_t;
 use crate::duckdb::Connection;
 use crate::duckdb::Database;
 
@@ -49,39 +58,19 @@ fn query_i64(conn: &Connection, query: &str) -> i64 {
         .as_slice_with_len::<i64>(chunk.len().as_())[0]
 }
 
-/// The `EXPLAIN` physical plan of `query` as one string.
-fn explain_plan(conn: &Connection, query: &str) -> String {
-    let explain = conn.query(&format!("EXPLAIN {query}")).unwrap();
-    let mut plan = String::new();
-    for mut chunk in explain {
-        let len = chunk.len().as_();
-        let vec = chunk.get_vector_mut(1);
-        for value in unsafe { vec.as_slice_mut::<duckdb_string_t>(len) } {
-            let slice: &[u8] = unsafe {
-                std::slice::from_raw_parts(
-                    crate::cpp::duckdb_string_t_data(&raw mut *value) as _,
-                    crate::cpp::duckdb_string_t_length(*value) as usize,
-                )
-            };
-            plan.push_str(&String::from_utf8_lossy(slice));
-        }
-    }
-    plan
+/// Assert the vortex file and the native table agree on how many rows match `filter`.
+fn assert_matches_duckdb(conn: &Connection, path: &str, filter: &str) -> i64 {
+    let vortex = query_i64(
+        conn,
+        &format!("SELECT count(*) FROM '{path}' WHERE {filter}"),
+    );
+    let native = query_i64(conn, &format!("SELECT count(*) FROM dates WHERE {filter}"));
+    assert_eq!(vortex, native, "`{filter}` disagrees with DuckDB");
+    vortex
 }
 
-/// Count the rows of the vortex file matching `filter`, and of the native table for comparison.
-fn counts(conn: &Connection, path: &str, filter: &str) -> (i64, i64) {
-    (
-        query_i64(
-            conn,
-            &format!("SELECT count(*) FROM '{path}' WHERE {filter}"),
-        ),
-        query_i64(conn, &format!("SELECT count(*) FROM dates WHERE {filter}")),
-    )
-}
-
-/// Every bound TPC-H states as `date + interval` reaches the scan, and still counts what DuckDB
-/// counts natively. Q4, Q15 and Q20 each lose their upper bound without the fold.
+/// Every bound TPC-H states as `date + interval`, and every operator against a midnight
+/// timestamp, keeps DuckDB's own answer. Q4, q15 and q20 are the first three shapes.
 #[rstest]
 #[case::q4_range("d >= DATE '1993-07-01' AND d < DATE '1993-07-01' + INTERVAL '3' MONTH")]
 #[case::q15_range("d >= DATE '1993-01-01' AND d < DATE '1993-01-01' + INTERVAL '3' MONTH")]
@@ -94,29 +83,19 @@ fn counts(conn: &Connection, path: &str, filter: &str) -> (i64, i64) {
 #[case::midnight_gte("d >= TIMESTAMP '1993-07-01 00:00:00'")]
 #[case::midnight_eq("d = TIMESTAMP '1993-07-01 00:00:00'")]
 #[case::reversed("TIMESTAMP '1993-07-01 00:00:00' > d")]
-fn date_timestamp_bound_pushes(#[case] filter: &str) {
+fn date_timestamp_bound_keeps_duckdbs_answer(#[case] filter: &str) {
     let (conn, file) = date_fixture();
     let path = file.path().to_string_lossy().to_string();
 
-    let (vortex, native) = counts(&conn, &path, filter);
-    assert_eq!(vortex, native, "`{filter}` disagrees with DuckDB");
+    let matched = assert_matches_duckdb(&conn, &path, filter);
     assert!(
-        vortex > 0,
+        matched > 0,
         "`{filter}` matches nothing, so it proves little"
-    );
-
-    let plan = explain_plan(
-        &conn,
-        &format!("SELECT count(*) FROM '{path}' WHERE {filter}"),
-    );
-    assert!(
-        !plan.contains("FILTER"),
-        "`{filter}` was not pushed:\n{plan}"
     );
 }
 
 /// A bound strictly inside a day has no exact `DATE` equivalent for `=` and `<>`, and rounds to
-/// the day for the inequalities. Whether or not it pushes, the count must not move.
+/// the day for the inequalities. Either way the count must not move.
 #[rstest]
 #[case::lt("d < TIMESTAMP '1993-07-01 12:00:00'")]
 #[case::lte("d <= TIMESTAMP '1993-07-01 12:00:00'")]
@@ -128,31 +107,21 @@ fn bound_inside_a_day_keeps_its_meaning(#[case] filter: &str) {
     let (conn, file) = date_fixture();
     let path = file.path().to_string_lossy().to_string();
 
-    let (vortex, native) = counts(&conn, &path, filter);
-    assert_eq!(vortex, native, "`{filter}` disagrees with DuckDB");
+    assert_matches_duckdb(&conn, &path, filter);
 }
 
-/// `TIMESTAMP WITH TIME ZONE` bounds depend on the session timezone, so they are deliberately
-/// left for DuckDB. They must stay correct, and stay above the scan.
+/// `TIMESTAMP WITH TIME ZONE` bounds depend on the session timezone, so the fold declines them.
+/// The answer must track DuckDB's as the timezone moves the bound across midnight.
 #[rstest]
+#[case("UTC")]
 #[case("Europe/London")]
 #[case("America/New_York")]
-fn timestamptz_bound_is_left_to_duckdb(#[case] timezone: &str) {
+#[case("Asia/Tokyo")]
+fn timestamptz_bound_follows_the_session_timezone(#[case] timezone: &str) {
     let (conn, file) = date_fixture();
     let path = file.path().to_string_lossy().to_string();
     conn.query(&format!("SET TimeZone = '{timezone}';"))
         .unwrap();
-    let filter = "d < TIMESTAMPTZ '1993-07-01 00:00:00'";
 
-    let (vortex, native) = counts(&conn, &path, filter);
-    assert_eq!(vortex, native, "`{filter}` disagrees with DuckDB");
-
-    let plan = explain_plan(
-        &conn,
-        &format!("SELECT count(*) FROM '{path}' WHERE {filter}"),
-    );
-    assert!(
-        plan.contains("FILTER"),
-        "a timezone-dependent bound must not be folded to a DATE:\n{plan}"
-    );
+    assert_matches_duckdb(&conn, &path, "d < TIMESTAMPTZ '1993-07-01 00:00:00'");
 }
