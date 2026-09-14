@@ -51,57 +51,77 @@ to pinned cuDF and affects all NDS-H consumers, including Vortex OFF. When selec
 this dataset, regenerate both formats' fixtures, label them as generator-fixed, and
 collect separately labeled baselines.
 
-## Apply and build
+## Build from a clean checkout
 
-From the Vortex root, for a **fresh** cuDF checkout:
+[`reproduce.py`](reproduce.py) is the build/run entry point. It fetches pinned cuDF
+and dependencies, applies `upstream.patch`, and builds Release cuDF, CUDA-enabled
+Vortex, the smoke/adapter tests, and all five query executables through CMake.
+It uses the original generator and this Vortex checkout as the local source.
 
-```sh
-git clone https://github.com/NVIDIA/cudf.git build/cudf-ndsh-src
-git -C build/cudf-ndsh-src checkout --detach 5339497a1a17d799687cbf189fb113411fb015ca
-git -C build/cudf-ndsh-src apply --check ../../benchmarks/cudf-ndsh/upstream.patch
-git -C build/cudf-ndsh-src apply ../../benchmarks/cudf-ndsh/upstream.patch
-```
+This recipe targets **Linux AArch64/SBSA with a Hopper GPU (SM90)**. Prerequisites:
 
-The development checkout is already patched; never modify `/home/ubuntu/cudf`.
-Build instructions are in patched
-[`cpp/benchmarks/ndsh/VORTEX.md`](../../build/cudf-ndsh-src/cpp/benchmarks/ndsh/VORTEX.md).
-The pinned Release build tree is `build/cudf-ndsh-build`. Use cuDF headers and libraries
-from the same pinned revision.
+- CUDA SDK **13.1.2** (NVCC 13.1.115, runtime 13.1.80), including NVRTC, cuFile and
+  NVML development files, plus a compatible NVIDIA driver. The default SDK path is
+  `/usr/local/cuda-13.1`.
+- Clang/libclang **18.1.3**, defaulting to `/usr/bin/clang++` and
+  `/usr/lib/llvm-18/lib/libclang.so`.
+- Rustup with the toolchain in [`rust-toolchain.toml`](../../rust-toolchain.toml),
+  Git, curl, glibc ≥2.28, and micromamba **2.6.2** for the explicit environment lock.
+- Network access for public source/package downloads and disk space for a full cuDF
+  build. Put the work directory on disk, not tmpfs, for cold-I/O measurements.
 
-**Local Vortex sources are required:** use a complete checkout with CUDA-layout edition
-registration, device decimal slicing, bitmap alignment/padding, dictionary export, and
-`vx_cuda_scan_path_arrow_device_stream_projected`. The retained base pin
-`bffdca1109e99e6957ea2fc18f4a7809c88e0a0c` predates these prerequisites; CMake requires
-`FETCHCONTENT_SOURCE_DIR_VORTEX` until a fixed immutable revision is published.
-
-## Run after building the current source
-
-Benchmarks are named `ndsh_q{1,5,6,9,10}_local`. The default scale-factor axis includes
-SF10; select axes explicitly for comparable runs. Example SF10 Q10 matrix:
+From the Vortex root, with source changes committed:
 
 ```sh
-build/cudf-ndsh-build/benchmarks/NDSH_Q10_NVBENCH \
-  --benchmark ndsh_q10_local --axis scale_factor=10 \
-  --axis 'format=[parquet,vortex]' --axis 'workload=[read,q10]' \
-  --axis 'cache=[warm,cold]' --min-samples 3 --timeout 30 \
-  --json build/cudf-ndsh-build/sf10-q10-final-source.json
+micromamba create -y -p build/cudf-ndsh-env \
+  --file benchmarks/cudf-ndsh/environment-linux-aarch64.lock
+
+build/cudf-ndsh-env/bin/python benchmarks/cudf-ndsh/reproduce.py build \
+  --toolchain build/cudf-ndsh-env
+
+build/cudf-ndsh-env/bin/python benchmarks/cudf-ndsh/reproduce.py run \
+  --toolchain build/cudf-ndsh-env --scale-factor 1
 ```
 
-Use `scale_factor=1` for SF1. Q1/Q5/Q6/Q9 use executables `NDSH_Q01_NVBENCH`,
-`NDSH_Q05_NVBENCH`, `NDSH_Q06_NVBENCH`, and `NDSH_Q09_NVBENCH`, respectively, with
-matching benchmark/workload names. Q9 also needs explicit
-`--axis 'engine=[binaryop,ast,transform]'`. Run GPU benchmarks sequentially. Prefix
-profiler launches with `env -u ANTHROPIC_API_KEY` and follow the
+The Conda lock supplies GCC/G++ **14.3.0**, CMake, Ninja, Python and host libraries;
+use a dedicated prefix without additional packages. [`build-lock.json`](build-lock.json)
+pins cuDF/RMM, RAPIDS-CMake, CPM and other C++ inputs. Vortex's Rust dependencies
+and build-time SDK downloads are specified by the checkout and `Cargo.lock`.
+The runner builds Vortex's **25.12.19** `flatc` separately from cuDF's **24.3.25**.
+[`nvcc131-cudf-hook.cmake`](nvcc131-cudf-hook.cmake) applies the compiler workaround
+only to cuDF's CUDA sources.
+
+The default work directory is `build/cudf-ndsh-repro`. Change `--work-dir` for a new
+source revision; an existing directory must belong to the same recipe. SDK locations
+can be selected with `--cuda-root`, `--clangxx` and `--libclang`. Commands are bounded
+by `--timeout` (1,200 seconds each); `--jobs` defaults to 2 and `--cargo-jobs` to 4.
+If a build times out, inspect its log before explicitly rerunning with a larger limit.
+
+## Run and collect results
+
+`run` checks the recorded source revision and binary/library hashes, runs smoke and
+adapter checks, then runs Q1/Q5/Q6/Q9/Q10 **sequentially on device 0**. Each query
+covers Parquet/Vortex × read/full-query × warm/cold; Q9 covers all three existing
+amount engines. Correctness checks and fixture generation remain outside timing.
+Use `--scale-factor 10` for SF10, or `--queries 6` for a focused run.
+
+Commands, selected environment and tool versions go under `<work-dir>/logs/`;
+benchmark JSON and build provenance go under `<work-dir>/results/`. Temporary fixtures
+use `<work-dir>/tmp/`, on the chosen filesystem. Missing, skipped
+or untimed states fail the run. Build artifacts and results are ignored; the recipe,
+locks and benchmark source patch are versioned. **The clean recipe has not yet been
+executed end to end**; recorded build evidence is in [Validation](VALIDATION.md).
+
+Prefix profiler launches with `env -u ANTHROPIC_API_KEY` and follow the
 [profile metadata safety rules](VALIDATION.md#profile-evidence-and-safety).
-JSON, logs, binaries, Nsight reports, and SQLite exports are ignored, not committed.
 
 ## Optional checks
 
 ```sh
 python3 -B -m unittest discover -s benchmarks/cudf-ndsh -v
 python3 -B -m unittest discover -s vortex-ffi/cmake/tests -v
-ruff check benchmarks/cudf-ndsh/test_build_integration.py
-ruff format --check benchmarks/cudf-ndsh/test_build_integration.py
+uvx ruff check benchmarks/cudf-ndsh/*.py
+uvx ruff format --check benchmarks/cudf-ndsh/*.py
 ```
 
 Results and artifacts are recorded in [Validation](VALIDATION.md).

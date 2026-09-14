@@ -6,9 +6,17 @@ Checkpoint: 2026-09-14. Pinned cuDF:
 
 ## Current build status
 
+The [clean build/run recipe](README.md#build-from-a-clean-checkout) captures the source
+pins, host environment, compiler workaround and commands. **It has not been executed
+end to end.** Current-source runtime validation, memcheck and performance measurements
+remain pending. The new RAPIDS-CMake pin defines the recipe going forward; historical
+build records do not establish which RAPIDS-CMake revision they used.
+
+## Earlier isolated build
+
 The rebased Vortex Release archive and all six consumer executables built and linked
-against pinned Release cuDF. **Current-source runtime validation, memcheck, and
-performance measurements are pending.**
+against an existing pinned Release cuDF library. This did not perform a clean,
+fully pinned cuDF build.
 
 | Check                                              | Result                           |
 | -------------------------------------------------- | -------------------------------- |
