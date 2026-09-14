@@ -88,7 +88,8 @@ native execution: it reports slow tests instead of terminating them, as the defa
 Tests that sweep large inputs are worth marking `#[cfg_attr(miri, ignore)]` so that the job stays
 within its timeout; a smaller case usually exercises the same `unsafe` code.
 
-Extending coverage to another crate is a one-line change to the matrix once its suite passes.
+Extending coverage to another crate is a line in the matrix once its suite passes under Miri;
+the comment above the matrix records which crates are not covered yet and what blocks each.
 
 ### Python bindings
 
