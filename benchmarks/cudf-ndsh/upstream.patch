@@ -274,7 +274,7 @@ index 0000000..baaf7c0
 +}
 +}  // namespace ndsh
 diff --git a/cpp/benchmarks/ndsh/q01.cpp b/cpp/benchmarks/ndsh/q01.cpp
-index 4eec239..06359fe 100644
+index 4eec239..75250c2 100644
 --- a/cpp/benchmarks/ndsh/q01.cpp
 +++ b/cpp/benchmarks/ndsh/q01.cpp
 @@ -6,6 +6,7 @@
@@ -285,7 +285,7 @@ index 4eec239..06359fe 100644
  
  #include <cudf/ast/expressions.hpp>
  #include <cudf/binaryop.hpp>
-@@ -16,6 +17,31 @@
+@@ -16,6 +17,30 @@
  
  #include <nvbench/nvbench.cuh>
  
@@ -299,7 +299,6 @@ index 4eec239..06359fe 100644
 +#include <cudf/copying.hpp>
 +
 +#include <cstdint>
-+#include <filesystem>
 +#include <map>
 +#endif
 +
@@ -317,7 +316,7 @@ index 4eec239..06359fe 100644
  /**
   * @file q01.cpp
   * @brief Implement query 1 of the NDS-H benchmark.
-@@ -95,35 +121,24 @@
+@@ -95,35 +120,24 @@
      disc_price, one_plus_tax->view(), cudf::binary_operator::MUL, tax.type(), stream, mr);
  }
  
@@ -358,7 +357,7 @@ index 4eec239..06359fe 100644
    auto const groupedby_table = apply_groupby(
      lineitem,
      groupby_context_t{
-@@ -147,13 +162,24 @@ void run_ndsh_q1(nvbench::state& state, cudf::io::source_info const& source)
+@@ -147,13 +161,24 @@ void run_ndsh_q1(nvbench::state& state, cudf::io::source_info const& source)
            {cudf::aggregation::Kind::COUNT_ALL, "count_order"}}},
        }});
  
@@ -371,15 +370,15 @@ index 4eec239..06359fe 100644
 +                                       {cudf::order::ASCENDING, cudf::order::ASCENDING});
 +  return consume(orderedby_table);
 +}
- 
--  // Write query result to a parquet file
--  orderedby_table->to_parquet("q1.parquet");
++
 +template <typename Read>
 +std::unique_ptr<table_with_names> execute_q1(Read&& read, bool filter_shipdate)
 +{
 +  return execute_q1(read, filter_shipdate, [](auto& result) { return std::move(result); });
 +}
-+
+ 
+-  // Write query result to a parquet file
+-  orderedby_table->to_parquet("q1.parquet");
 +void run_ndsh_q1(nvbench::state&, cudf::io::source_info const& source)
 +{
 +  execute_q1([&](auto const& columns,
@@ -389,7 +388,7 @@ index 4eec239..06359fe 100644
  }
  
  void ndsh_q1(nvbench::state& state)
-@@ -174,7 +200,7 @@ void ndsh_q1(nvbench::state& state)
+@@ -174,7 +199,7 @@ void ndsh_q1(nvbench::state& state)
      return cudf::io::source_info(filename);
    }();
  
@@ -398,7 +397,7 @@ index 4eec239..06359fe 100644
    state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.get()));
    auto const mem_stats_logger = cudf::memory_stats_logger();
    state.exec(nvbench::exec_tag::sync, [&](nvbench::launch& launch) { run_ndsh_q1(state, source); });
-@@ -186,3 +212,161 @@ NVBENCH_BENCH(ndsh_q1)
+@@ -186,3 +211,155 @@ NVBENCH_BENCH(ndsh_q1)
    .set_name("ndsh_q1")
    .add_string_axis("filename", {""})
    .add_float64_axis("scale_factor", {0.01, 0.1, 1});
@@ -455,24 +454,20 @@ index 4eec239..06359fe 100644
 +}
 +
 +struct q1_files {
-+  temp_directory directory{"ndsh_q1_local"};
-+  std::string parquet{directory.path() + "lineitem.parquet"};
-+  std::string vortex{directory.path() + "lineitem.vortex"};
-+  cudf::size_type rows;
++  ndsh::local_table_files tables;
 +  ndsh::q1_reference_result reference;
 +
 +  q1_files(double scale_factor, ndsh::vortex_io const& io)
 +  {
 +    auto generated = generate_lineitem(scale_factor);
 +    CUDF_EXPECTS(generated->table().num_columns() == 16, "Q1 fixture requires full lineitem");
-+    rows = generated->table().num_rows();
-+    generated->to_parquet(parquet);
-+    io.write_vortex(vortex, generated->table(), generated->column_names());
++    tables.write("lineitem", *generated, io);
 +    cuda::stream_ref const stream = cudf::get_default_stream();
 +    reference                     = ndsh::q1_cpu_reference(generated->select(q1_columns), stream);
 +
 +    for (bool use_vortex : {false, true}) {
-+      auto input = ndsh::read_local_file(path(use_vortex), use_vortex, io, q1_columns);
++      auto input =
++        ndsh::read_local_file(tables.path("lineitem", use_vortex), use_vortex, io, q1_columns);
 +      ndsh::check_projection(generated->select(q1_columns), *input, q1_columns);
 +      auto result = execute_q1([&](auto const&, auto const&) { return std::move(input); }, true);
 +      ndsh::check_q1_result(reference, *result, stream);
@@ -480,8 +475,6 @@ index 4eec239..06359fe 100644
 +    generated.reset();
 +    CUDF_CUDA_TRY(cudaDeviceSynchronize());
 +  }
-+
-+  std::string const& path(bool use_vortex) const { return use_vortex ? vortex : parquet; }
 +};
 +
 +q1_files const& q1_fixture(double scale_factor)
@@ -512,7 +505,8 @@ index 4eec239..06359fe 100644
 +  auto const memory = cudf::memory_stats_logger();
 +  ndsh::vortex_io io{stream.get()};
 +  auto read = [&] {
-+    return ndsh::read_local_file(files.path(use_vortex), use_vortex, io, q1_columns, cold);
++    return ndsh::read_local_file(
++      files.tables.path("lineitem", use_vortex), use_vortex, io, q1_columns, cold);
 +  };
 +
 +  if (!cold) {
@@ -524,10 +518,10 @@ index 4eec239..06359fe 100644
 +    ndsh::check_q1_result(files.reference, *result, stream);
 +    CUDF_CUDA_TRY(cudaDeviceSynchronize());
 +  }
-+  state.add_element_count(files.rows, "Rows");
++  state.add_element_count(files.tables.rows, "Rows");
 +  state.exec(
 +    nvbench::exec_tag::sync | nvbench::exec_tag::timer, [&](nvbench::launch&, auto& timer) {
-+      if (cold) { ndsh::evict_file_pages({files.path(use_vortex)}); }
++      if (cold) { ndsh::evict_file_pages(files.tables.paths(use_vortex)); }
 +      timer.start();
 +      {
 +        cudf::benchmark::scoped_range timed_range{"ndsh_q1_local_timed"};
@@ -540,8 +534,7 @@ index 4eec239..06359fe 100644
 +      CUDF_CUDA_TRY(cudaDeviceSynchronize());
 +      timer.stop();
 +    });
-+  state.add_buffer_size(
-+    std::filesystem::file_size(files.path(use_vortex)), "file_size", "File size");
++  state.add_buffer_size(files.tables.bytes(use_vortex), "file_size", "File size");
 +  state.add_buffer_size(memory.peak_memory_usage(), "rmm_peak", "RMM peak (excludes Vortex)");
 +  auto& matched = state.add_summary("ndsh/q1/matched_rows");
 +  matched.set_string("name", "Q1 matched rows");
@@ -561,10 +554,10 @@ index 4eec239..06359fe 100644
 +  .add_string_axis("cache", {"warm", "cold"});
 +#endif
 diff --git a/cpp/benchmarks/ndsh/q05.cpp b/cpp/benchmarks/ndsh/q05.cpp
-index 11141be..300db9c 100644
+index 11141be..dca2125 100644
 --- a/cpp/benchmarks/ndsh/q05.cpp
 +++ b/cpp/benchmarks/ndsh/q05.cpp
-@@ -15,6 +15,19 @@
+@@ -15,6 +15,30 @@
  
  #include <nvbench/nvbench.cuh>
  
@@ -578,13 +571,24 @@ index 11141be..300db9c 100644
 +#include <cudf/copying.hpp>
 +
 +#include <cstdint>
-+#include <map>
 +#endif
++
++#include <map>
++
++namespace {
++std::map<std::string, std::vector<std::string>> const q5_projections{
++  {"orders", {"o_custkey", "o_orderkey", "o_orderdate"}},
++  {"customer", {"c_custkey", "c_nationkey"}},
++  {"lineitem", {"l_orderkey", "l_suppkey", "l_extendedprice", "l_discount"}},
++  {"supplier", {"s_suppkey", "s_nationkey"}},
++  {"nation", {"n_nationkey", "n_regionkey", "n_name"}},
++  {"region", {"r_regionkey", "r_name"}}};
++}  // namespace
 +
  /**
   * @file q05.cpp
   * @brief Implement query 5 of the NDS-H benchmark.
-@@ -79,8 +92,8 @@
+@@ -79,12 +103,12 @@
    return revenue;
  }
  
@@ -594,8 +598,24 @@ index 11141be..300db9c 100644
 +auto execute_q5(Read&& read, bool filter_predicates, Consume&& consume)
  {
    // Define the column projection and filter predicate for the `orders` table
-   std::vector<std::string> const orders_cols = {"o_custkey", "o_orderkey", "o_orderdate"};
-@@ -108,20 +121,22 @@ void run_ndsh_q5(nvbench::state& state,
+-  std::vector<std::string> const orders_cols = {"o_custkey", "o_orderkey", "o_orderdate"};
+-  auto const o_orderdate_ref                 = cudf::ast::column_reference(std::distance(
++  auto const& orders_cols    = q5_projections.at("orders");
++  auto const o_orderdate_ref = cudf::ast::column_reference(std::distance(
+     orders_cols.begin(), std::find(orders_cols.begin(), orders_cols.end(), "o_orderdate")));
+   auto o_orderdate_lower =
+     cudf::timestamp_scalar<cudf::timestamp_D>(days_since_epoch(1994, 1, 1), true);
+@@ -100,28 +124,25 @@ void run_ndsh_q5(nvbench::state& state,
+     cudf::ast::ast_operator::LOGICAL_AND, o_orderdate_pred_lower, o_orderdate_pred_upper);
+ 
+   // Define the column projection and filter predicate for the `region` table
+-  std::vector<std::string> const region_cols = {"r_regionkey", "r_name"};
+-  auto const r_name_ref                      = cudf::ast::column_reference(std::distance(
++  auto const& region_cols = q5_projections.at("region");
++  auto const r_name_ref   = cudf::ast::column_reference(std::distance(
+     region_cols.begin(), std::find(region_cols.begin(), region_cols.end(), "r_name")));
+   auto r_name_value                          = cudf::string_scalar("ASIA");
+   auto const r_name_literal                  = cudf::ast::literal(r_name_value);
    auto const region_pred                     = std::make_unique<cudf::ast::operation>(
      cudf::ast::ast_operator::EQUAL, r_name_ref, r_name_literal);
  
@@ -614,17 +634,12 @@ index 11141be..300db9c 100644
 -  auto const region =
 -    read_parquet(sources.at("region").make_source_info(), region_cols, std::move(region_pred));
 +  std::unique_ptr<cudf::ast::operation> const no_predicate;
-+  auto const customer_cols = std::vector<std::string>{"c_custkey", "c_nationkey"};
-+  auto const lineitem_cols =
-+    std::vector<std::string>{"l_orderkey", "l_suppkey", "l_extendedprice", "l_discount"};
-+  auto const supplier_cols = std::vector<std::string>{"s_suppkey", "s_nationkey"};
-+  auto const nation_cols   = std::vector<std::string>{"n_nationkey", "n_regionkey", "n_name"};
-+  auto const customer      = read("customer", customer_cols, no_predicate);
-+  auto orders              = read("orders", orders_cols, orders_pred);
-+  auto const lineitem      = read("lineitem", lineitem_cols, no_predicate);
-+  auto const supplier      = read("supplier", supplier_cols, no_predicate);
-+  auto const nation        = read("nation", nation_cols, no_predicate);
-+  auto region              = read("region", region_cols, region_pred);
++  auto const customer = read("customer", q5_projections.at("customer"), no_predicate);
++  auto orders         = read("orders", orders_cols, orders_pred);
++  auto const lineitem = read("lineitem", q5_projections.at("lineitem"), no_predicate);
++  auto const supplier = read("supplier", q5_projections.at("supplier"), no_predicate);
++  auto const nation   = read("nation", q5_projections.at("nation"), no_predicate);
++  auto region         = read("region", region_cols, region_pred);
 +  if (filter_predicates) {
 +    orders = apply_filter(orders, *orders_pred);
 +    region = apply_filter(region, *region_pred);
@@ -632,7 +647,7 @@ index 11141be..300db9c 100644
  
    // Perform the joins
    auto const join_a = apply_inner_join(region, nation, {"r_regionkey"}, {"n_regionkey"});
-@@ -145,11 +160,26 @@ void run_ndsh_q5(nvbench::state& state,
+@@ -145,11 +166,26 @@ void run_ndsh_q5(nvbench::state& state,
                                      }});
  
    // Perform the order by operation
@@ -641,15 +656,15 @@ index 11141be..300db9c 100644
 +  auto orderedby_table = apply_orderby(groupedby_table, {"revenue"}, {cudf::order::DESCENDING});
 +  return consume(orderedby_table);
 +}
- 
--  // Write query result to a parquet file
--  orderedby_table->to_parquet("q5.parquet");
++
 +template <typename Read>
 +std::unique_ptr<table_with_names> execute_q5(Read&& read, bool filter_predicates)
 +{
 +  return execute_q5(read, filter_predicates, [](auto& result) { return std::move(result); });
 +}
-+
+ 
+-  // Write query result to a parquet file
+-  orderedby_table->to_parquet("q5.parquet");
 +void run_ndsh_q5(nvbench::state&, std::unordered_map<std::string, cuio_source_sink_pair>& sources)
 +{
 +  execute_q5(
@@ -663,7 +678,7 @@ index 11141be..300db9c 100644
  }
  
  void ndsh_q5(nvbench::state& state)
-@@ -160,7 +190,7 @@ void ndsh_q5(nvbench::state& state)
+@@ -160,7 +196,7 @@ void ndsh_q5(nvbench::state& state)
    generate_parquet_data_sources(
      scale_factor, {"customer", "orders", "lineitem", "supplier", "nation", "region"}, sources);
  
@@ -672,7 +687,7 @@ index 11141be..300db9c 100644
    state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.get()));
    auto const mem_stats_logger = cudf::memory_stats_logger();
    state.exec(nvbench::exec_tag::sync,
-@@ -170,3 +200,219 @@ void ndsh_q5(nvbench::state& state)
+@@ -170,3 +206,219 @@ void ndsh_q5(nvbench::state& state)
  }
  
  NVBENCH_BENCH(ndsh_q5).set_name("ndsh_q5").add_float64_axis("scale_factor", {0.01, 0.1, 1});
@@ -756,7 +771,7 @@ index 11141be..300db9c 100644
 +        [&](std::string const& name,
 +            std::vector<std::string> const& columns,
 +            std::unique_ptr<cudf::ast::operation> const& predicate) {
-+          CUDF_EXPECTS(columns == ndsh::q5_projections.at(name), "Q5 projection mismatch");
++          CUDF_EXPECTS(columns == q5_projections.at(name), "Q5 projection mismatch");
 +          auto table = std::make_unique<table_with_names>(
 +            std::make_unique<cudf::table>(name == "orders" ? orders : input.at(name)), columns);
 +          return !filter_predicates && predicate ? apply_filter(table, *predicate)
@@ -776,7 +791,7 @@ index 11141be..300db9c 100644
 +  tables.reserve(q5_tables.size());
 +  std::unique_ptr<cudf::ast::operation> const no_predicate;
 +  for (auto const& name : q5_tables) {
-+    tables.push_back(read(name, ndsh::q5_projections.at(name), no_predicate));
++    tables.push_back(read(name, q5_projections.at(name), no_predicate));
 +  }
 +  return tables;
 +}
@@ -793,7 +808,7 @@ index 11141be..300db9c 100644
 +      for_each_generated_table(
 +        scale_factor, q5_tables, [&](std::string const& name, table_with_names const& generated) {
 +          tables.write(name, generated, io);
-+          auto const& columns  = ndsh::q5_projections.at(name);
++          auto const& columns  = q5_projections.at(name);
 +          auto const projected = generated.select(columns);
 +          builder.add_table(name, projected, stream);
 +          for (bool use_vortex : {false, true}) {
@@ -893,10 +908,10 @@ index 11141be..300db9c 100644
 +  .add_string_axis("cache", {"warm", "cold"});
 +#endif
 diff --git a/cpp/benchmarks/ndsh/q06.cpp b/cpp/benchmarks/ndsh/q06.cpp
-index c152871..8c567e4 100644
+index c152871..44e61aa 100644
 --- a/cpp/benchmarks/ndsh/q06.cpp
 +++ b/cpp/benchmarks/ndsh/q06.cpp
-@@ -16,6 +16,26 @@
+@@ -16,6 +16,25 @@
  
  #include <nvbench/nvbench.cuh>
  
@@ -910,7 +925,6 @@ index c152871..8c567e4 100644
 +#include <cudf/copying.hpp>
 +
 +#include <cmath>
-+#include <filesystem>
 +#include <map>
 +#include <optional>
 +#endif
@@ -923,7 +937,7 @@ index c152871..8c567e4 100644
  /**
   * @file q06.cpp
   * @brief Implement query 6 of the NDS-H benchmark.
-@@ -54,14 +74,10 @@
+@@ -54,14 +73,10 @@
    return revenue;
  }
  
@@ -941,7 +955,7 @@ index c152871..8c567e4 100644
    auto shipdate_lower =
      cudf::timestamp_scalar<cudf::timestamp_D>(days_since_epoch(1994, 1, 1), true);
    auto const shipdate_lower_literal = cudf::ast::literal(shipdate_lower);
-@@ -74,8 +90,8 @@ void run_ndsh_q6(nvbench::state& state,
+@@ -74,8 +89,8 @@ void run_ndsh_q6(nvbench::state& state,
      cudf::ast::operation(cudf::ast::ast_operator::LESS, shipdate_ref, shipdate_upper_literal);
    auto const lineitem_pred = std::make_unique<cudf::ast::operation>(
      cudf::ast::ast_operator::LOGICAL_AND, shipdate_pred_a, shipdate_pred_b);
@@ -952,7 +966,7 @@ index c152871..8c567e4 100644
  
    // Cast the discount and quantity columns to float32 and append to lineitem table
    auto discout_float =
-@@ -115,10 +131,24 @@ void run_ndsh_q6(nvbench::state& state,
+@@ -115,10 +130,24 @@ void run_ndsh_q6(nvbench::state& state,
  
    // Sum the `revenue` column
    auto const revenue_view = revenue->view();
@@ -960,15 +974,15 @@ index c152871..8c567e4 100644
 +  auto result             = apply_reduction(revenue_view, cudf::aggregation::Kind::SUM, "revenue");
 +  return consume(result);
 +}
- 
--  // Write query result to a parquet file
--  result_table->to_parquet("q6.parquet");
++
 +template <typename Read>
 +std::unique_ptr<table_with_names> execute_q6(Read&& read, bool filter_shipdate)
 +{
 +  return execute_q6(read, filter_shipdate, [](auto& result) { return std::move(result); });
 +}
-+
+ 
+-  // Write query result to a parquet file
+-  result_table->to_parquet("q6.parquet");
 +void run_ndsh_q6(nvbench::state&, std::unordered_map<std::string, cuio_source_sink_pair>& sources)
 +{
 +  execute_q6(
@@ -980,7 +994,7 @@ index c152871..8c567e4 100644
  }
  
  void ndsh_q6(nvbench::state& state)
-@@ -128,7 +158,7 @@ void ndsh_q6(nvbench::state& state)
+@@ -128,7 +157,7 @@ void ndsh_q6(nvbench::state& state)
    std::unordered_map<std::string, cuio_source_sink_pair> sources;
    generate_parquet_data_sources(scale_factor, {"lineitem"}, sources);
  
@@ -989,7 +1003,7 @@ index c152871..8c567e4 100644
    state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.get()));
    auto const mem_stats_logger = cudf::memory_stats_logger();
    state.exec(nvbench::exec_tag::sync,
-@@ -138,3 +168,184 @@ void ndsh_q6(nvbench::state& state)
+@@ -138,3 +167,178 @@ void ndsh_q6(nvbench::state& state)
  }
  
  NVBENCH_BENCH(ndsh_q6).set_name("ndsh_q6").add_float64_axis("scale_factor", {0.01, 0.1, 1});
@@ -1071,34 +1085,28 @@ index c152871..8c567e4 100644
 +}
 +
 +struct q6_files {
-+  temp_directory directory{"ndsh_q6_local"};
-+  std::string parquet{directory.path() + "lineitem.parquet"};
-+  std::string vortex{directory.path() + "lineitem.vortex"};
-+  cudf::size_type rows;
++  ndsh::local_table_files tables;
 +  cudf::size_type matched;
 +  double revenue;
 +
 +  q6_files(double scale_factor, ndsh::vortex_io const& io)
 +  {
 +    auto generated = generate_lineitem(scale_factor);
-+    rows           = generated->table().num_rows();
-+    generated->to_parquet(parquet);
-+    io.write_vortex(vortex, generated->table(), generated->column_names());
++    tables.write("lineitem", *generated, io);
 +    auto const reference =
 +      ndsh::q6_cpu_reference(generated->select(q6_columns), cudf::get_default_stream());
 +    matched = reference.matched;
 +    revenue = reference.revenue;
 +    CUDF_EXPECTS(std::isfinite(revenue), "Q6 CPU reference revenue must be finite");
 +    for (bool use_vortex : {false, true}) {
-+      auto input = ndsh::read_local_file(path(use_vortex), use_vortex, io, q6_columns);
++      auto input =
++        ndsh::read_local_file(tables.path("lineitem", use_vortex), use_vortex, io, q6_columns);
 +      ndsh::check_projection(generated->select(q6_columns), *input, q6_columns);
 +      auto result = execute_q6([&](auto const&, auto const&) { return std::move(input); }, true);
 +      check_q6_result(reference, *result);
 +    }
 +    CUDF_CUDA_TRY(cudaDeviceSynchronize());
 +  }
-+
-+  std::string const& path(bool use_vortex) const { return use_vortex ? vortex : parquet; }
 +};
 +
 +q6_files const& q6_fixture(double scale_factor)
@@ -1129,16 +1137,17 @@ index c152871..8c567e4 100644
 +  auto const memory = cudf::memory_stats_logger();
 +  ndsh::vortex_io io{stream.get()};
 +  auto read = [&] {
-+    return ndsh::read_local_file(files.path(use_vortex), use_vortex, io, q6_columns, cold);
++    return ndsh::read_local_file(
++      files.tables.path("lineitem", use_vortex), use_vortex, io, q6_columns, cold);
 +  };
 +  if (!cold) {
 +    auto warmup = read();
 +    CUDF_CUDA_TRY(cudaDeviceSynchronize());
 +  }
-+  state.add_element_count(files.rows, "Rows");
++  state.add_element_count(files.tables.rows, "Rows");
 +  state.exec(
 +    nvbench::exec_tag::sync | nvbench::exec_tag::timer, [&](nvbench::launch&, auto& timer) {
-+      if (cold) { ndsh::evict_file_pages({files.path(use_vortex)}); }
++      if (cold) { ndsh::evict_file_pages(files.tables.paths(use_vortex)); }
 +      timer.start();
 +      {
 +        auto result = workload == "read"
@@ -1150,8 +1159,7 @@ index c152871..8c567e4 100644
 +      CUDF_CUDA_TRY(cudaDeviceSynchronize());
 +      timer.stop();
 +    });
-+  state.add_buffer_size(
-+    std::filesystem::file_size(files.path(use_vortex)), "file_size", "File size");
++  state.add_buffer_size(files.tables.bytes(use_vortex), "file_size", "File size");
 +  state.add_buffer_size(memory.peak_memory_usage(), "rmm_peak", "RMM peak (excludes Vortex)");
 +  auto& summary = state.add_summary("ndsh/q6/revenue");
 +  summary.set_string("name", "Verified revenue");
@@ -2284,10 +2292,10 @@ index 0000000..cda6f53
 +}  // namespace ndsh
 diff --git a/cpp/benchmarks/ndsh/q5_reference.hpp b/cpp/benchmarks/ndsh/q5_reference.hpp
 new file mode 100644
-index 0000000..7f9bc18
+index 0000000..66901b3
 --- /dev/null
 +++ b/cpp/benchmarks/ndsh/q5_reference.hpp
-@@ -0,0 +1,181 @@
+@@ -0,0 +1,173 @@
 +/*
 + * SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 + * SPDX-License-Identifier: Apache-2.0
@@ -2314,14 +2322,6 @@ index 0000000..7f9bc18
 +#include <vector>
 +
 +namespace ndsh {
-+inline std::map<std::string, std::vector<std::string>> const q5_projections{
-+  {"orders", {"o_custkey", "o_orderkey", "o_orderdate"}},
-+  {"customer", {"c_custkey", "c_nationkey"}},
-+  {"lineitem", {"l_orderkey", "l_suppkey", "l_extendedprice", "l_discount"}},
-+  {"supplier", {"s_suppkey", "s_nationkey"}},
-+  {"nation", {"n_nationkey", "n_regionkey", "n_name"}},
-+  {"region", {"r_regionkey", "r_name"}}};
-+
 +struct q5_reference_result {
 +  std::map<std::string, double> revenue;
 +  int64_t matched = 0;
