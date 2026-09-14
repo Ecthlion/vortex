@@ -43,7 +43,6 @@ pub trait OperationsVTable<V: VTable> {
         Self::scalar_at(array, index, ctx)
     }
 
-    // FIXME: Deprecate scalar_at once encodings have migrated to probe_scalar.
     /// Fetch the scalar at the given index.
     ///
     /// ## Preconditions
@@ -54,6 +53,11 @@ pub trait OperationsVTable<V: VTable> {
     /// ## Postconditions
     ///
     /// The returned [`Scalar`] must have the same logical dtype as the array's element dtype.
+    // FIXME: Remove this hook once all encodings have migrated to probe_scalar.
+    #[deprecated(
+        note = "Implement `OperationsVTable::probe_scalar` instead, which is handed a \
+        `ProbeAccess` so the encoding can retain preparation across lookups."
+    )]
     fn scalar_at(
         array: ArrayView<'_, V>,
         index: usize,

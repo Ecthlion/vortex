@@ -266,8 +266,8 @@ impl ArrayRef {
 
     /// Fetch the scalar at the given index.
     #[deprecated(
-        note = "Use `execute_scalar` instead, which allows passing an execution context for more \
-        efficient execution when fetching multiple scalars from the same array."
+        note = "Use `ArrayRef::probe` instead, which takes an execution context and retains \
+        encoding state across lookups: `array.probe(ProbeUsage::Once).execute_scalar(index, ctx)`."
     )]
     #[allow(clippy::disallowed_methods)]
     pub fn scalar_at(&self, index: usize) -> VortexResult<Scalar> {
@@ -275,7 +275,11 @@ impl ArrayRef {
     }
 
     /// Execute the array to extract a scalar at the given index.
-    // TODO(joe): deprecate this.
+    #[deprecated(
+        note = "Use `ArrayRef::probe` instead, which retains encoding state across lookups: \
+        `array.probe(ProbeUsage::Once).execute_scalar(index, ctx)`, or `ProbeUsage::Repeated` \
+        when reading more than one index from the same array."
+    )]
     pub fn execute_scalar(&self, index: usize, ctx: &mut ExecutionCtx) -> VortexResult<Scalar> {
         self.probe(ProbeUsage::Once).execute_scalar(index, ctx)
     }
@@ -298,12 +302,20 @@ impl ArrayRef {
     }
 
     /// Returns whether the item at `index` is valid.
-    // TODO(joe): deprecate this.
+    #[deprecated(
+        note = "Use `ArrayRef::probe` instead, which retains validity state across lookups: \
+        `array.probe(ProbeUsage::Once).execute_is_valid(index, ctx)`, or `ProbeUsage::Repeated` \
+        when reading more than one index from the same array."
+    )]
     pub fn is_valid(&self, index: usize, ctx: &mut ExecutionCtx) -> VortexResult<bool> {
         self.probe(ProbeUsage::Once).execute_is_valid(index, ctx)
     }
 
     /// Returns whether the item at `index` is invalid.
+    #[deprecated(
+        note = "Use `ArrayRef::probe` instead: \
+        `!array.probe(ProbeUsage::Once).execute_is_valid(index, ctx)?`."
+    )]
     pub fn is_invalid(&self, index: usize, ctx: &mut ExecutionCtx) -> VortexResult<bool> {
         Ok(!self.is_valid(index, ctx)?)
     }

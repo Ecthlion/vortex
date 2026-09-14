@@ -19,10 +19,12 @@ use std::sync::Arc;
 
 use vortex_error::VortexResult;
 
+use crate::ArrayProbe;
 use crate::ArrayRef;
 use crate::ArraySlots;
 use crate::ExecutionCtx;
 use crate::IntoArray;
+use crate::ProbeUsage;
 use crate::VortexSessionExecute;
 use crate::array::ArrayId;
 use crate::array::ArrayView;
@@ -381,8 +383,8 @@ impl<V: VTable> Array<V> {
     }
 
     #[deprecated(
-        note = "Use `execute_scalar` instead, which allows passing an execution context for more \
-        efficient execution when fetching multiple scalars from the same array."
+        note = "Use `Array::<V>::probe` instead, which takes an execution context and retains \
+        encoding state across lookups: `array.probe(ProbeUsage::Once).execute_scalar(index, ctx)`."
     )]
     #[allow(clippy::disallowed_methods)]
     pub fn scalar_at(&self, index: usize) -> VortexResult<crate::scalar::Scalar> {
@@ -391,12 +393,22 @@ impl<V: VTable> Array<V> {
     }
 
     /// Execute the array to extract a scalar at the given index.
+    #[deprecated(
+        note = "Use `Array::<V>::probe` instead, which retains encoding state across lookups: \
+        `array.probe(ProbeUsage::Once).execute_scalar(index, ctx)`, or `ProbeUsage::Repeated` \
+        when reading more than one index from the same array."
+    )]
     pub fn execute_scalar(
         &self,
         index: usize,
         ctx: &mut ExecutionCtx,
     ) -> VortexResult<crate::scalar::Scalar> {
         self.inner.execute_scalar(index, ctx)
+    }
+
+    /// Create an accessor with the requested policy for retaining state between scalar lookups.
+    pub fn probe(&self, usage: ProbeUsage) -> ArrayProbe {
+        self.inner.probe(usage)
     }
 
     /// Filter the array with a selection mask.
@@ -415,11 +427,20 @@ impl<V: VTable> Array<V> {
     }
 
     /// Returns whether `index` is valid using the provided execution context.
+    #[deprecated(
+        note = "Use `Array::<V>::probe` instead, which retains validity state across lookups: \
+        `array.probe(ProbeUsage::Once).execute_is_valid(index, ctx)`, or `ProbeUsage::Repeated` \
+        when reading more than one index from the same array."
+    )]
     pub fn is_valid(&self, index: usize, ctx: &mut ExecutionCtx) -> VortexResult<bool> {
         self.inner.is_valid(index, ctx)
     }
 
     /// Returns whether `index` is null using the provided execution context.
+    #[deprecated(
+        note = "Use `Array::<V>::probe` instead: \
+        `!array.probe(ProbeUsage::Once).execute_is_valid(index, ctx)?`."
+    )]
     pub fn is_invalid(&self, index: usize, ctx: &mut ExecutionCtx) -> VortexResult<bool> {
         self.inner.is_invalid(index, ctx)
     }
