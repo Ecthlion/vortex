@@ -69,6 +69,27 @@ Read the [Rust version compatibility policy](README.md#rust-version-compatibilit
 changing `rust-version`; when the MSRV job fails, the usual fix is in the code or the dependency
 update, not the MSRV.
 
+### Miri
+
+The `Rust tests (miri)` job runs part of the workspace under
+[Miri](https://github.com/rust-lang/miri), which interprets the code and reports undefined
+behaviour that native test runs miss. The covered crates are listed as matrix groups in
+`.github/workflows/rust-instrumented.yml`; run the same checks over one crate with:
+
+```bash
+# $NIGHTLY is the toolchain pinned as NIGHTLY_TOOLCHAIN in .github/workflows/ci.yml.
+rustup toolchain install "$NIGHTLY" --component rust-src,miri
+MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-disable-isolation" \
+  cargo +"$NIGHTLY" miri nextest run --profile miri -p <crate-name>
+```
+
+The `miri` nextest profile exists because interpretation is orders of magnitude slower than
+native execution: it reports slow tests instead of terminating them, as the default profile does.
+Tests that sweep large inputs are worth marking `#[cfg_attr(miri, ignore)]` so that the job stays
+within its timeout; a smaller case usually exercises the same `unsafe` code.
+
+Extending coverage to another crate is a one-line change to the matrix once its suite passes.
+
 ### Python bindings
 
 `vortex-data` is a mixed Python and Rust package. `uv` manages its Python environment, and

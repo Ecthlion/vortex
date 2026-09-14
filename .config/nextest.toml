@@ -4,3 +4,9 @@ slow-timeout = { period = "30s", terminate-after = 5 }
 [[profile.default.overrides]]
 filter = 'test(compress_large_int | fsst_compress_offsets_overflow_i32)'
 priority = 100
+
+# Miri interprets every instruction, so tests that finish instantly natively take minutes.
+# Report slow tests, but leave termination to the CI job timeout: unlike the default profile,
+# a test overrunning the period here is expected rather than a sign that it is stuck.
+[profile.miri]
+slow-timeout = { period = "60s" }

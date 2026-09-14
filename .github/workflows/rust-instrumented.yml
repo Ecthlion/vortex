@@ -284,12 +284,43 @@ jobs:
           ./vortex-ffi/build/examples/scan_to_arrow '*.vortex'
 
   miri:
-    name: "Rust tests (miri)"
+    name: "Rust tests (miri) (${{ matrix.group }})"
+    # Each group is one runner that rebuilds the dependency graph under Miri, so widening
+    # coverage means adding crates to a group; add a group once a leg outgrows its timeout.
+    # Not covered yet, in the order we intend to add it:
+    #   - vortex-mask and vortex-compute: small suites, expected to be a cheap next step.
+    #   - vortex-array: by far the most `unsafe` in the workspace, but ~2.6k tests; it needs
+    #     its own group and a pass marking the slow ones `#[cfg_attr(miri, ignore)]`.
+    #   - vortex-layout and vortex-file: IO-shaped suites that need triage under
+    #     `-Zmiri-disable-isolation` before they can run unattended.
+    #   - vortex-parquet-variant: pulls in arrow-rs, which has never been run under Miri here.
+    #   - vortex-zstd: blocked, not deferred. The `zstd` bindings call into C, and Miri
+    #     cannot execute foreign functions.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: core
+            crates: "-p vortex-buffer -p vortex-ffi"
+          - group: encodings
+            crates: >-
+              -p vortex-alp
+              -p vortex-bytebool
+              -p vortex-datetime-parts
+              -p vortex-decimal-byte-parts
+              -p vortex-fastlanes
+              -p vortex-fsst
+              -p vortex-onpair
+              -p vortex-pco
+              -p vortex-runend
+              -p vortex-sequence
+              -p vortex-sparse
+              -p vortex-zigzag
     runs-on: >-
       ${{ github.repository == 'vortex-data/vortex'
-          && format('runs-on={0}/runner=amd64-medium/image=ubuntu24-full-x64-pre-v2/tag=rust-miri', github.run_id)
+          && format('runs-on={0}/runner=amd64-medium/image=ubuntu24-full-x64-pre-v2/tag=rust-miri-{1}', github.run_id, matrix.group)
           || 'ubuntu-latest' }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-disable-isolation -Zmiri-env-forward=RUST_BACKTRACE
       RUSTFLAGS: "-A warnings"
@@ -306,4 +337,6 @@ jobs:
       - name: Install nightly with miri
         run: rustup toolchain install $NIGHTLY_TOOLCHAIN --component rust-src,rustfmt,clippy,miri
       - name: Run Miri
-        run: cargo +$NIGHTLY_TOOLCHAIN miri nextest run --no-fail-fast -p vortex-buffer -p vortex-ffi
+        run: |
+          cargo +$NIGHTLY_TOOLCHAIN miri nextest run \
+            --profile miri --no-fail-fast ${{ matrix.crates }}
