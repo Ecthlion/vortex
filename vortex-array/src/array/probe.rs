@@ -238,28 +238,43 @@ impl ArrayProbe {
 }
 
 /// A validity accessor with the parent probe's retention policy.
+///
+/// A probe borrowed from a parent knows the source array's length and checks bounds against it.
+/// One built from a bare [`Validity`] has no length of its own: constant states answer every
+/// index, and array-backed validity is bounds-checked by its own probe.
 pub struct ValidityProbe<'p> {
-    len: usize,
+    len: Option<usize>,
     inner: ValidityAccess<'p>,
 }
 
 enum ValidityAccess<'p> {
     Once(Validity),
     Repeated(&'p mut ProbeValidity),
+    Owned(ProbeValidity),
 }
 
 impl ValidityProbe<'_> {
     pub(super) fn once(array: &ArrayRef) -> VortexResult<Self> {
         Ok(Self {
-            len: array.len(),
+            len: Some(array.len()),
             inner: ValidityAccess::Once(array.validity()?),
         })
+    }
+
+    /// Own a [`Validity`] and choose whether to retain preparation between lookups.
+    pub(crate) fn owned(validity: Validity, usage: ProbeUsage) -> Self {
+        Self {
+            len: None,
+            inner: ValidityAccess::Owned(ProbeValidity::new(validity, usage)),
+        }
     }
 
     /// Read a non-null boolean scalar indicating whether the requested row is valid.
     #[expect(deprecated)]
     pub fn execute_scalar(&mut self, index: usize, ctx: &mut ExecutionCtx) -> VortexResult<Scalar> {
-        vortex_ensure!(index < self.len, OutOfBounds: index, 0, self.len);
+        if let Some(len) = self.len {
+            vortex_ensure!(index < len, OutOfBounds: index, 0, len);
+        }
         match &mut self.inner {
             ValidityAccess::Once(validity) => match validity {
                 Validity::NonNullable | Validity::AllValid => Ok(true.into()),
@@ -267,7 +282,25 @@ impl ValidityProbe<'_> {
                 Validity::Array(array) => array.execute_scalar(index, ctx),
             },
             ValidityAccess::Repeated(validity) => validity.execute_scalar(index, ctx),
+            ValidityAccess::Owned(validity) => validity.execute_scalar(index, ctx),
         }
+    }
+
+    /// Returns whether the item at `index` is valid.
+    pub fn execute_is_valid(&mut self, index: usize, ctx: &mut ExecutionCtx) -> VortexResult<bool> {
+        self.execute_scalar(index, ctx)?
+            .as_bool()
+            .value()
+            .ok_or_else(|| vortex_err!("validity value at index {index} is null"))
+    }
+
+    /// Returns whether the item at `index` is invalid.
+    pub fn execute_is_invalid(
+        &mut self,
+        index: usize,
+        ctx: &mut ExecutionCtx,
+    ) -> VortexResult<bool> {
+        Ok(!self.execute_is_valid(index, ctx)?)
     }
 }
 
@@ -280,7 +313,7 @@ fn validity_access<'p>(
         slot @ None => slot.insert(ProbeValidity::new(array.validity()?, ProbeUsage::Repeated)),
     };
     Ok(ValidityProbe {
-        len: array.len(),
+        len: Some(array.len()),
         inner: ValidityAccess::Repeated(validity),
     })
 }

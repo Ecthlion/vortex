@@ -24,6 +24,8 @@ use crate::ArrayRef;
 use crate::Canonical;
 use crate::ExecutionCtx;
 use crate::IntoArray;
+use crate::ProbeUsage;
+use crate::ValidityProbe;
 use crate::VortexSessionExecute;
 use crate::arrays::BoolArray;
 use crate::arrays::ChunkedArray;
@@ -160,6 +162,31 @@ impl Validity {
             Nullability::NonNullable => self,
             Nullability::Nullable => self.into_nullable(),
         }
+    }
+
+    /// Create an accessor with the requested policy for retaining state between validity lookups.
+    ///
+    /// Mirrors [`ArrayRef::probe`]. Constant states answer from the variant alone;
+    /// [`Validity::Array`] reads through an owned [`ArrayProbe`](crate::ArrayProbe), so
+    /// [`ProbeUsage::Repeated`] keeps its preparation across lookups instead of rebuilding it
+    /// for every row.
+    ///
+    /// ```
+    /// use vortex_array::IntoArray;
+    /// use vortex_array::ProbeUsage;
+    /// use vortex_array::VortexSessionExecute;
+    /// use vortex_array::arrays::PrimitiveArray;
+    ///
+    /// let array = PrimitiveArray::from_option_iter([Some(10i32), None, Some(30)]).into_array();
+    /// let mut ctx = vortex_array::array_session().create_execution_ctx();
+    /// let mut probe = array.validity()?.probe(ProbeUsage::Repeated);
+    /// assert!(probe.execute_is_valid(0, &mut ctx)?);
+    /// assert!(probe.execute_is_invalid(1, &mut ctx)?);
+    /// assert!(probe.execute_is_valid(2, &mut ctx)?);
+    /// # Ok::<(), vortex_error::VortexError>(())
+    /// ```
+    pub fn probe(&self, usage: ProbeUsage) -> ValidityProbe<'static> {
+        ValidityProbe::owned(self.clone(), usage)
     }
 
     /// Returns whether the `index` item is valid, using `ctx` to execute the validity array.
