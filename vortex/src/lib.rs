@@ -111,6 +111,7 @@ pub use vortex_array::expr;
 use vortex_array::memory::MemorySession;
 use vortex_array::optimizer::kernels::KernelSession;
 pub use vortex_array::scalar_fn;
+use vortex_array::scalar_fn::fns::cast::CastSession;
 use vortex_array::scalar_fn::session::ScalarFnSession;
 use vortex_array::session::ArraySession;
 use vortex_array::stats::session::StatsSession;
@@ -321,6 +322,7 @@ impl VortexSessionDefault for VortexSession {
             .with::<KernelSession>()
             .with::<LayoutSession>()
             .with::<ScalarFnSession>()
+            .with::<CastSession>()
             .with::<StatsSession>()
             .with::<AggregateFnSession>()
             .with::<MemorySession>()

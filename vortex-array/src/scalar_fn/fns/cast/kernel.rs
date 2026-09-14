@@ -85,6 +85,10 @@ where
         if array.dtype() == dtype {
             return Ok(Some(array.array().clone()));
         }
+        // Session rules take precedence over the built-in kernel, as they do in `Cast::execute`.
+        if let Some(cast_fn) = Cast::session_rule(ctx, array.dtype(), dtype)? {
+            return cast_fn(array.array().clone(), ctx).map(Some);
+        }
         <V as CastKernel>::cast(array, dtype, ctx)
     }
 }

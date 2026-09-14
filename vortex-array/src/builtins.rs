@@ -172,7 +172,7 @@ impl ArrayBuiltins for ArrayRef {
         if self.dtype() == &dtype {
             return Ok(self.clone());
         }
-        Cast::try_new(self.clone(), dtype)?.into_array().optimize()
+        Cast::new(self.clone(), dtype).into_array().optimize()
     }
 
     fn fill_null(&self, fill_value: impl Into<Scalar>) -> VortexResult<ArrayRef> {

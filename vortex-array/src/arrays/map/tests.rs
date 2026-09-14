@@ -10,6 +10,7 @@ use vortex_session::registry::ReadContext;
 use crate::Array;
 use crate::ArrayContext;
 use crate::ArrayParts;
+use crate::ArrayRef;
 use crate::ArrayVTable;
 use crate::Canonical;
 use crate::IntoArray;
@@ -618,11 +619,13 @@ fn null_map_cast_cannot_create_sortedness_assertion() -> VortexResult<()> {
     let scalar = Scalar::null(unsorted_dtype);
 
     assert!(scalar.cast(&sorted_dtype).is_err());
-    // The cast is rejected when it is bound, before any execution.
+    // The cast binds and fails when it executes.
+    let mut ctx = array_session().create_execution_ctx();
     assert!(
         ConstantArray::new(scalar, 2)
             .into_array()
             .cast(sorted_dtype.clone())
+            .and_then(|array| array.execute::<ArrayRef>(&mut ctx))
             .is_err()
     );
 

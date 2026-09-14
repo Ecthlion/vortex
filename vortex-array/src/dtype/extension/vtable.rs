@@ -7,10 +7,8 @@ use std::hash::Hash;
 
 use vortex_error::VortexResult;
 
-use crate::dtype::DType;
 use crate::dtype::extension::ExtDType;
 use crate::dtype::extension::ExtId;
-use crate::expr::Expression;
 use crate::scalar::ScalarValue;
 
 /// The public API for defining new extension types.
@@ -49,44 +47,6 @@ pub trait ExtVTable: 'static + Sized + Send + Sync + Clone + Debug + Eq + Hash {
     /// This is called when constructing an [`ExtDType`] and should check both storage dtype and
     /// extension metadata.
     fn validate_dtype(ext_dtype: &ExtDType<Self>) -> VortexResult<()>;
-
-    // Methods related to casting.
-
-    /// Returns an expression that casts a value of this extension dtype to `target`.
-    ///
-    /// The expression is written over [`root()`](crate::expr::root), which stands for the input
-    /// value, and must evaluate to exactly `target`. Because it is a plain expression, the same
-    /// definition serves arrays, constants, and scalars, and it takes part in expression
-    /// optimization like any other cast. Building it from the concrete [`ExtDType`] lets the
-    /// implementation consult extension metadata, such as a timestamp's unit and timezone.
-    ///
-    /// Returning `Ok(None)` declines the cast. The default cast rules then apply: an extension
-    /// dtype can always be cast to its storage dtype, and a `target` extension dtype gets a
-    /// chance to accept the cast through [`cast_from`](Self::cast_from). Anything else is
-    /// rejected when the cast is type-checked, so a cast that is accepted here can be
-    /// planned without executing it.
-    ///
-    /// Identity and nullability-only casts never reach this hook.
-    fn cast_to(ext_dtype: &ExtDType<Self>, target: &DType) -> VortexResult<Option<Expression>> {
-        _ = (ext_dtype, target);
-        Ok(None)
-    }
-
-    /// Returns an expression that casts a value of `source` to this extension dtype.
-    ///
-    /// The expression follows the same contract as [`cast_to`](Self::cast_to): it is written
-    /// over [`root()`](crate::expr::root) and must evaluate to exactly this extension dtype.
-    /// [`ext_wrap`](crate::expr::ext_wrap) wraps a storage-typed expression into an extension
-    /// dtype.
-    ///
-    /// There is no default cast into an extension dtype, not even from its storage dtype,
-    /// because the storage dtype alone does not prove that values are meaningful for the
-    /// extension type. Extension types opt in through this hook. When `source` is itself an
-    /// extension dtype, its own [`cast_to`](Self::cast_to) is consulted first.
-    fn cast_from(ext_dtype: &ExtDType<Self>, source: &DType) -> VortexResult<Option<Expression>> {
-        _ = (ext_dtype, source);
-        Ok(None)
-    }
 
     // Methods related to the extension scalar values.
 

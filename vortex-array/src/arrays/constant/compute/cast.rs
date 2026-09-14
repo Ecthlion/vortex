@@ -12,10 +12,12 @@ use crate::dtype::DType;
 use crate::scalar_fn::fns::cast::CastReduce;
 
 impl CastReduce for Constant {
+    /// Folds the built-in casts. Session cast rules are consulted when the cast executes, where
+    /// the session is known, and a failing cast is left in place so its error surfaces there.
     fn cast(array: ArrayView<'_, Constant>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
-        match array.scalar().cast(dtype) {
-            Ok(scalar) => Ok(Some(ConstantArray::new(scalar, array.len()).into_array())),
-            Err(_) => Ok(None),
+        match array.scalar().cast_builtin(dtype) {
+            Ok(Some(scalar)) => Ok(Some(ConstantArray::new(scalar, array.len()).into_array())),
+            Ok(None) | Err(_) => Ok(None),
         }
     }
 }

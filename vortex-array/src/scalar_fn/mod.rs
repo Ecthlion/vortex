@@ -17,7 +17,6 @@ use vortex_session::registry::Id;
 
 use crate::scalar_fn::fns::byte_length::ByteLength;
 use crate::scalar_fn::fns::ext_storage::ExtStorage;
-use crate::scalar_fn::fns::ext_wrap::ExtWrap;
 use crate::scalar_fn::fns::get_item::GetItem;
 use crate::scalar_fn::fns::literal::Literal;
 
@@ -78,7 +77,6 @@ mod sealed {
 pub fn is_negative_cost(id: ScalarFnId) -> bool {
     id == ScalarFnVTable::id(&ByteLength)
         || id == ScalarFnVTable::id(&ExtStorage)
-        || id == ScalarFnVTable::id(&ExtWrap)
         || id == ScalarFnVTable::id(&GetItem)
         || id == ScalarFnVTable::id(&Literal)
 }

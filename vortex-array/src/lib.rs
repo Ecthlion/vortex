@@ -98,6 +98,7 @@ use crate::aggregate_fn::session::AggregateFnSession;
 use crate::dtype::session::DTypeSession;
 use crate::memory::MemorySession;
 use crate::optimizer::kernels::KernelSession;
+use crate::scalar_fn::fns::cast::CastSession;
 use crate::scalar_fn::session::ScalarFnSession;
 use crate::session::ArraySession;
 use crate::stats::session::StatsSession;
@@ -158,8 +159,8 @@ pub fn initialize(session: &VortexSession) {
 }
 
 /// Builds a fresh [`VortexSession`] registered with all of vortex-array's built-in session
-/// variables: arrays, dtypes, scalar functions, stats, optimizer kernels, aggregate functions,
-/// and memory.
+/// variables: arrays, dtypes, scalar functions, cast rules, stats, optimizer kernels, aggregate
+/// functions, and memory.
 ///
 /// Each call returns an independent session (with its own registries), so callers may register
 /// additional encodings or kernels into it without affecting any other session. This does not
@@ -172,6 +173,7 @@ pub fn array_session() -> VortexSession {
         .with::<KernelSession>()
         .with::<DTypeSession>()
         .with::<ScalarFnSession>()
+        .with::<CastSession>()
         .with::<StatsSession>()
         .with::<AggregateFnSession>()
         .with::<MemorySession>()

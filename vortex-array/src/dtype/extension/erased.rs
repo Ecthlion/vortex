@@ -20,7 +20,6 @@ use crate::dtype::extension::ExtId;
 use crate::dtype::extension::ExtVTable;
 use crate::dtype::extension::Matcher;
 use crate::dtype::extension::typed::DynExtDType;
-use crate::expr::Expression;
 use crate::scalar::ScalarValue;
 
 /// A type-erased extension dtype.
@@ -107,18 +106,6 @@ impl ExtDTypeRef {
     /// Validates that the given storage scalar value is valid for this dtype.
     pub(crate) fn validate_storage_value(&self, storage_value: &ScalarValue) -> VortexResult<()> {
         self.0.validate_scalar_value(storage_value)
-    }
-
-    /// Returns an expression casting this extension dtype to `target`, if the extension type
-    /// supports it. See [`ExtVTable::cast_to`].
-    pub fn cast_to(&self, target: &DType) -> VortexResult<Option<Expression>> {
-        self.0.cast_to(target)
-    }
-
-    /// Returns an expression casting `source` to this extension dtype, if the extension type
-    /// supports it. See [`ExtVTable::cast_from`].
-    pub fn cast_from(&self, source: &DType) -> VortexResult<Option<Expression>> {
-        self.0.cast_from(source)
     }
 }
 

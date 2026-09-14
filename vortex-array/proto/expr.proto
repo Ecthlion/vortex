@@ -106,10 +106,6 @@ message CastOpts {
   vortex.dtype.DType target = 1;
 }
 
-message ExtWrapOpts {
-  vortex.dtype.DType ext_dtype = 1;
-}
-
 message FieldNames {
   repeated string names = 1;
 }

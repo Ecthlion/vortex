@@ -87,8 +87,8 @@ impl<'a> ExtScalar<'a> {
     /// Casts this scalar to its storage dtype, or to the same extension dtype with a different
     /// nullability.
     ///
-    /// Other extension casts are rewrites supplied by the extension type and are evaluated by
-    /// [`Scalar::cast`]; see [`ExtVTable::cast_to`](crate::dtype::extension::ExtVTable::cast_to).
+    /// Other extension casts come from session cast rules; see
+    /// [`CastRules`](crate::scalar_fn::fns::cast::CastRules) and [`Scalar::cast`].
     pub(crate) fn cast(&self, target_dtype: &DType) -> VortexResult<Scalar> {
         if self.value.is_none() && !target_dtype.is_nullable() {
             vortex_bail!(

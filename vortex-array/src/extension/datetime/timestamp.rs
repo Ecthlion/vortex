@@ -15,22 +15,26 @@ use vortex_error::vortex_err;
 use vortex_error::vortex_panic;
 use vortex_session::registry::CachedId;
 
+use crate::ArrayRef;
+use crate::ExecutionCtx;
+use crate::IntoArray;
+use crate::arrays::ExtensionArray;
 use crate::dtype::DType;
 use crate::dtype::Nullability;
 use crate::dtype::PType;
 use crate::dtype::extension::ExtDType;
 use crate::dtype::extension::ExtId;
 use crate::dtype::extension::ExtVTable;
-use crate::expr::Expression;
 use crate::expr::cast;
 use crate::expr::ext_storage;
-use crate::expr::ext_wrap;
 use crate::expr::lit;
 use crate::expr::root;
 use crate::extension::datetime::TimeUnit;
 use crate::scalar::ScalarValue;
 use crate::scalar_fn::ScalarFnVTableExt;
 use crate::scalar_fn::fns::binary::Binary;
+use crate::scalar_fn::fns::cast::CastFn;
+use crate::scalar_fn::fns::cast::CastRule;
 use crate::scalar_fn::fns::operators::Operator;
 
 /// Timestamp DType.
@@ -129,6 +133,61 @@ fn nanos_per_unit(unit: TimeUnit) -> Option<i64> {
     }
 }
 
+/// The default [`CastRule`] for timestamps: casts between time units when the timezones match,
+/// by scaling the storage values. Coarsening truncates toward zero, as Arrow does.
+///
+/// A different timezone is not a cast, so the rule declines it and the cast fails. Casts that
+/// only change nullability are declined too; the built-in casts handle them.
+#[derive(Debug)]
+pub struct TimestampCast;
+
+impl CastRule for TimestampCast {
+    fn bind(&self, source: &DType, target: &DType) -> VortexResult<Option<CastFn>> {
+        let (Some(source_ext), Some(target_ext)) =
+            (source.as_extension_opt(), target.as_extension_opt())
+        else {
+            return Ok(None);
+        };
+        let (Some(from), Some(to)) = (
+            source_ext.metadata_opt::<Timestamp>(),
+            target_ext.metadata_opt::<Timestamp>(),
+        ) else {
+            return Ok(None);
+        };
+        if from.tz != to.tz {
+            return Ok(None);
+        }
+        let (Some(from_ns), Some(to_ns)) = (nanos_per_unit(from.unit), nanos_per_unit(to.unit))
+        else {
+            return Ok(None);
+        };
+        if from_ns == to_ns {
+            return Ok(None);
+        }
+
+        let storage = ext_storage(root());
+        let scaled = if from_ns > to_ns {
+            Binary.new_expr(Operator::Mul, [storage, lit(from_ns / to_ns)])
+        } else {
+            Binary.new_expr(Operator::Div, [storage, lit(to_ns / from_ns)])
+        };
+        let target_storage = target_ext.storage_dtype();
+        let scaled = if target_storage.nullability() == source_ext.storage_dtype().nullability() {
+            scaled
+        } else {
+            cast(scaled, target_storage.clone())
+        };
+
+        let target_ext = target_ext.clone();
+        Ok(Some(Arc::new(
+            move |array: ArrayRef, _ctx: &mut ExecutionCtx| {
+                let storage = array.apply(&scaled)?;
+                Ok(ExtensionArray::try_new(target_ext.clone(), storage)?.into_array())
+            },
+        )))
+    }
+}
+
 impl ExtVTable for Timestamp {
     type Metadata = TimestampOptions;
 
@@ -207,45 +266,6 @@ impl ExtVTable for Timestamp {
             "Timestamp storage dtype must be i64"
         );
         Ok(())
-    }
-
-    /// Timestamps cast between time units when their timezones match, by scaling the storage
-    /// values. Coarsening truncates toward zero, as Arrow does. A different timezone is not a
-    /// cast, so it is declined.
-    fn cast_to(ext_dtype: &ExtDType<Self>, target: &DType) -> VortexResult<Option<Expression>> {
-        let Some(target_ext) = target.as_extension_opt() else {
-            return Ok(None);
-        };
-        let Some(target_options) = target_ext.metadata_opt::<Timestamp>() else {
-            return Ok(None);
-        };
-        let options = ext_dtype.metadata();
-        if options.tz != target_options.tz {
-            return Ok(None);
-        }
-        let (Some(from_ns), Some(to_ns)) = (
-            nanos_per_unit(options.unit),
-            nanos_per_unit(target_options.unit),
-        ) else {
-            return Ok(None);
-        };
-
-        let storage = ext_storage(root());
-        let scaled = if from_ns == to_ns {
-            storage
-        } else if from_ns > to_ns {
-            Binary.new_expr(Operator::Mul, [storage, lit(from_ns / to_ns)])
-        } else {
-            Binary.new_expr(Operator::Div, [storage, lit(to_ns / from_ns)])
-        };
-
-        let target_storage = target_ext.storage_dtype();
-        let storage = if target_storage.nullability() == ext_dtype.storage_dtype().nullability() {
-            scaled
-        } else {
-            cast(scaled, target_storage.clone())
-        };
-        Ok(Some(ext_wrap(storage, target_ext.clone())))
     }
 
     fn unpack_native<'a>(

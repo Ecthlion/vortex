@@ -100,13 +100,13 @@ mod tests {
         let actual = ext_scalar.cast(expected_dtype).unwrap();
         assert_eq!(actual.dtype(), expected_dtype);
 
-        // Casting from the storage type into an extension type requires the extension type to
-        // opt in via `ExtVTable::cast_from`; `Apples` does not.
+        // Casting from the storage type into an extension type needs a cast rule; there is none
+        // for `Apples`.
         let result = storage_scalar.cast(&ext_dtype);
         assert!(
             result
                 .as_ref()
-                .is_err_and(|err| err.to_string().contains("does not accept casts from")),
+                .is_err_and(|err| err.to_string().contains("no default cast rule")),
             "{result:?}"
         );
         assert!(storage_scalar.cast(&ext_dtype.as_nullable()).is_err());
