@@ -21,8 +21,9 @@ const BLOCK: Alignment = Alignment::new(4096);
 #[case(SegmentPadding::grouped(), 4000, 96, Alignment::new(8), 0)]
 // One byte more than the block has room for, and it moves to the next block.
 #[case(SegmentPadding::grouped(), 4000, 97, Alignment::new(8), 96)]
-// Anything larger than a block is aligned, exactly as `always` would.
-#[case(SegmentPadding::grouped(), 10, 1 << 20, Alignment::new(8), 4086)]
+// Anything at least a block long is left packed: a straddle costs it far less than padding.
+#[case(SegmentPadding::grouped(), 10, 1 << 20, Alignment::new(8), 6)]
+#[case(SegmentPadding::grouped(), 4000, 4096, Alignment::new(8), 0)]
 // A segment demanding more than a block still only pays its own alignment.
 #[case(SegmentPadding::grouped(), 10, 4, Alignment::new(1 << 16), 65526)]
 // Proportional pads a large segment, but leaves a small one packed.
@@ -78,14 +79,15 @@ fn proportional_padding_is_bounded_by_the_overhead_budget() {
 }
 
 /// Block alignment must never cost more than a block per segment.
-/// The whole point of grouping: the same blocks are touched, for a fraction of the padding.
+/// The whole point of grouping: sub-block segments touch one block each, as they would under
+/// block alignment, for a fraction of the padding.
 #[test]
 fn grouping_reads_like_block_alignment_for_less_padding() {
     let (mut grouped_offset, mut always_offset) = (0u64, 0u64);
     let (mut grouped_pad, mut always_pad) = (0u64, 0u64);
     for i in 0..10_000u64 {
-        // Segments small enough to share blocks, which is where the two policies differ.
-        let length = 1 + (i * 7919) % (1 << 12);
+        // Sub-block segments, which is where the two policies are supposed to agree on reads.
+        let length = 1 + (i * 7919) % ((1 << 12) - 1);
         let alignment = Alignment::new(1 << (i % 5));
 
         let pad = SegmentPadding::grouped().padding(grouped_offset, length, alignment);
@@ -104,7 +106,7 @@ fn grouping_reads_like_block_alignment_for_less_padding() {
         grouped_offset += length;
         always_offset += length;
     }
-    // Grouping pads about a third of what block-aligning does on this distribution.
+    // Grouping pads a fraction of what block-aligning does on this distribution.
     assert!(
         grouped_pad * 2 < always_pad,
         "grouping padded {grouped_pad} against {always_pad} block-aligned"
@@ -118,7 +120,7 @@ fn grouping_never_splits_a_segment_that_fits_in_a_block() {
     for i in 0..10_000u64 {
         let length = 1 + (i * 4099) % (1 << 13);
         offset += SegmentPadding::grouped().padding(offset, length, Alignment::new(8));
-        if length <= BLOCK.as_usize() as u64 {
+        if length < BLOCK.as_usize() as u64 {
             assert_eq!(blocks_spanned(offset, length), 1, "segment {i} was split");
         }
         offset += length;

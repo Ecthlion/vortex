@@ -58,13 +58,16 @@ pub enum SegmentPadding {
         /// The storage block size to align to.
         block: Alignment,
     },
-    /// Start a segment on a `block` boundary only when it would otherwise straddle one.
+    /// Keep every sub-block segment inside a single `block`, packing runs of them together.
     ///
-    /// A segment that fits in what is left of the current block is written there, so runs of
-    /// small consecutive segments share a block instead of each burning a whole one. Every
-    /// segment still occupies the same blocks it would under [`Self::Always`] — one apiece for
-    /// anything up to a block, `len / block` rounded up for anything larger — so this reads
-    /// identically while padding strictly less.
+    /// A segment smaller than `block` stays where it is when it fits in what is left of the
+    /// current block, and moves to the next block only when it would straddle one. Runs of small
+    /// consecutive segments therefore share a block instead of each burning a whole one, and each
+    /// still reads in the single block [`Self::Always`] would have given it.
+    ///
+    /// A segment at least a block long is never moved. It already spans several blocks, so the
+    /// one extra block a straddle can cost it is a small fraction of its read, and far cheaper
+    /// than the up-to-a-block of padding that aligning it would add to the file.
     Grouped {
         /// The storage block size to align to.
         block: Alignment,
@@ -91,7 +94,7 @@ impl SegmentPadding {
         }
     }
 
-    /// Pack consecutive segments into shared [`DEFAULT_BLOCK_SIZE`] blocks.
+    /// Keep every segment below [`DEFAULT_BLOCK_SIZE`] within a single block of that size.
     pub const fn grouped() -> Self {
         Self::Grouped {
             block: DEFAULT_BLOCK_SIZE,
@@ -144,12 +147,15 @@ impl SegmentPadding {
             // A segment whose own alignment exceeds the block size still has to satisfy it, so
             // align to whichever is larger. Both are powers of two, so the larger subsumes both.
             Self::Always { block } => pad_to(byte_offset, block.max(alignment)),
-            // Only a segment that would cross a block boundary is pushed to the next one, so a
-            // segment small enough to fit in the current block's remainder rides along for free.
+            // Only a sub-block segment is worth moving: straddling a boundary doubles the blocks
+            // it touches, from one to two. A segment at least a block long already spans several,
+            // so the extra block a straddle costs it is a small fraction, not worth a whole block
+            // of padding. Within that, a segment that fits in the current block's remainder rides
+            // along for free.
             Self::Grouped { block } => {
-                let start = byte_offset + required;
-                let offset_in_block = start % block.as_usize() as u64;
-                if offset_in_block == 0 || offset_in_block + length <= block.as_usize() as u64 {
+                let block_size = block.as_usize() as u64;
+                let offset_in_block = (byte_offset + required) % block_size;
+                if length >= block_size || offset_in_block + length <= block_size {
                     required
                 } else {
                     pad_to(byte_offset, block.max(alignment))
