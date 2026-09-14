@@ -19,6 +19,8 @@ use crate::VortexReadAt;
 use crate::filesystem::FileListing;
 use crate::filesystem::FileSystem;
 use crate::object_store::ObjectStoreReadAt;
+use crate::object_store::diagnostic_read_at::DiagnosticObjectStoreReadAt;
+use crate::object_store::diagnostic_read_at::scan_diagnostics_enabled;
 use crate::object_store::object_path_from_literal;
 use crate::runtime::Handle;
 
@@ -51,6 +53,21 @@ impl ObjectStoreFileSystem {
             Arc::new(object_store::local::LocalFileSystem::new()),
             handle,
         )
+    }
+
+    fn open_reader(&self, path: &str, diagnostics: bool) -> Arc<dyn VortexReadAt> {
+        if diagnostics {
+            return Arc::new(DiagnosticObjectStoreReadAt::new(
+                Arc::clone(&self.store),
+                object_path_from_literal(path),
+                self.handle.clone(),
+            ));
+        }
+        Arc::new(ObjectStoreReadAt::new(
+            Arc::clone(&self.store),
+            object_path_from_literal(path),
+            self.handle.clone(),
+        ))
     }
 }
 
@@ -90,11 +107,7 @@ impl FileSystem for ObjectStoreFileSystem {
     }
 
     async fn open_read(&self, path: &str) -> VortexResult<Arc<dyn VortexReadAt>> {
-        Ok(Arc::new(ObjectStoreReadAt::new(
-            Arc::clone(&self.store),
-            object_path_from_literal(path),
-            self.handle.clone(),
-        )))
+        Ok(self.open_reader(path, scan_diagnostics_enabled()))
     }
 
     async fn delete(&self, path: &str) -> VortexResult<()> {
@@ -131,6 +144,23 @@ mod tests {
         }
         let handle = Handle::find().expect("tokio runtime available within #[tokio::test]");
         Ok(ObjectStoreFileSystem::new(store, handle))
+    }
+
+    #[tokio::test]
+    async fn diagnostics_selection_preserves_the_ordinary_reader() -> VortexResult<()> {
+        let fs = memory_fs(&[("test.vortex", 5)]).await?;
+
+        assert_eq!(
+            fs.open_reader("test.vortex", false)
+                .diagnostic_instance_id(),
+            None
+        );
+        assert!(
+            fs.open_reader("test.vortex", true)
+                .diagnostic_instance_id()
+                .is_some()
+        );
+        Ok(())
     }
 
     /// Regression test for #6599: globbing an exact path that exists must return that one file.

@@ -57,8 +57,14 @@ pub struct ObjectStoreReadAt {
     allocator: HostAllocatorRef,
     concurrency: usize,
     coalesce_config: Option<CoalesceConfig>,
-    #[cfg(any(unix, windows))]
-    file_payload_promotion: Option<Arc<FilePayloadPromotion>>,
+}
+
+/// An object-store reader that promotes an exactly identified file payload into a persistent
+/// positional reader.
+#[cfg(any(unix, windows))]
+pub struct PromotingObjectStoreReadAt {
+    inner: ObjectStoreReadAt,
+    promotion: Arc<FilePayloadPromotion>,
 }
 
 #[cfg(any(unix, windows))]
@@ -217,8 +223,6 @@ impl ObjectStoreReadAt {
             allocator,
             concurrency: DEFAULT_CONCURRENCY,
             coalesce_config: Some(CoalesceConfig::object_storage()),
-            #[cfg(any(unix, windows))]
-            file_payload_promotion: None,
         }
     }
 
@@ -236,11 +240,11 @@ impl ObjectStoreReadAt {
 
     /// Reuse an exactly identified file payload as a persistent positional reader.
     #[cfg(any(unix, windows))]
-    pub fn with_file_payload_promotion(
-        mut self,
+    pub fn into_file_payload_promoting(
+        self,
         expected_meta: ObjectMeta,
         diagnostics: bool,
-    ) -> VortexResult<Self> {
+    ) -> VortexResult<PromotingObjectStoreReadAt> {
         if self.path != expected_meta.location {
             vortex_bail!(
                 "persistent file-payload promotion path {} does not match expected object {}",
@@ -248,11 +252,10 @@ impl ObjectStoreReadAt {
                 expected_meta.location
             );
         }
-        self.file_payload_promotion = Some(Arc::new(FilePayloadPromotion::new(
-            expected_meta,
-            diagnostics,
-        )));
-        Ok(self)
+        Ok(PromotingObjectStoreReadAt {
+            inner: self,
+            promotion: Arc::new(FilePayloadPromotion::new(expected_meta, diagnostics)),
+        })
     }
 }
 
@@ -262,7 +265,77 @@ async fn read_object_store_range(
     io_handle: Handle,
     allocator: HostAllocatorRef,
     request: ReadAtRequest,
-    #[cfg(any(unix, windows))] file_payload_promotion: Option<Arc<FilePayloadPromotion>>,
+) -> VortexResult<BufferHandle> {
+    let ReadAtRequest {
+        offset,
+        length,
+        alignment,
+    } = request;
+    let range = offset..(offset + length as u64);
+    let mut buffer = allocator.allocate(length, alignment)?;
+
+    let response = store
+        .get_opts(
+            &path,
+            GetOptions {
+                range: Some(GetRange::Bounded(range.clone())),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+    let buffer = match response.payload {
+        #[cfg(not(target_arch = "wasm32"))]
+        GetResultPayload::File(file, _) => io_handle
+            .spawn_blocking(move || {
+                read_exact_at(&file, buffer.as_mut_slice(), range.start)?;
+                Ok::<_, io::Error>(buffer)
+            })
+            .await
+            .map_err(io::Error::other)?,
+        #[cfg(target_arch = "wasm32")]
+        GetResultPayload::File(..) => {
+            unreachable!("File payload not supported on wasm32")
+        }
+        GetResultPayload::Stream(mut byte_stream) => {
+            let mut written = 0usize;
+            while let Some(bytes) = byte_stream.next().await {
+                let bytes = bytes?;
+                let end = written + bytes.len();
+                vortex_ensure!(
+                    end <= length,
+                    "Object store stream returned too many bytes: {} > expected {} (range: {:?})",
+                    end,
+                    length,
+                    range
+                );
+                buffer.as_mut_slice()[written..end].copy_from_slice(&bytes);
+                written = end;
+            }
+
+            vortex_ensure!(
+                written == length,
+                "Object store stream returned {} bytes but expected {} bytes (range: {:?})",
+                written,
+                length,
+                range
+            );
+
+            buffer
+        }
+    };
+
+    Ok(BufferHandle::new_host(buffer.freeze()))
+}
+
+#[cfg(any(unix, windows))]
+async fn read_promoting_object_store_range(
+    store: Arc<dyn ObjectStore>,
+    path: ObjectPath,
+    io_handle: Handle,
+    allocator: HostAllocatorRef,
+    request: ReadAtRequest,
+    file_payload_promotion: Arc<FilePayloadPromotion>,
 ) -> VortexResult<BufferHandle> {
     let ReadAtRequest {
         offset,
@@ -274,13 +347,9 @@ async fn read_object_store_range(
         .ok_or_else(|| vortex_err!("positional read range overflow"))?;
     let range = offset..end;
 
-    #[cfg(any(unix, windows))]
-    if let Some((promotion, file)) = file_payload_promotion
-        .as_ref()
-        .and_then(|promotion| promotion.cached_file().map(|file| (promotion, file)))
-    {
-        promotion.record(
-            &promotion.blocking_read_submissions,
+    if let Some(file) = file_payload_promotion.cached_file() {
+        file_payload_promotion.record(
+            &file_payload_promotion.blocking_read_submissions,
             "blocking_read_submission",
         );
         let mut buffer = allocator.allocate(length, alignment)?;
@@ -296,55 +365,32 @@ async fn read_object_store_range(
 
     let mut buffer = allocator.allocate(length, alignment)?;
 
-    #[cfg(any(unix, windows))]
-    if let Some(promotion) = &file_payload_promotion {
-        promotion.record(&promotion.get_opts_calls, "get_opts");
-    }
+    file_payload_promotion.record(&file_payload_promotion.get_opts_calls, "get_opts");
 
-    #[cfg(any(unix, windows))]
     let mut get_options = GetOptions {
         range: Some(GetRange::Bounded(range.clone())),
         ..Default::default()
     };
-    #[cfg(not(any(unix, windows)))]
-    let get_options = GetOptions {
-        range: Some(GetRange::Bounded(range.clone())),
-        ..Default::default()
-    };
-    #[cfg(any(unix, windows))]
-    if let Some(promotion) = &file_payload_promotion {
-        get_options.if_match = promotion.expected_meta.e_tag.clone();
-        get_options.version = promotion.expected_meta.version.clone();
-    }
+    get_options.if_match = file_payload_promotion.expected_meta.e_tag.clone();
+    get_options.version = file_payload_promotion.expected_meta.version.clone();
     let response = store.get_opts(&path, get_options).await?;
 
-    #[cfg(any(unix, windows))]
-    if let Some(promotion) = file_payload_promotion
-        .as_ref()
-        .filter(|_| response.range != range)
-    {
-        promotion.record_identity_mismatch();
+    if response.range != range {
+        file_payload_promotion.record_identity_mismatch();
         vortex_bail!(
             "object store returned range {:?} for requested persistent file range {:?}",
             response.range,
             range
         );
     }
-    #[cfg(any(unix, windows))]
     let response_meta = response.meta.clone();
     let buffer = match response.payload {
-        #[cfg(any(unix, windows))]
         GetResultPayload::File(file, _) => {
-            let file = match &file_payload_promotion {
-                Some(promotion) => promotion.observe_file(&response_meta, file)?,
-                None => Arc::new(file),
-            };
-            if let Some(promotion) = &file_payload_promotion {
-                promotion.record(
-                    &promotion.blocking_read_submissions,
-                    "blocking_read_submission",
-                );
-            }
+            let file = file_payload_promotion.observe_file(&response_meta, file)?;
+            file_payload_promotion.record(
+                &file_payload_promotion.blocking_read_submissions,
+                "blocking_read_submission",
+            );
             io_handle
                 .spawn_blocking(move || {
                     read_exact_at(&file, buffer.as_mut_slice(), range.start)?;
@@ -353,22 +399,13 @@ async fn read_object_store_range(
                 .await
                 .map_err(io::Error::other)?
         }
-        #[cfg(all(not(target_arch = "wasm32"), not(any(unix, windows))))]
-        GetResultPayload::File(file, _) => io_handle
-            .spawn_blocking(move || {
-                read_exact_at(&file, buffer.as_mut_slice(), range.start)?;
-                Ok::<_, io::Error>(buffer)
-            })
-            .await
-            .map_err(io::Error::other)?,
-        #[cfg(target_arch = "wasm32")]
-        GetResultPayload::File(..) => {
-            unreachable!("File payload not supported on wasm32")
-        }
         GetResultPayload::Stream(mut byte_stream) => {
-            #[cfg(any(unix, windows))]
-            if let Some(promotion) = &file_payload_promotion {
-                promotion.observe_non_file();
+            if response_meta != file_payload_promotion.expected_meta {
+                file_payload_promotion.record_identity_mismatch();
+                vortex_bail!(
+                    "object identity changed while opening {} for a persistent positional reader",
+                    file_payload_promotion.expected_meta.location
+                );
             }
             let mut written = 0usize;
             while let Some(bytes) = byte_stream.next().await {
@@ -393,6 +430,7 @@ async fn read_object_store_range(
                 range
             );
 
+            file_payload_promotion.observe_non_file();
             buffer
         }
     };
@@ -444,8 +482,6 @@ impl VortexReadAt for ObjectStoreReadAt {
                 io_handle,
                 allocator,
                 ReadAtRequest::new(offset, length, alignment),
-                #[cfg(any(unix, windows))]
-                self.file_payload_promotion.clone(),
             ))
             .boxed()
     }
@@ -459,8 +495,6 @@ impl VortexReadAt for ObjectStoreReadAt {
         let path = self.path.clone();
         let handle = self.handle.clone();
         let allocator = Arc::clone(&self.allocator);
-        #[cfg(any(unix, windows))]
-        let file_payload_promotion = self.file_payload_promotion.clone();
         let concurrency = self.concurrency.max(1);
         let (mut send, recv) = mpsc::channel(concurrency);
         let io_handle = handle.clone();
@@ -474,17 +508,103 @@ impl VortexReadAt for ObjectStoreReadAt {
                 let path = path.clone();
                 let io_handle = io_handle.clone();
                 let allocator = Arc::clone(&allocator);
-                #[cfg(any(unix, windows))]
-                let file_payload_promotion = file_payload_promotion.clone();
                 async move {
-                    let result = read_object_store_range(
-                        store,
-                        path,
-                        io_handle,
-                        allocator,
-                        request,
-                        #[cfg(any(unix, windows))]
-                        file_payload_promotion,
+                    let result =
+                        read_object_store_range(store, path, io_handle, allocator, request).await;
+                    (request, result)
+                }
+            });
+
+            let mut reads = stream::iter(reads).buffer_unordered(concurrency);
+            while let Some(result) = reads.next().await {
+                if send.send(result).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        async_stream::stream! {
+            let mut recv = recv;
+            while let Some(result) = recv.next().await {
+                yield result;
+            }
+            task.await;
+        }
+        .boxed()
+    }
+}
+
+#[cfg(any(unix, windows))]
+impl VortexReadAt for PromotingObjectStoreReadAt {
+    fn diagnostic_instance_id(&self) -> Option<u64> {
+        self.inner.diagnostic_instance_id()
+    }
+
+    fn uri(&self) -> Option<&Arc<str>> {
+        self.inner.uri()
+    }
+
+    fn coalesce_config(&self) -> Option<CoalesceConfig> {
+        self.inner.coalesce_config()
+    }
+
+    fn concurrency(&self) -> usize {
+        self.inner.concurrency()
+    }
+
+    fn size(&self) -> BoxFuture<'static, VortexResult<u64>> {
+        let size = self.promotion.expected_meta.size;
+        async move { Ok(size) }.boxed()
+    }
+
+    fn read_at(
+        &self,
+        offset: u64,
+        length: usize,
+        alignment: Alignment,
+    ) -> BoxFuture<'static, VortexResult<BufferHandle>> {
+        let store = Arc::clone(&self.inner.store);
+        let path = self.inner.path.clone();
+        let handle = self.inner.handle.clone();
+        let allocator = Arc::clone(&self.inner.allocator);
+        let promotion = Arc::clone(&self.promotion);
+        let io_handle = handle.clone();
+        handle
+            .spawn_io(read_promoting_object_store_range(
+                store,
+                path,
+                io_handle,
+                allocator,
+                ReadAtRequest::new(offset, length, alignment),
+                promotion,
+            ))
+            .boxed()
+    }
+
+    fn read_ranges(&self, requests: Arc<[ReadAtRequest]>) -> ReadAtStream {
+        if requests.is_empty() {
+            return stream::empty().boxed();
+        }
+
+        let store = Arc::clone(&self.inner.store);
+        let path = self.inner.path.clone();
+        let handle = self.inner.handle.clone();
+        let allocator = Arc::clone(&self.inner.allocator);
+        let promotion = Arc::clone(&self.promotion);
+        let concurrency = self.inner.concurrency.max(1);
+        let (mut send, recv) = mpsc::channel(concurrency);
+        let io_handle = handle.clone();
+
+        let task = handle.spawn_io(async move {
+            let reads = requests.iter().copied().map(|request| {
+                let store = Arc::clone(&store);
+                let path = path.clone();
+                let io_handle = io_handle.clone();
+                let allocator = Arc::clone(&allocator);
+                let promotion = Arc::clone(&promotion);
+                async move {
+                    let result = read_promoting_object_store_range(
+                        store, path, io_handle, allocator, request, promotion,
                     )
                     .await;
                     (request, result)
@@ -513,13 +633,11 @@ impl VortexReadAt for ObjectStoreReadAt {
 #[cfg(test)]
 mod tests {
 
-    use std::collections::HashMap;
+    use std::collections::VecDeque;
     use std::fmt;
     use std::ops::Range;
-    use std::sync::Weak;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
-    use std::time::Duration;
 
     use async_trait::async_trait;
     use bytes::Bytes;
@@ -536,7 +654,6 @@ mod tests {
     use object_store::Result as ObjectStoreResult;
     use object_store::local::LocalFileSystem;
     use object_store::memory::InMemory;
-    use tokio::sync::Barrier;
 
     use super::*;
     use crate::runtime::AbortHandle;
@@ -553,16 +670,23 @@ mod tests {
         Metadata,
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum StreamBehavior {
+        Error,
+        Short,
+        Pending,
+    }
+
     #[derive(Debug)]
     struct RecordingStore<T> {
         inner: T,
         get_opts_calls: AtomicUsize,
         get_ranges_calls: AtomicUsize,
+        head_calls: AtomicUsize,
         options: Mutex<Vec<GetOptions>>,
-        barrier: Option<Arc<Barrier>>,
-        delays: HashMap<u64, Duration>,
-        error_offset: Option<u64>,
         mutation: ResponseMutation,
+        stream_behaviors: Mutex<VecDeque<StreamBehavior>>,
+        pending_stream_polls: Arc<AtomicUsize>,
     }
 
     impl<T> RecordingStore<T> {
@@ -571,27 +695,12 @@ mod tests {
                 inner,
                 get_opts_calls: AtomicUsize::new(0),
                 get_ranges_calls: AtomicUsize::new(0),
+                head_calls: AtomicUsize::new(0),
                 options: Mutex::new(Vec::new()),
-                barrier: None,
-                delays: HashMap::new(),
-                error_offset: None,
                 mutation: ResponseMutation::None,
+                stream_behaviors: Mutex::new(VecDeque::new()),
+                pending_stream_polls: Arc::new(AtomicUsize::new(0)),
             }
-        }
-
-        fn with_barrier(mut self, parties: usize) -> Self {
-            self.barrier = Some(Arc::new(Barrier::new(parties)));
-            self
-        }
-
-        fn with_delay(mut self, offset: u64, delay: Duration) -> Self {
-            self.delays.insert(offset, delay);
-            self
-        }
-
-        fn with_error(mut self, offset: u64) -> Self {
-            self.error_offset = Some(offset);
-            self
         }
 
         fn with_mutation(mut self, mutation: ResponseMutation) -> Self {
@@ -599,12 +708,12 @@ mod tests {
             self
         }
 
-        fn requested_offset(options: &GetOptions) -> Option<u64> {
-            match &options.range {
-                Some(GetRange::Bounded(range)) => Some(range.start),
-                Some(GetRange::Offset(offset)) => Some(*offset),
-                Some(GetRange::Suffix(_)) | None => None,
-            }
+        fn with_stream_behaviors(
+            self,
+            behaviors: impl IntoIterator<Item = StreamBehavior>,
+        ) -> Self {
+            *self.stream_behaviors.lock() = behaviors.into_iter().collect();
+            self
         }
     }
 
@@ -638,22 +747,12 @@ mod tests {
             location: &ObjectPath,
             options: GetOptions,
         ) -> ObjectStoreResult<GetResult> {
-            self.get_opts_calls.fetch_add(1, Ordering::SeqCst);
-            let offset = Self::requested_offset(&options);
+            if options.head {
+                self.head_calls.fetch_add(1, Ordering::SeqCst);
+            } else {
+                self.get_opts_calls.fetch_add(1, Ordering::SeqCst);
+            }
             self.options.lock().push(options.clone());
-            if let Some(barrier) = &self.barrier {
-                barrier.wait().await;
-            }
-            if let Some(delay) = offset.and_then(|offset| self.delays.get(&offset)) {
-                tokio::time::sleep(*delay).await;
-            }
-            if offset == self.error_offset {
-                return Err(object_store::Error::Generic {
-                    store: "recording test store",
-                    source: Box::new(io::Error::other("injected get failure")),
-                });
-            }
-
             let mut response = self.inner.get_opts(location, options).await?;
             match self.mutation {
                 ResponseMutation::None => {}
@@ -662,6 +761,35 @@ mod tests {
                 }
                 ResponseMutation::Metadata => {
                     response.meta.e_tag = Some("mismatched-etag".to_owned());
+                }
+            }
+            match self.stream_behaviors.lock().pop_front() {
+                None => {}
+                Some(StreamBehavior::Error) => {
+                    response.payload = GetResultPayload::Stream(
+                        stream::once(async {
+                            Err(object_store::Error::Generic {
+                                store: "recording test store",
+                                source: Box::new(io::Error::other("injected stream failure")),
+                            })
+                        })
+                        .boxed(),
+                    );
+                }
+                Some(StreamBehavior::Short) => {
+                    response.payload = GetResultPayload::Stream(
+                        stream::once(async { Ok(Bytes::from_static(b"short")) }).boxed(),
+                    );
+                }
+                Some(StreamBehavior::Pending) => {
+                    let pending_stream_polls = Arc::clone(&self.pending_stream_polls);
+                    response.payload = GetResultPayload::Stream(
+                        stream::once(async move {
+                            pending_stream_polls.fetch_add(1, Ordering::SeqCst);
+                            futures::future::pending::<ObjectStoreResult<Bytes>>().await
+                        })
+                        .boxed(),
+                    );
                 }
             }
             Ok(response)
@@ -764,6 +892,28 @@ mod tests {
         }
     }
 
+    #[cfg(any(unix, windows))]
+    async fn promoting_stream_reader(
+        behaviors: impl IntoIterator<Item = StreamBehavior>,
+    ) -> anyhow::Result<(
+        PromotingObjectStoreReadAt,
+        Arc<RecordingStore<InMemory>>,
+        Arc<CountingExecutor>,
+    )> {
+        let executor = Arc::new(CountingExecutor::default());
+        let runtime = Arc::clone(&executor) as Arc<dyn Executor>;
+        let handle = Handle::new(Arc::downgrade(&runtime));
+        let inner = InMemory::new();
+        let path = ObjectPath::from("test.bin");
+        inner.put(&path, PutPayload::from_static(TEST_DATA)).await?;
+        let expected_meta = inner.head(&path).await?;
+        let store = Arc::new(RecordingStore::new(inner).with_stream_behaviors(behaviors));
+        let reader =
+            ObjectStoreReadAt::new(Arc::clone(&store) as Arc<dyn ObjectStore>, path, handle)
+                .into_file_payload_promoting(expected_meta, false)?;
+        Ok((reader, store, executor))
+    }
+
     #[tokio::test]
     async fn read_at_uses_spawn_io() -> anyhow::Result<()> {
         let executor = Arc::new(CountingExecutor::default());
@@ -814,6 +964,196 @@ mod tests {
         }
         assert_eq!(executor.spawn_io_count.load(Ordering::SeqCst), 1);
         assert_eq!(executor.spawn_count.load(Ordering::SeqCst), 0);
+
+        Ok(())
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn unpromoted_local_file_preserves_legacy_get_options_and_bytes() -> anyhow::Result<()> {
+        let executor = Arc::new(CountingExecutor::default());
+        let runtime = Arc::clone(&executor) as Arc<dyn Executor>;
+        let handle = Handle::new(Arc::downgrade(&runtime));
+
+        let directory = tempfile::tempdir()?;
+        let path = ObjectPath::from("test.bin");
+        std::fs::write(directory.path().join(path.as_ref()), TEST_DATA)?;
+        let store = Arc::new(RecordingStore::new(LocalFileSystem::new_with_prefix(
+            directory.path(),
+        )?));
+        let reader =
+            ObjectStoreReadAt::new(Arc::clone(&store) as Arc<dyn ObjectStore>, path, handle);
+        let requests: Arc<[ReadAtRequest]> = Arc::from([
+            ReadAtRequest::new(0, 6, Alignment::new(1)),
+            ReadAtRequest::new(7, 5, Alignment::new(1)),
+        ]);
+        let mut results = reader
+            .read_ranges(Arc::clone(&requests))
+            .collect::<Vec<_>>()
+            .await;
+        results.sort_unstable_by_key(|(request, _)| request.offset);
+
+        assert_eq!(results.len(), requests.len());
+        for ((request, result), expected) in
+            results.into_iter().zip([b"object".as_slice(), b"store"])
+        {
+            assert_eq!(result?.to_host().await.as_slice(), expected);
+            assert_eq!(request.length, expected.len());
+        }
+
+        assert_eq!(store.get_opts_calls.load(Ordering::SeqCst), requests.len());
+        assert_eq!(store.get_ranges_calls.load(Ordering::SeqCst), 0);
+        let mut requested_ranges = Vec::new();
+        for options in store.options.lock().iter() {
+            anyhow::ensure!(options.if_match.is_none());
+            anyhow::ensure!(options.if_none_match.is_none());
+            anyhow::ensure!(options.if_modified_since.is_none());
+            anyhow::ensure!(options.if_unmodified_since.is_none());
+            anyhow::ensure!(options.version.is_none());
+            anyhow::ensure!(!options.head);
+            let Some(GetRange::Bounded(range)) = options.range.as_ref() else {
+                anyhow::bail!("expected a bounded legacy range, got {:?}", options.range);
+            };
+            requested_ranges.push(range.clone());
+        }
+        requested_ranges.sort_unstable_by_key(|range| range.start);
+        assert_eq!(requested_ranges, vec![0..6, 7..12]);
+
+        Ok(())
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn promoting_size_uses_frozen_metadata_without_head() -> anyhow::Result<()> {
+        let executor = Arc::new(CountingExecutor::default());
+        let runtime = Arc::clone(&executor) as Arc<dyn Executor>;
+        let handle = Handle::new(Arc::downgrade(&runtime));
+
+        let inner = InMemory::new();
+        let path = ObjectPath::from("test.bin");
+        inner.put(&path, PutPayload::from_static(TEST_DATA)).await?;
+        let expected_meta = inner.head(&path).await?;
+        let expected_size = expected_meta.size;
+        let store = Arc::new(RecordingStore::new(inner));
+        let reader = ObjectStoreReadAt::new(
+            Arc::clone(&store) as Arc<dyn ObjectStore>,
+            path.clone(),
+            handle,
+        )
+        .into_file_payload_promoting(expected_meta, false)?;
+        store
+            .put(
+                &path,
+                PutPayload::from_static(b"replacement with a different size"),
+            )
+            .await?;
+
+        assert_eq!(reader.size().await?, expected_size);
+        assert_eq!(store.head_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(store.get_opts_calls.load(Ordering::SeqCst), 0);
+        assert_ne!(store.head(&path).await?.size, expected_size);
+        assert_eq!(store.head_calls.load(Ordering::SeqCst), 1);
+
+        Ok(())
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn stream_mismatch_does_not_disable_promotion() -> anyhow::Result<()> {
+        for mutation in [ResponseMutation::Range, ResponseMutation::Metadata] {
+            let executor = Arc::new(CountingExecutor::default());
+            let runtime = Arc::clone(&executor) as Arc<dyn Executor>;
+            let handle = Handle::new(Arc::downgrade(&runtime));
+
+            let inner = InMemory::new();
+            let path = ObjectPath::from("test.bin");
+            inner.put(&path, PutPayload::from_static(TEST_DATA)).await?;
+            let expected_meta = inner.head(&path).await?;
+            let store = Arc::new(RecordingStore::new(inner).with_mutation(mutation));
+            let reader =
+                ObjectStoreReadAt::new(Arc::clone(&store) as Arc<dyn ObjectStore>, path, handle)
+                    .into_file_payload_promoting(expected_meta, false)?;
+
+            anyhow::ensure!(reader.read_at(0, 6, Alignment::new(1)).await.is_err());
+            assert!(matches!(
+                &*reader.promotion.state.lock(),
+                FilePayloadPromotionState::Eligible
+            ));
+        }
+
+        Ok(())
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn matching_stream_installs_non_file_only_after_success() -> anyhow::Result<()> {
+        let (reader, store, _executor) = promoting_stream_reader([]).await?;
+
+        assert!(matches!(
+            &*reader.promotion.state.lock(),
+            FilePayloadPromotionState::Eligible
+        ));
+        let buffer = reader.read_at(0, 6, Alignment::new(1)).await?;
+        assert_eq!(buffer.to_host().await.as_slice(), b"object");
+        assert!(matches!(
+            &*reader.promotion.state.lock(),
+            FilePayloadPromotionState::NonFile
+        ));
+        assert_eq!(store.get_opts_calls.load(Ordering::SeqCst), 1);
+
+        Ok(())
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn failed_or_short_stream_remains_eligible_and_retries() -> anyhow::Result<()> {
+        for behavior in [StreamBehavior::Error, StreamBehavior::Short] {
+            let (reader, store, _executor) = promoting_stream_reader([behavior]).await?;
+
+            assert!(reader.read_at(0, 6, Alignment::new(1)).await.is_err());
+            assert!(matches!(
+                &*reader.promotion.state.lock(),
+                FilePayloadPromotionState::Eligible
+            ));
+
+            let buffer = reader.read_at(0, 6, Alignment::new(1)).await?;
+            assert_eq!(buffer.to_host().await.as_slice(), b"object");
+            assert!(matches!(
+                &*reader.promotion.state.lock(),
+                FilePayloadPromotionState::NonFile
+            ));
+            assert_eq!(store.get_opts_calls.load(Ordering::SeqCst), 2);
+        }
+
+        Ok(())
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn cancelled_stream_remains_eligible_and_retries() -> anyhow::Result<()> {
+        let (reader, store, _executor) = promoting_stream_reader([StreamBehavior::Pending]).await?;
+
+        let task = tokio::spawn(reader.read_at(0, 6, Alignment::new(1)));
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while store.pending_stream_polls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        task.abort();
+        drop(task.await);
+
+        assert!(matches!(
+            &*reader.promotion.state.lock(),
+            FilePayloadPromotionState::Eligible
+        ));
+        let buffer = reader.read_at(0, 6, Alignment::new(1)).await?;
+        assert_eq!(buffer.to_host().await.as_slice(), b"object");
+        assert!(matches!(
+            &*reader.promotion.state.lock(),
+            FilePayloadPromotionState::NonFile
+        ));
+        assert_eq!(store.get_opts_calls.load(Ordering::SeqCst), 2);
 
         Ok(())
     }

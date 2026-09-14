@@ -222,7 +222,7 @@ impl PushFrontierSourceSharing {
             session.handle(),
             session.allocator(),
         )
-        .with_file_payload_promotion(file.object_meta.clone(), diagnostics)
+        .into_file_payload_promoting(file.object_meta.clone(), diagnostics)
         .map_err(|error| {
             exec_datafusion_err!("Failed to configure persistent local file reader: {error}")
         })?;

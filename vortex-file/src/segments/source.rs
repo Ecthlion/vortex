@@ -58,11 +58,89 @@ use crate::read::RequestId;
 
 static NEXT_SOURCE_INSTANCE: AtomicU64 = AtomicU64::new(0);
 static SCAN_DIAGNOSTICS_ENABLED: OnceLock<bool> = OnceLock::new();
+const MAX_DIAGNOSTIC_BATCH_ITEMS: usize = 64;
 
 fn scan_diagnostics_enabled() -> bool {
     *SCAN_DIAGNOSTICS_ENABLED.get_or_init(|| {
         std::env::var_os("VORTEX_SCAN_DIAGNOSTICS").is_some_and(|value| value != "0")
     })
+}
+
+#[derive(Clone)]
+struct FileSourceDiagnostics {
+    source_id: u64,
+    read_at_id: Option<u64>,
+    next_call_id: Arc<AtomicU64>,
+    file_path: Arc<str>,
+    partition: Arc<str>,
+}
+
+impl FileSourceDiagnostics {
+    fn new(read_at_id: Option<u64>, file_path: Arc<str>, partition: Arc<str>) -> Self {
+        Self {
+            source_id: NEXT_SOURCE_INSTANCE.fetch_add(1, Ordering::Relaxed),
+            read_at_id,
+            next_call_id: Arc::new(AtomicU64::new(0)),
+            file_path,
+            partition,
+        }
+    }
+}
+
+struct DiagnosticRequestMapping {
+    segment_id: SegmentId,
+    request_id: Option<RequestId>,
+    offset: Option<u64>,
+    length: Option<usize>,
+    outcome: &'static str,
+}
+
+struct DiagnosticPhysicalBatch {
+    total_ranges: usize,
+    child_offsets: Vec<u64>,
+    child_lengths: Vec<usize>,
+    logical_child_indexes: Vec<usize>,
+    logical_request_ids: Vec<RequestId>,
+    total_logical: usize,
+}
+
+impl DiagnosticPhysicalBatch {
+    fn new(requests: &[IoRequest]) -> Self {
+        let recorded = requests.len().min(MAX_DIAGNOSTIC_BATCH_ITEMS);
+        let child_offsets = requests
+            .iter()
+            .take(recorded)
+            .map(IoRequest::offset)
+            .collect::<Vec<_>>();
+        let child_lengths = requests
+            .iter()
+            .take(recorded)
+            .map(IoRequest::len)
+            .collect::<Vec<_>>();
+        let mut logical_child_indexes = Vec::new();
+        let mut logical_request_ids = Vec::new();
+        let total_logical = requests
+            .iter()
+            .map(|request| request.request_ids().len())
+            .sum::<usize>();
+        for (child_index, request) in requests.iter().take(recorded).enumerate() {
+            for request_id in request.request_ids() {
+                if logical_request_ids.len() == MAX_DIAGNOSTIC_BATCH_ITEMS {
+                    break;
+                }
+                logical_child_indexes.push(child_index);
+                logical_request_ids.push(request_id);
+            }
+        }
+        Self {
+            total_ranges: requests.len(),
+            child_offsets,
+            child_lengths,
+            logical_child_indexes,
+            logical_request_ids,
+            total_logical,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -203,6 +281,7 @@ struct ReadDriver<R> {
     batches_done: bool,
     concurrency: usize,
     metrics: RequestMetrics,
+    diagnostics: Option<FileSourceDiagnostics>,
 }
 
 impl<R: VortexReadAt> ReadDriver<R> {
@@ -211,6 +290,7 @@ impl<R: VortexReadAt> ReadDriver<R> {
         batches: BoxStream<'static, Vec<IoRequest>>,
         concurrency: usize,
         metrics: RequestMetrics,
+        diagnostics: Option<FileSourceDiagnostics>,
     ) -> Self {
         Self {
             reader: Arc::new(reader),
@@ -221,6 +301,7 @@ impl<R: VortexReadAt> ReadDriver<R> {
             batches_done: false,
             concurrency,
             metrics,
+            diagnostics,
         }
     }
 
@@ -234,60 +315,71 @@ impl<R: VortexReadAt> ReadDriver<R> {
             if batch_len > 1 {
                 self.metrics.read_ranges_multi.add(1);
             }
-            let batch_id = if let Some(in_flight_max) = &self.metrics.read_ranges_in_flight_max {
-                let batch_id = self.metrics.read_ranges_calls.value().saturating_sub(1);
+            if let Some(in_flight_max) = &self.metrics.read_ranges_in_flight_max {
                 in_flight_max.set_max(self.num_active as f64);
-                tracing::trace!(
-                    target: "vortex_file::read_ranges",
-                    num_ranges = batch_len,
-                    num_active = self.num_active,
-                    source_instance = self.metrics.source_instance.unwrap_or_default(),
-                    file_path = self.metrics.file_path.as_deref().unwrap_or(""),
-                    partition = self.metrics.partition.as_deref().unwrap_or(""),
-                    batch_id,
-                    "submitting positional read batch"
-                );
-                Some(batch_id)
-            } else {
-                tracing::trace!(
-                    target: "vortex_file::read_ranges",
-                    num_ranges = batch_len,
-                    num_active = self.num_active,
-                    "submitting positional read batch"
-                );
-                None
-            };
+            }
             for req in &reqs {
                 if let Some(request_size) = &self.metrics.read_ranges_request_size {
                     request_size.update(req.len() as f64);
-                    tracing::trace!(
-                        target: "vortex_file::physical_read",
-                        offset = req.offset(),
-                        length = req.len(),
-                        source_instance = self.metrics.source_instance.unwrap_or_default(),
-                        file_path = self.metrics.file_path.as_deref().unwrap_or(""),
-                        partition = self.metrics.partition.as_deref().unwrap_or(""),
-                        batch_id = batch_id.unwrap_or_default(),
-                        request_ids = ?req.request_ids(),
-                        "submitting physical byte range"
-                    );
-                } else {
-                    tracing::trace!(
-                        target: "vortex_file::physical_read",
-                        offset = req.offset(),
-                        length = req.len(),
-                        "submitting physical byte range"
-                    );
                 }
             }
-
-            let requests = reqs
-                .iter()
-                .map(|req| ReadAtRequest::new(req.offset(), req.len(), req.alignment()))
-                .collect::<Vec<_>>()
-                .into();
-            let results = self.reader.read_ranges(requests);
-            self.reads.push(ReadRangeResults::new(results, reqs));
+            if let Some(diagnostics) = &self.diagnostics {
+                let call_id = diagnostics.next_call_id.fetch_add(1, Ordering::Relaxed);
+                let trace = DiagnosticPhysicalBatch::new(&reqs);
+                let fill_stop = if self.num_active == self.concurrency {
+                    "slots"
+                } else {
+                    "pending"
+                };
+                let span = tracing::trace_span!(
+                    target: "vortex_file::read_ranges",
+                    "read_ranges",
+                    source_id = diagnostics.source_id,
+                    read_at_id = diagnostics.read_at_id.unwrap_or_default(),
+                    has_read_at_id = diagnostics.read_at_id.is_some(),
+                    call_id,
+                    t_submit_ns = vortex_io::diagnostic_timestamp_ns(),
+                    num_ranges = trace.total_ranges,
+                    recorded_ranges = trace.child_offsets.len(),
+                    ranges_truncated = trace.total_ranges > trace.child_offsets.len(),
+                    num_active = self.num_active,
+                    concurrency = self.concurrency,
+                    fill_stop,
+                    file_path = diagnostics.file_path.as_ref(),
+                    partition = diagnostics.partition.as_ref(),
+                    child_offsets = ?trace.child_offsets,
+                    child_lengths = ?trace.child_lengths,
+                    total_logical = trace.total_logical,
+                    recorded_logical = trace.logical_request_ids.len(),
+                    logical_child_indexes = ?trace.logical_child_indexes,
+                    logical_request_ids = ?trace.logical_request_ids,
+                    logical_mapping_truncated = trace.total_logical > MAX_DIAGNOSTIC_BATCH_ITEMS,
+                );
+                let requests = reqs
+                    .iter()
+                    .map(|req| ReadAtRequest::new(req.offset(), req.len(), req.alignment()))
+                    .collect::<Vec<_>>()
+                    .into();
+                let mut results = {
+                    let _entered = span.enter();
+                    self.reader.read_ranges(requests)
+                };
+                let poll_span = span.clone();
+                let results = futures::stream::poll_fn(move |cx| {
+                    let _entered = poll_span.enter();
+                    results.poll_next_unpin(cx)
+                })
+                .boxed();
+                self.reads.push(ReadRangeResults::new(results, reqs));
+            } else {
+                let requests = reqs
+                    .iter()
+                    .map(|req| ReadAtRequest::new(req.offset(), req.len(), req.alignment()))
+                    .collect::<Vec<_>>()
+                    .into();
+                let results = self.reader.read_ranges(requests);
+                self.reads.push(ReadRangeResults::new(results, reqs));
+            }
         }
     }
 }
@@ -349,6 +441,7 @@ pub struct FileSegmentSource {
     driver_panic: DriverPanic,
     /// The next read request ID.
     next_id: Arc<AtomicUsize>,
+    diagnostics: Option<FileSourceDiagnostics>,
 }
 
 impl FileSegmentSource {
@@ -375,6 +468,13 @@ impl FileSegmentSource {
     ) -> Self {
         let (send, recv) = mpsc::unbounded();
         let nowait_reader: Arc<dyn VortexReadAt> = Arc::new(reader.clone());
+        let diagnostics = metrics.diagnostics.as_ref().map(|labels| {
+            FileSourceDiagnostics::new(
+                reader.diagnostic_instance_id(),
+                Arc::clone(&labels.file_path),
+                Arc::clone(&labels.partition),
+            )
+        });
 
         let max_alignment = segments
             .iter()
@@ -402,7 +502,8 @@ impl FileSegmentSource {
         )
         .boxed();
 
-        let drive_fut = ReadDriver::new(reader, stream, concurrency, metrics).collect::<()>();
+        let drive_fut = ReadDriver::new(reader, stream, concurrency, metrics, diagnostics.clone())
+            .collect::<()>();
 
         // Spawn the driver so the runtime makes I/O progress independently of any reader. Readers
         // join it (below) only to surface a panic raised while driving reads.
@@ -430,6 +531,7 @@ impl FileSegmentSource {
             driver,
             driver_panic,
             next_id: Arc::new(AtomicUsize::new(0)),
+            diagnostics,
         }
     }
 
@@ -471,21 +573,119 @@ impl FileSegmentSource {
         Ok((request, future))
     }
 
+    fn trace_request_map(&self, total: usize, mappings: &[DiagnosticRequestMapping]) {
+        let Some(diagnostics) = &self.diagnostics else {
+            return;
+        };
+        debug_assert!(mappings.len() <= MAX_DIAGNOSTIC_BATCH_ITEMS);
+        let segment_ids = mappings
+            .iter()
+            .map(|mapping| mapping.segment_id)
+            .collect::<Vec<_>>();
+        let request_ids = mappings
+            .iter()
+            .map(|mapping| mapping.request_id)
+            .collect::<Vec<_>>();
+        let offsets = mappings
+            .iter()
+            .map(|mapping| mapping.offset)
+            .collect::<Vec<_>>();
+        let lengths = mappings
+            .iter()
+            .map(|mapping| mapping.length)
+            .collect::<Vec<_>>();
+        let outcomes = mappings
+            .iter()
+            .map(|mapping| mapping.outcome)
+            .collect::<Vec<_>>();
+        tracing::trace!(
+            target: "vortex_file::request_map",
+            source_id = diagnostics.source_id,
+            read_at_id = diagnostics.read_at_id.unwrap_or_default(),
+            has_read_at_id = diagnostics.read_at_id.is_some(),
+            t_map_ns = vortex_io::diagnostic_timestamp_ns(),
+            total,
+            recorded = mappings.len(),
+            truncated = total > mappings.len(),
+            file_path = diagnostics.file_path.as_ref(),
+            partition = diagnostics.partition.as_ref(),
+            segment_ids = ?segment_ids,
+            request_ids = ?request_ids,
+            offsets = ?offsets,
+            lengths = ?lengths,
+            outcomes = ?outcomes,
+            "mapping segments to logical file requests"
+        );
+    }
+
     fn request_with_priority(&self, id: SegmentId, background: bool) -> SegmentFuture {
         // We eagerly register the read request here assuming the behaviour of [`FileSegmentSource`], where
         // coalescing becomes effective prior to the future being polled.
         let (request, future) = match self.prepare_request(id) {
             Ok(request) => request,
-            Err(err) => return future::ready(Err(err)).boxed(),
+            Err(err) => {
+                if self.diagnostics.is_some() {
+                    self.trace_request_map(
+                        1,
+                        &[DiagnosticRequestMapping {
+                            segment_id: id,
+                            request_id: None,
+                            offset: None,
+                            length: None,
+                            outcome: "missing",
+                        }],
+                    );
+                }
+                return future::ready(Err(err)).boxed();
+            }
         };
         let request_id = request.id;
+        let request_offset = request.offset;
+        let request_length = request.length;
 
         if let Err(e) = self.events.unbounded_send(ReadEvent::Request(request)) {
+            if self.diagnostics.is_some() {
+                self.trace_request_map(
+                    1,
+                    &[DiagnosticRequestMapping {
+                        segment_id: id,
+                        request_id: Some(request_id),
+                        offset: Some(request_offset),
+                        length: Some(request_length),
+                        outcome: "channel_closed",
+                    }],
+                );
+            }
             return future::ready(Err(vortex_err!("Failed to submit read request: {e}"))).boxed();
         }
         if background && let Err(e) = self.events.unbounded_send(ReadEvent::Polled(request_id)) {
+            if self.diagnostics.is_some() {
+                self.trace_request_map(
+                    1,
+                    &[DiagnosticRequestMapping {
+                        segment_id: id,
+                        request_id: Some(request_id),
+                        offset: Some(request_offset),
+                        length: Some(request_length),
+                        outcome: "priority_channel_closed",
+                    }],
+                );
+            }
             return future::ready(Err(vortex_err!("Failed to submit background read: {e}")))
                 .boxed();
+        }
+
+        if self.diagnostics.is_some() {
+            self.trace_request_map(
+                1,
+                &[DiagnosticRequestMapping {
+                    segment_id: id,
+                    request_id: Some(request_id),
+                    offset: Some(request_offset),
+                    length: Some(request_length),
+                    outcome: "queued",
+                }],
+            );
         }
 
         future
@@ -506,6 +706,12 @@ fn effective_coalesce_config(
 }
 
 impl SegmentSource for FileSegmentSource {
+    fn diagnostic_instance_id(&self) -> Option<u64> {
+        self.diagnostics
+            .as_ref()
+            .map(|diagnostics| diagnostics.source_id)
+    }
+
     fn request(&self, id: SegmentId) -> SegmentFuture {
         self.request_with_priority(id, false)
     }
@@ -517,23 +723,62 @@ impl SegmentSource for FileSegmentSource {
     fn request_background_batch(&self, ids: &[SegmentId]) -> Vec<SegmentFuture> {
         let mut requests = Vec::with_capacity(ids.len());
         let mut futures = Vec::with_capacity(ids.len());
+        let mut mappings = self
+            .diagnostics
+            .as_ref()
+            .map(|_| Vec::with_capacity(ids.len().min(MAX_DIAGNOSTIC_BATCH_ITEMS)));
         for &id in ids {
             match self.prepare_request(id) {
                 Ok((request, future)) => {
+                    if let Some(mappings) = &mut mappings
+                        && mappings.len() < MAX_DIAGNOSTIC_BATCH_ITEMS
+                    {
+                        mappings.push(DiagnosticRequestMapping {
+                            segment_id: id,
+                            request_id: Some(request.id),
+                            offset: Some(request.offset),
+                            length: Some(request.length),
+                            outcome: "queued",
+                        });
+                    }
                     requests.push(request);
                     futures.push(future);
                 }
-                Err(err) => futures.push(future::ready(Err(err)).boxed()),
+                Err(err) => {
+                    if let Some(mappings) = &mut mappings
+                        && mappings.len() < MAX_DIAGNOSTIC_BATCH_ITEMS
+                    {
+                        mappings.push(DiagnosticRequestMapping {
+                            segment_id: id,
+                            request_id: None,
+                            offset: None,
+                            length: None,
+                            outcome: "missing",
+                        });
+                    }
+                    futures.push(future::ready(Err(err)).boxed());
+                }
             }
         }
 
-        if !requests.is_empty() {
+        let submitted = if !requests.is_empty() {
             // One channel event preserves the scheduler's batch boundary: the driver cannot observe
             // an eligible member until every request in the batch is in its spatial index.
-            drop(
-                self.events
-                    .unbounded_send(ReadEvent::BackgroundRequests(requests)),
-            );
+            self.events
+                .unbounded_send(ReadEvent::BackgroundRequests(requests))
+                .is_ok()
+        } else {
+            true
+        };
+        if let Some(mut mappings) = mappings {
+            if !submitted {
+                for mapping in &mut mappings {
+                    if mapping.request_id.is_some() {
+                        mapping.outcome = "channel_closed";
+                    }
+                }
+            }
+            self.trace_request_map(ids.len(), &mappings);
         }
         futures
     }
@@ -636,9 +881,13 @@ pub struct RequestMetrics {
     read_ranges_request_size: Option<Histogram>,
     /// Maximum number of ranges in flight in this source driver.
     read_ranges_in_flight_max: Option<Gauge>,
-    source_instance: Option<u64>,
-    file_path: Option<Arc<str>>,
-    partition: Option<Arc<str>>,
+    diagnostics: Option<RequestDiagnosticLabels>,
+}
+
+#[derive(Clone)]
+struct RequestDiagnosticLabels {
+    file_path: Arc<str>,
+    partition: Arc<str>,
 }
 
 impl RequestMetrics {
@@ -693,10 +942,12 @@ impl RequestMetrics {
                     .add_labels(labels)
                     .gauge("io.read_ranges.in_flight_max")
             }),
-            source_instance: diagnostics
-                .then(|| NEXT_SOURCE_INSTANCE.fetch_add(1, Ordering::Relaxed)),
-            file_path,
-            partition,
+            diagnostics: file_path.zip(partition).map(|(file_path, partition)| {
+                RequestDiagnosticLabels {
+                    file_path,
+                    partition,
+                }
+            }),
         }
     }
 }
@@ -749,6 +1000,14 @@ mod tests {
     use std::panic::AssertUnwindSafe;
 
     use futures::future::BoxFuture;
+    use parking_lot::Mutex as TestMutex;
+    use tracing::field::Field;
+    use tracing::field::Visit;
+    use tracing::span::Attributes;
+    use tracing::span::Id;
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::layer::Context;
+    use tracing_subscriber::layer::SubscriberExt;
     use vortex_error::vortex_bail;
     use vortex_io::runtime::tokio::TokioRuntime;
     use vortex_layout::segments::SegmentSource;
@@ -802,6 +1061,219 @@ mod tests {
         assert!(resolved[0].1.is_ok());
         assert_eq!(resolved[1].0.offset(), 0);
         assert!(resolved[1].1.is_err());
+    }
+
+    #[tokio::test]
+    async fn read_range_results_preserves_repeated_range_identity() {
+        let requests = vec![io_request(7, 4, 4), io_request(8, 4, 4)];
+        let returned = ReadAtRequest::new(4, 4, Alignment::none());
+        let results = futures::stream::iter([
+            (
+                returned,
+                Ok(BufferHandle::new_host(ByteBuffer::from(vec![1; 4]))),
+            ),
+            (
+                returned,
+                Ok(BufferHandle::new_host(ByteBuffer::from(vec![2; 4]))),
+            ),
+        ])
+        .boxed();
+
+        let resolved = ReadRangeResults::new(results, requests)
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(resolved[0].0.request_ids(), [7]);
+        assert_eq!(resolved[1].0.request_ids(), [8]);
+        assert!(resolved.iter().all(|(_, result)| result.is_ok()));
+    }
+
+    #[test]
+    fn diagnostic_physical_mapping_is_bounded_and_keeps_duplicate_ranges_distinct() {
+        let requests = (0..65).map(|id| io_request(id, 4, 4)).collect::<Vec<_>>();
+        let trace = DiagnosticPhysicalBatch::new(&requests);
+
+        assert_eq!(trace.total_ranges, 65);
+        assert_eq!(trace.child_offsets.len(), MAX_DIAGNOSTIC_BATCH_ITEMS);
+        assert_eq!(trace.child_lengths.len(), MAX_DIAGNOSTIC_BATCH_ITEMS);
+        assert_eq!(
+            trace.logical_child_indexes.len(),
+            MAX_DIAGNOSTIC_BATCH_ITEMS
+        );
+        assert_eq!(trace.logical_request_ids.len(), MAX_DIAGNOSTIC_BATCH_ITEMS);
+        assert_eq!(trace.logical_child_indexes[..2], [0, 1]);
+        assert_eq!(trace.logical_request_ids[..2], [0, 1]);
+        assert_eq!(trace.total_logical, 65);
+    }
+
+    #[derive(Default)]
+    struct CapturedReadRanges {
+        span_id: Option<Id>,
+        source_id: Option<u64>,
+        read_at_id: Option<u64>,
+        call_id: Option<u64>,
+        total_logical: Option<u64>,
+        recorded_logical: Option<u64>,
+        logical_child_indexes: Option<String>,
+        logical_request_ids: Option<String>,
+    }
+
+    impl Visit for CapturedReadRanges {
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            match field.name() {
+                "source_id" => self.source_id = Some(value),
+                "read_at_id" => self.read_at_id = Some(value),
+                "call_id" => self.call_id = Some(value),
+                "total_logical" => self.total_logical = Some(value),
+                "recorded_logical" => self.recorded_logical = Some(value),
+                _ => {}
+            }
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            match field.name() {
+                "logical_child_indexes" => {
+                    self.logical_child_indexes = Some(format!("{value:?}"));
+                }
+                "logical_request_ids" => {
+                    self.logical_request_ids = Some(format!("{value:?}"));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct ReadRangesCaptureLayer {
+        spans: Arc<TestMutex<Vec<CapturedReadRanges>>>,
+    }
+
+    impl<S: tracing::Subscriber> Layer<S> for ReadRangesCaptureLayer {
+        fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, _ctx: Context<'_, S>) {
+            if attrs.metadata().target() != "vortex_file::read_ranges" {
+                return;
+            }
+            let mut captured = CapturedReadRanges {
+                span_id: Some(id.clone()),
+                ..CapturedReadRanges::default()
+            };
+            attrs.record(&mut captured);
+            self.spans.lock().push(captured);
+        }
+    }
+
+    #[derive(Clone)]
+    struct SpanRecordingReadAt {
+        synchronous_spans: Arc<TestMutex<Vec<Option<Id>>>>,
+        poll_spans: Arc<TestMutex<Vec<Option<Id>>>>,
+    }
+
+    impl VortexReadAt for SpanRecordingReadAt {
+        fn diagnostic_instance_id(&self) -> Option<u64> {
+            Some(77)
+        }
+
+        fn concurrency(&self) -> usize {
+            1
+        }
+
+        fn size(&self) -> BoxFuture<'static, VortexResult<u64>> {
+            async { Ok(8) }.boxed()
+        }
+
+        fn read_at(
+            &self,
+            _offset: u64,
+            _length: usize,
+            _alignment: Alignment,
+        ) -> BoxFuture<'static, VortexResult<BufferHandle>> {
+            async { vortex_bail!("test must use read_ranges") }.boxed()
+        }
+
+        fn read_ranges(&self, requests: Arc<[ReadAtRequest]>) -> ReadAtStream {
+            self.synchronous_spans
+                .lock()
+                .push(tracing::Span::current().id());
+            let poll_spans = Arc::clone(&self.poll_spans);
+            let request_count = requests.len();
+            futures::stream::iter(0..request_count)
+                .map(move |index| {
+                    poll_spans.lock().push(tracing::Span::current().id());
+                    let request = requests[index];
+                    let buffer = BufferHandle::new_host(ByteBuffer::from(vec![0; request.length]));
+                    (request, Ok(buffer))
+                })
+                .boxed()
+        }
+    }
+
+    #[test]
+    fn repeated_ranges_have_distinct_call_spans_and_joinable_children() {
+        let captured = Arc::new(TestMutex::new(Vec::new()));
+        let synchronous_spans = Arc::new(TestMutex::new(Vec::new()));
+        let poll_spans = Arc::new(TestMutex::new(Vec::new()));
+        let reader = SpanRecordingReadAt {
+            synchronous_spans: Arc::clone(&synchronous_spans),
+            poll_spans: Arc::clone(&poll_spans),
+        };
+        let metrics = RequestMetrics::new_with_diagnostics(
+            &DefaultMetricsRegistry::default(),
+            Vec::new(),
+            true,
+        );
+        let diagnostics = FileSourceDiagnostics::new(
+            reader.diagnostic_instance_id(),
+            Arc::from("fixture"),
+            Arc::from("0"),
+        );
+        let subscriber = tracing_subscriber::registry().with(ReadRangesCaptureLayer {
+            spans: Arc::clone(&captured),
+        });
+
+        tracing::subscriber::with_default(subscriber, || {
+            futures::executor::block_on(async {
+                let mut driver = ReadDriver::new(
+                    reader,
+                    futures::stream::pending().boxed(),
+                    1,
+                    metrics,
+                    Some(diagnostics),
+                );
+                for request_id in [17, 18] {
+                    driver.pending.push_back(io_request(request_id, 4, 4));
+                    driver.submit_pending();
+                    let (_request, result) = driver
+                        .reads
+                        .next()
+                        .await
+                        .vortex_expect("one physical result must arrive");
+                    result.vortex_expect("fixture read must succeed");
+                    driver.num_active -= 1;
+                }
+            });
+        });
+
+        let captured = captured.lock();
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0].source_id, captured[1].source_id);
+        assert_eq!(captured[0].read_at_id, Some(77));
+        assert_eq!(
+            [captured[0].call_id, captured[1].call_id],
+            [Some(0), Some(1)]
+        );
+        assert_eq!(captured[0].total_logical, Some(1));
+        assert_eq!(captured[0].recorded_logical, Some(1));
+        assert_eq!(captured[0].logical_child_indexes.as_deref(), Some("[0]"));
+        assert_eq!(captured[1].logical_child_indexes.as_deref(), Some("[0]"));
+        assert_eq!(captured[0].logical_request_ids.as_deref(), Some("[17]"));
+        assert_eq!(captured[1].logical_request_ids.as_deref(), Some("[18]"));
+
+        let span_ids = captured
+            .iter()
+            .map(|span| span.span_id.clone())
+            .collect::<Vec<_>>();
+        assert_ne!(span_ids[0], span_ids[1]);
+        assert_eq!(*synchronous_spans.lock(), span_ids);
+        assert_eq!(*poll_spans.lock(), span_ids);
     }
 
     #[derive(Clone)]
@@ -928,9 +1400,14 @@ mod tests {
     #[derive(Clone)]
     struct ReadRangesOnly {
         calls: Arc<AtomicUsize>,
+        diagnostic_id: Option<u64>,
     }
 
     impl VortexReadAt for ReadRangesOnly {
+        fn diagnostic_instance_id(&self) -> Option<u64> {
+            self.diagnostic_id
+        }
+
         fn concurrency(&self) -> usize {
             4
         }
@@ -980,9 +1457,18 @@ mod tests {
             segments,
             ReadRangesOnly {
                 calls: Arc::clone(&calls),
+                diagnostic_id: Some(77),
             },
             TokioRuntime::current(),
             request_metrics.clone(),
+        );
+        assert!(source.diagnostic_instance_id().is_some());
+        assert_eq!(
+            source
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.read_at_id),
+            Some(77)
         );
 
         let results = future::join_all((0..4).map(|i| source.request(SegmentId::from(i)))).await;

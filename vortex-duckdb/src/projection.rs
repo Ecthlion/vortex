@@ -184,7 +184,12 @@ pub struct Filter {
     pub filter: Option<BoundExpression>,
     pub row_selection: Selection,
     pub row_range: Option<Range<u64>>,
+    /// Whether a non-virtual top-level DuckDB table filter is not wrapped in `OptionalFilter`.
     pub has_non_optional_filter: bool,
+    pub non_optional_table_filter_count: usize,
+    pub optional_table_filter_count: usize,
+    pub converted_table_filter_count: usize,
+    pub additional_filter_count: usize,
 }
 
 fn push_filter_expr(filter_exprs: &mut Vec<Expression>, expr: &Expression) {
@@ -203,7 +208,9 @@ impl Filter {
         additional_filters: &[Expression],
         dtype: &DType,
     ) -> VortexResult<Self> {
-        let mut has_non_optional_filter = false;
+        let mut non_optional_table_filter_count = 0usize;
+        let mut optional_table_filter_count = 0usize;
+        let mut converted_table_filter_count = 0usize;
 
         let mut table_filter_exprs = Vec::new();
         if let Some(filter) = table_filter_set {
@@ -211,12 +218,17 @@ impl Filter {
                 let idx_u: usize = idx.as_();
                 !is_virtual_column(column_ids[idx_u])
             }) {
-                has_non_optional_filter |= !matches!(ex.as_class(), TableFilterClass::Optional(_));
+                if matches!(ex.as_class(), TableFilterClass::Optional(_)) {
+                    optional_table_filter_count += 1;
+                } else {
+                    non_optional_table_filter_count += 1;
+                }
 
                 let idx_u: usize = idx.as_();
                 let col_idx: usize = column_ids[idx_u].as_();
                 let name = &column_fields.get(col_idx).vortex_expect("exists").name;
                 if let Some(expr) = try_from_table_filter(ex, &col(name.as_str()), dtype)? {
+                    converted_table_filter_count += 1;
                     push_filter_expr(&mut table_filter_exprs, &expr);
                 }
             }
@@ -245,7 +257,11 @@ impl Filter {
             filter,
             row_selection,
             row_range,
-            has_non_optional_filter,
+            has_non_optional_filter: non_optional_table_filter_count != 0,
+            non_optional_table_filter_count,
+            optional_table_filter_count,
+            converted_table_filter_count,
+            additional_filter_count: additional_filters.len(),
         };
         Ok(out)
     }
@@ -341,5 +357,24 @@ mod tests {
         push_filter_expr(&mut filter_exprs, &first);
 
         assert_eq!(filter_exprs, vec![first, second]);
+    }
+
+    #[test]
+    fn additional_complex_filter_is_counted_without_changing_table_filter_classification()
+    -> VortexResult<()> {
+        let empty = Filter::new(None, &[], &[], &[], &DType::Null)?;
+        assert!(empty.filter.is_none());
+        assert!(!empty.has_non_optional_filter);
+        assert_eq!(empty.additional_filter_count, 0);
+
+        let filter = Filter::new(None, &[], &[], &[lit(true)], &DType::Null)?;
+
+        assert!(filter.filter.is_some());
+        assert!(!filter.has_non_optional_filter);
+        assert_eq!(filter.non_optional_table_filter_count, 0);
+        assert_eq!(filter.optional_table_filter_count, 0);
+        assert_eq!(filter.converted_table_filter_count, 0);
+        assert_eq!(filter.additional_filter_count, 1);
+        Ok(())
     }
 }

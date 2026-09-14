@@ -142,6 +142,7 @@ pub struct GlobalState {
     pub projection: BoundExpression,
     pub filter: Filter,
     pub file_row_number_column_pos: Option<usize>,
+    pub execution_threads: usize,
 
     // Following fields are used only in aggregate scans.
     pub aggregate_state: Mutex<AggregateState>,
@@ -245,6 +246,7 @@ pub fn finish_reading(global: &GlobalState, local: &mut LocalState) {
 
 pub fn init_global(init_input: &TableInitInput) -> VortexResult<GlobalState> {
     let bind_data = init_input.bind_data();
+    let execution_threads = init_input.execution_threads()?;
 
     build_partials(&bind_data.aggregates, &bind_data.columns, &bind_data.dtype)?;
     let has_count_star = bind_data
@@ -302,6 +304,7 @@ pub fn init_global(init_input: &TableInitInput) -> VortexResult<GlobalState> {
         aggregate_state: Mutex::new(AggregateState::default()),
         row_count: AtomicU64::new(0),
         file_row_number_column_pos,
+        execution_threads,
     })
 }
 

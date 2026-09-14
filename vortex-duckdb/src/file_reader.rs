@@ -15,6 +15,7 @@ use vortex::cloud::Registry;
 use vortex::dtype::DType;
 use vortex::error::VortexExpect;
 use vortex::error::VortexResult;
+use vortex::error::vortex_err;
 use vortex::error::vortex_panic;
 use vortex::expr::BoundExpression;
 use vortex::expr::Expression;
@@ -110,11 +111,98 @@ fn drive_runtime_once() -> bool {
     ran
 }
 
+const Q6_FRONTIER_BUNDLE_ENV: &str = "VORTEX_DUCKDB_Q6_FRONTIER_BUNDLE";
+const FRONTIER_BUNDLE_MIN_WAVES_ENV: &str = "VORTEX_DUCKDB_FRONTIER_BUNDLE_MIN_WAVES";
+const Q6_FRONTIER_BUNDLE_SIZE: &str = "2";
+const DEFAULT_FRONTIER_BUNDLE_MIN_WAVES: usize = 8;
+
+static SCAN_DIAGNOSTICS_ENABLED: LazyLock<bool> =
+    LazyLock::new(|| std::env::var_os("VORTEX_SCAN_DIAGNOSTICS").is_some_and(|value| value != "0"));
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FrontierBundleConfig {
+    min_waves: usize,
+}
+
+fn frontier_bundle_config(
+    enabled: bool,
+    min_waves_value: Option<&str>,
+) -> VortexResult<Option<FrontierBundleConfig>> {
+    if !enabled {
+        return Ok(None);
+    }
+    let min_waves = match min_waves_value {
+        None => DEFAULT_FRONTIER_BUNDLE_MIN_WAVES,
+        Some(value) => value.parse::<usize>().map_err(|err| {
+            vortex_err!("{FRONTIER_BUNDLE_MIN_WAVES_ENV} must be a positive integer: {err}")
+        })?,
+    };
+    if min_waves == 0 {
+        return Err(vortex_err!(
+            "{FRONTIER_BUNDLE_MIN_WAVES_ENV} must be a positive integer"
+        ));
+    }
+    Ok(Some(FrontierBundleConfig { min_waves }))
+}
+
+fn frontier_bundle_parallelism_for_execution(
+    config: Option<FrontierBundleConfig>,
+    execution_threads: usize,
+) -> Option<usize> {
+    config.map(|_| execution_threads)
+}
+
+fn q6_frontier_bundle_enabled(backend: ScanBackend, opt_in: Option<&str>) -> VortexResult<bool> {
+    if backend != ScanBackend::PushFrontier {
+        return Ok(false);
+    }
+    let Some(bundle_size) = opt_in else {
+        return Ok(false);
+    };
+    if bundle_size != Q6_FRONTIER_BUNDLE_SIZE {
+        return Err(vortex_err!(
+            "{Q6_FRONTIER_BUNDLE_ENV} must be {Q6_FRONTIER_BUNDLE_SIZE}"
+        ));
+    }
+    Ok(true)
+}
+
+fn q6_frontier_bundle_config_from_env(
+    backend: ScanBackend,
+) -> VortexResult<Option<FrontierBundleConfig>> {
+    if backend != ScanBackend::PushFrontier {
+        return Ok(None);
+    }
+    let opt_in = std::env::var(Q6_FRONTIER_BUNDLE_ENV);
+    let opt_in = match opt_in {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(err) => return Err(vortex_err!("{Q6_FRONTIER_BUNDLE_ENV} is invalid: {err}")),
+    };
+    let enabled = q6_frontier_bundle_enabled(backend, opt_in.as_deref())?;
+    if !enabled {
+        // The benchmark override is deliberately irrelevant unless the B2 experiment itself is
+        // enabled, including for V1 and legacy Push.
+        return Ok(None);
+    }
+    let min_waves_value = match std::env::var(FRONTIER_BUNDLE_MIN_WAVES_ENV) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(err) => {
+            return Err(vortex_err!(
+                "{FRONTIER_BUNDLE_MIN_WAVES_ENV} is invalid: {err}"
+            ));
+        }
+    };
+    frontier_bundle_config(true, min_waves_value.as_deref())
+}
+
 pub struct OpenFileReader {
     file: VortexFile,
     reader: Option<LayoutReaderRef>,
     backend: ScanBackend,
     morsel_options: ScanExecutorOptions,
+    frontier_bundle_config: Option<FrontierBundleConfig>,
     /// File splits stored in inverse order
     pub splits: Vec<Split>,
     pub cache: ConversionCache,
@@ -124,6 +212,8 @@ pub struct OpenFileReader {
 impl OpenFileReader {
     async fn open(file_path: String) -> VortexResult<Self> {
         let backend = scan_backend_from_env()?;
+        let host_parallelism = get_available_parallelism().unwrap_or(1);
+        let frontier_bundle_config = q6_frontier_bundle_config_from_env(backend)?;
         let url = parse_uri_or_path(&file_path)?;
         let (fs, path) = resolve_filesystem(&url)?;
         let file = fs.open_read(&path).await?;
@@ -131,13 +221,15 @@ impl OpenFileReader {
         let reader = (backend == ScanBackend::V1)
             .then(|| file.layout_reader())
             .transpose()?;
+        let morsel_options = ScanExecutorOptions::default()
+            .with_threads(host_parallelism)
+            .with_external_threads(drive_runtime_once);
         Ok(OpenFileReader {
             file,
             reader,
             backend,
-            morsel_options: ScanExecutorOptions::default()
-                .with_threads(get_available_parallelism().unwrap_or(1))
-                .with_external_threads(drive_runtime_once),
+            morsel_options,
+            frontier_bundle_config,
             cache: ConversionCache::default(),
             splits: vec![],
             total_splits: 0,
@@ -233,12 +325,47 @@ pub fn reader_initialize(file: &mut OpenFileReader, global: &GlobalState) -> Vor
             builder.build()?
         }
         ScanBackend::Push | ScanBackend::PushFrontier => {
+            let configured_parallelism = frontier_bundle_parallelism_for_execution(
+                file.frontier_bundle_config,
+                global.execution_threads,
+            );
+            if *SCAN_DIAGNOSTICS_ENABLED {
+                tracing::trace!(
+                    target: "vortex_duckdb::frontier_bundle",
+                    backend = ?file.backend,
+                    configured = file.frontier_bundle_config.is_some(),
+                    configured_parallelism = configured_parallelism.unwrap_or_default(),
+                    min_bundle_waves = file
+                        .frontier_bundle_config
+                        .map_or(0, |config| config.min_waves),
+                    has_filter = filter.filter.is_some(),
+                    has_non_optional_table_filter = filter.has_non_optional_filter,
+                    non_optional_table_filter_count = filter.non_optional_table_filter_count,
+                    optional_table_filter_count = filter.optional_table_filter_count,
+                    converted_table_filter_count = filter.converted_table_filter_count,
+                    additional_filter_count = filter.additional_filter_count,
+                    "configuring DuckDB external frontier bundle policy"
+                );
+            }
+            let mut morsel_options = file.morsel_options.clone();
+            if let Some(config) = file.frontier_bundle_config {
+                // DuckDB does not currently propagate SQL LIMIT into MorselScanBuilder. This
+                // opt-in is therefore an intentionally controlled no-LIMIT Q6 experiment, not a
+                // generally safe production scheduling policy.
+                morsel_options = morsel_options
+                    .with_external_frontier_bundle_parallelism(
+                        configured_parallelism.vortex_expect(
+                            "configured frontier bundle is missing execution parallelism",
+                        ),
+                    )
+                    .with_external_frontier_bundle_min_waves(config.min_waves);
+            }
             let mut builder = MorselScanBuilder::new(
                 SESSION.clone(),
                 file.backend,
                 Arc::clone(file.file.footer().layout()),
                 file.file.segment_source(),
-                &file.morsel_options,
+                &morsel_options,
             )?
             .with_projection(global.projection.clone())
             .with_ordered(ordered)
@@ -361,4 +488,76 @@ pub fn reader_get_progress_in_file(file: &OpenFileReader) -> f64 {
     let left = file.splits.len();
     let denom = total + (total == 0) as usize;
     100.0 * (total - left) as f64 / denom as f64
+}
+
+#[cfg(test)]
+mod tests {
+    use vortex::error::VortexResult;
+    use vortex_morsel_scan::ScanBackend;
+
+    use super::DEFAULT_FRONTIER_BUNDLE_MIN_WAVES;
+    use super::FrontierBundleConfig;
+    use super::frontier_bundle_config;
+    use super::frontier_bundle_parallelism_for_execution;
+    use super::q6_frontier_bundle_enabled;
+
+    #[test]
+    fn q6_frontier_bundle_controls_default_off_and_preserve_push() -> VortexResult<()> {
+        assert!(!q6_frontier_bundle_enabled(
+            ScanBackend::PushFrontier,
+            None
+        )?);
+        assert!(!q6_frontier_bundle_enabled(ScanBackend::Push, Some("2"))?);
+        Ok(())
+    }
+
+    #[test]
+    fn q6_frontier_bundle_requires_only_the_fixed_size() -> VortexResult<()> {
+        assert!(q6_frontier_bundle_enabled(
+            ScanBackend::PushFrontier,
+            Some("2")
+        )?);
+        assert!(q6_frontier_bundle_enabled(ScanBackend::PushFrontier, Some("3")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn frontier_bundle_min_waves_is_strict_and_defaults_to_eight() -> VortexResult<()> {
+        assert_eq!(frontier_bundle_config(false, Some("invalid"))?, None);
+        assert!(frontier_bundle_config(true, Some("invalid")).is_err());
+        assert!(frontier_bundle_config(true, Some("0")).is_err());
+        assert_eq!(
+            frontier_bundle_config(true, None)?,
+            Some(FrontierBundleConfig {
+                min_waves: DEFAULT_FRONTIER_BUNDLE_MIN_WAVES,
+            })
+        );
+        assert_eq!(
+            frontier_bundle_config(true, Some("1"))?,
+            Some(FrontierBundleConfig { min_waves: 1 })
+        );
+        assert_eq!(
+            frontier_bundle_config(true, Some("8"))?,
+            Some(FrontierBundleConfig { min_waves: 8 })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn file_initialization_uses_each_execution_thread_snapshot() {
+        let config = Some(FrontierBundleConfig { min_waves: 8 });
+        assert_eq!(
+            frontier_bundle_parallelism_for_execution(config, 1),
+            Some(1)
+        );
+        assert_eq!(
+            frontier_bundle_parallelism_for_execution(config, 14),
+            Some(14)
+        );
+        assert_eq!(
+            frontier_bundle_parallelism_for_execution(config, 2),
+            Some(2)
+        );
+        assert_eq!(frontier_bundle_parallelism_for_execution(None, 14), None);
+    }
 }

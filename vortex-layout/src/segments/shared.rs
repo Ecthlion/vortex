@@ -78,6 +78,10 @@ impl<S: SegmentSource> SharedSegmentSource<S> {
 }
 
 impl<S: SegmentSource> SegmentSource for SharedSegmentSource<S> {
+    fn diagnostic_instance_id(&self) -> Option<u64> {
+        self.inner.diagnostic_instance_id()
+    }
+
     fn request(&self, id: SegmentId) -> SegmentFuture {
         let _guard = self.request_lock.lock();
         self.request_with(id, |source, id| source.request(id))
@@ -258,6 +262,10 @@ mod tests {
     }
 
     impl SegmentSource for CountingSegmentSource {
+        fn diagnostic_instance_id(&self) -> Option<u64> {
+            Some(51)
+        }
+
         fn request(&self, id: SegmentId) -> SegmentFuture {
             self.request_count.fetch_add(1, Ordering::SeqCst);
             self.segments.request(id)
@@ -268,6 +276,12 @@ mod tests {
             self.request_count.fetch_add(ids.len(), Ordering::SeqCst);
             ids.iter().map(|id| self.segments.request(*id)).collect()
         }
+    }
+
+    #[test]
+    fn shared_source_forwards_diagnostic_identity() {
+        let source = SharedSegmentSource::new(CountingSegmentSource::default());
+        assert_eq!(source.diagnostic_instance_id(), Some(51));
     }
 
     #[derive(Clone)]

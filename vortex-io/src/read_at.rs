@@ -93,6 +93,14 @@ impl CoalesceConfig {
 /// This trait provides async positional reads to underlying storage and is used by the vortex-file
 /// crate to read data from files or object stores.
 pub trait VortexReadAt: Send + Sync + 'static {
+    /// Stable identity for correlating diagnostics emitted by wrappers around this reader.
+    ///
+    /// Implementations must not allocate an identity solely because this method is called. Readers
+    /// that do not participate in scan diagnostics retain the default anonymous identity.
+    fn diagnostic_instance_id(&self) -> Option<u64> {
+        None
+    }
+
     /// URI for debugging/logging. Returns `None` for anonymous sources.
     fn uri(&self) -> Option<&Arc<str>> {
         None
@@ -163,6 +171,10 @@ pub trait VortexReadAt: Send + Sync + 'static {
 }
 
 impl VortexReadAt for Arc<dyn VortexReadAt> {
+    fn diagnostic_instance_id(&self) -> Option<u64> {
+        self.as_ref().diagnostic_instance_id()
+    }
+
     fn uri(&self) -> Option<&Arc<str>> {
         self.as_ref().uri()
     }
@@ -203,6 +215,10 @@ impl VortexReadAt for Arc<dyn VortexReadAt> {
 }
 
 impl<R: VortexReadAt> VortexReadAt for Arc<R> {
+    fn diagnostic_instance_id(&self) -> Option<u64> {
+        self.as_ref().diagnostic_instance_id()
+    }
+
     fn uri(&self) -> Option<&Arc<str>> {
         self.as_ref().uri()
     }
@@ -398,6 +414,10 @@ impl Drop for InnerMetrics {
 }
 
 impl<T: VortexReadAt + Clone> VortexReadAt for InstrumentedReadAt<T> {
+    fn diagnostic_instance_id(&self) -> Option<u64> {
+        self.read.diagnostic_instance_id()
+    }
+
     fn uri(&self) -> Option<&Arc<str>> {
         self.read.uri()
     }
@@ -474,12 +494,18 @@ mod tests {
 
     use vortex_buffer::Alignment;
     use vortex_buffer::ByteBuffer;
+    use vortex_metrics::DefaultMetricsRegistry;
 
     use super::*;
 
+    #[derive(Clone)]
     struct DelayedReadAt;
 
     impl VortexReadAt for DelayedReadAt {
+        fn diagnostic_instance_id(&self) -> Option<u64> {
+            Some(37)
+        }
+
         fn concurrency(&self) -> usize {
             2
         }
@@ -504,6 +530,18 @@ mod tests {
             }
             .boxed()
         }
+    }
+
+    #[test]
+    fn diagnostic_instance_id_is_forwarded_by_read_wrappers() {
+        let concrete = Arc::new(DelayedReadAt);
+        assert_eq!(concrete.diagnostic_instance_id(), Some(37));
+        let dynamic: Arc<dyn VortexReadAt> = concrete;
+        assert_eq!(dynamic.diagnostic_instance_id(), Some(37));
+
+        let registry = DefaultMetricsRegistry::default();
+        let instrumented = InstrumentedReadAt::new(DelayedReadAt, &registry);
+        assert_eq!(instrumented.diagnostic_instance_id(), Some(37));
     }
 
     #[test]

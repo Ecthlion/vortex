@@ -12,8 +12,10 @@
 // only makes the generators harder to read.
 #![allow(clippy::cast_possible_truncation)]
 
+use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
@@ -26,6 +28,14 @@ use futures::future::poll_fn;
 use futures::future::try_join_all;
 use parking_lot::Mutex;
 use rstest::rstest;
+use tracing::Event;
+use tracing::Subscriber;
+use tracing::field::Field;
+use tracing::field::Visit;
+use tracing_subscriber::Layer;
+use tracing_subscriber::filter::Targets;
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::prelude::*;
 use vortex_array::ArrayRef;
 use vortex_array::IntoArray;
 use vortex_array::VortexSessionExecute;
@@ -54,6 +64,8 @@ use vortex_buffer::Buffer;
 use vortex_buffer::ByteBuffer;
 use vortex_error::VortexResult;
 use vortex_error::vortex_err;
+use vortex_io::runtime::BlockingRuntime as _;
+use vortex_io::runtime::current::CurrentThreadRuntime;
 use vortex_io::runtime::single::block_on;
 use vortex_io::session::RuntimeSession;
 use vortex_io::session::RuntimeSessionExt;
@@ -87,6 +99,7 @@ use crate::harness::Query;
 use crate::harness::RunOutcome;
 use crate::harness::assert_same_rows;
 use crate::harness::run_morsel;
+use crate::harness::run_morsel_with_predicate_frontiers;
 use crate::harness::run_v1;
 use crate::nodes::ConjunctMode;
 
@@ -94,6 +107,46 @@ fn session() -> VortexSession {
     array_session()
         .with::<LayoutSession>()
         .with::<RuntimeSession>()
+}
+
+#[derive(Default)]
+struct CapturedScanEvent {
+    target: &'static str,
+    fields: BTreeMap<&'static str, String>,
+}
+
+impl Visit for CapturedScanEvent {
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.fields.insert(field.name(), value.to_string());
+    }
+
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.fields.insert(field.name(), value.to_string());
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.fields.insert(field.name(), value.to_owned());
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.fields.insert(field.name(), format!("{value:?}"));
+    }
+}
+
+#[derive(Clone)]
+struct ScanEventCapture {
+    events: Arc<Mutex<Vec<CapturedScanEvent>>>,
+}
+
+impl<S: Subscriber> Layer<S> for ScanEventCapture {
+    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        let mut captured = CapturedScanEvent {
+            target: event.metadata().target(),
+            ..CapturedScanEvent::default()
+        };
+        event.record(&mut captured);
+        self.events.lock().push(captured);
+    }
 }
 
 fn i32_chunks(values: &[i32], boundaries: &[usize]) -> Vec<ArrayRef> {
@@ -297,6 +350,94 @@ fn flat_chunks_share_one_source_and_pipeline(#[case] chunks: usize) -> VortexRes
     Ok(())
 }
 
+#[test]
+fn projection_need_trace_comes_from_real_gate_for_predicate_first_ready_key() -> VortexResult<()> {
+    let session = session();
+    let fixture = aligned_fixture(&session, 16)?;
+    let projection = get_item("a", root());
+    let filter = gt(get_item("a", root()), lit(-1i32));
+    let plan = Arc::new(crate::build_plan(
+        &fixture.layout,
+        &projection,
+        Some(&filter),
+        ConjunctMode::Cascade,
+    )?);
+
+    let mut predicate_keys = Vec::new();
+    let mut projection_keys = Vec::new();
+    for (_, key, _, role) in plan.source_io_uses() {
+        match role {
+            crate::SourceRole::Predicate { .. } => predicate_keys.push(key),
+            crate::SourceRole::Projection => projection_keys.push(key),
+        }
+    }
+    assert!(
+        predicate_keys
+            .iter()
+            .any(|key| projection_keys.contains(key)),
+        "fixture must exercise a segment registered by predicate before projection"
+    );
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let targets = Targets::new()
+        .with_target("vortex_morsel_push::io_start", tracing::Level::TRACE)
+        .with_target("vortex_morsel_push::projection_need", tracing::Level::TRACE);
+    let subscriber = tracing_subscriber::registry().with(
+        ScanEventCapture {
+            events: Arc::clone(&events),
+        }
+        .with_filter(targets),
+    );
+    let segments: Arc<dyn SegmentSource> = Arc::new(RecordingSegmentSource {
+        inner: Arc::clone(&fixture.segments),
+        requests: Arc::new(Mutex::new(Vec::new())),
+    });
+    let morsels = std::iter::once(0..16).collect();
+    let scan = crate::MorselScan::new_with_diagnostics(plan, session, morsels)
+        .with_frontier_lookahead_per_thread(0)
+        .with_speculative_frontiers(1);
+    let (batches, stats) = tracing::subscriber::with_default(subscriber, || {
+        SegmentSourceDriver::new(segments)
+            .connect_on_thread(scan)?
+            .run_on_current_thread()
+    })?;
+    assert_eq!(batches.iter().map(|batch| batch.len()).sum::<usize>(), 16);
+    assert_eq!(stats.morsels, 1);
+
+    let events = events.lock();
+    let starts = events
+        .iter()
+        .filter(|event| event.target == "vortex_morsel_push::io_start")
+        .collect::<Vec<_>>();
+    let needs = events
+        .iter()
+        .filter(|event| event.target == "vortex_morsel_push::projection_need")
+        .collect::<Vec<_>>();
+    assert!(!starts.is_empty());
+    assert_eq!(
+        needs.len(),
+        1,
+        "one live cell emits first projection need once"
+    );
+    for field in [
+        "scan_id",
+        "t_start_ns",
+        "total",
+        "recorded",
+        "truncated",
+        "segment_ids",
+        "roles",
+        "priorities",
+    ] {
+        assert!(starts[0].fields.contains_key(field), "missing {field}");
+    }
+    for field in ["scan_id", "t_need_ns", "segment_id", "priority"] {
+        assert!(needs[0].fields.contains_key(field), "missing {field}");
+    }
+    assert_eq!(starts[0].fields["scan_id"], needs[0].fields["scan_id"]);
+    Ok(())
+}
+
 #[rstest]
 #[case::projection(false)]
 #[case::filtered(true)]
@@ -438,6 +579,345 @@ fn q6_ranges_build_three_predicate_sources_and_match_v1() -> VortexResult<()> {
 }
 
 #[test]
+fn predicate_only_frontier_submits_three_q6_conjuncts_before_projection() -> VortexResult<()> {
+    let session = session();
+    let values = (0..64).collect::<Vec<i32>>();
+    let fixture = block_on(|_handle| async {
+        write_fixture(
+            vec![
+                Column::new("p0", i32_chunks(&values, &[64])),
+                Column::new("p1", i32_chunks(&values, &[64])),
+                Column::new("p2", i32_chunks(&values, &[64])),
+                Column::new("out", i32_chunks(&values, &[64])),
+            ],
+            &session,
+        )
+        .await
+    })?;
+    let filter = and(
+        gt(get_item("p0", root()), lit(-1i32)),
+        and(
+            gt(get_item("p1", root()), lit(-1i32)),
+            gt(get_item("p2", root()), lit(-1i32)),
+        ),
+    );
+    let query = Query {
+        name: "q6-predicate-frontier",
+        projection: select(vec!["out"], root()),
+        filter: Some(filter.clone()),
+    };
+    let plan = crate::build_plan(
+        &fixture.layout,
+        &query.projection,
+        Some(&filter),
+        ConjunctMode::Cascade,
+    )?;
+    let mut cursor = plan.execution_frontier(0..64);
+    let mut expected_groups = Vec::new();
+    loop {
+        let batch = cursor.next_io(u32::MAX)?;
+        assert!(batch.is_complete());
+        let kind = batch.kind();
+        let ids = batch
+            .io()
+            .iter()
+            .map(|key| match key {
+                crate::IoKey::Segment(id) => *id,
+            })
+            .collect::<Vec<_>>();
+        expected_groups.push((kind, ids));
+        if !cursor.right()? {
+            break;
+        }
+    }
+    assert_eq!(
+        expected_groups
+            .iter()
+            .map(|(kind, _)| *kind)
+            .collect::<Vec<_>>(),
+        [
+            crate::IoGroupKind::Conjunct,
+            crate::IoGroupKind::Conjunct,
+            crate::IoGroupKind::Conjunct,
+            crate::IoGroupKind::Projection,
+        ]
+    );
+
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let predicate_gate = Arc::new(PredicateRegistrationGate::default());
+    let (cancel_timeout, timeout_cancelled) = mpsc::channel();
+    let timeout_gate = Arc::clone(&predicate_gate);
+    let timeout = std::thread::spawn(move || {
+        if timeout_cancelled
+            .recv_timeout(Duration::from_secs(10))
+            .is_ok()
+        {
+            return;
+        }
+        let wake = {
+            let mut first_waker = timeout_gate.first_waker.lock();
+            timeout_gate.timed_out.store(true, Ordering::Release);
+            first_waker.take()
+        };
+        if let Some(waker) = wake {
+            waker.wake();
+        }
+    });
+    let source: Arc<dyn SegmentSource> = Arc::new(BackgroundBatchRecordingSource {
+        inner: Arc::clone(&fixture.segments),
+        batches: Arc::clone(&recorded),
+        predicate_gate: Arc::clone(&predicate_gate),
+    });
+    let oracle = run_v1(&session, &fixture.layout, &fixture.segments, &query)?;
+    let actual = run_morsel_with_predicate_frontiers(
+        &session,
+        &fixture.layout,
+        &source,
+        &query,
+        MorselConfig {
+            morsel_rows: 128,
+            frontier_lookahead_per_thread: Some(0),
+            ..Default::default()
+        },
+        2,
+    );
+    let _ = cancel_timeout.send(());
+    timeout
+        .join()
+        .map_err(|_| vortex_err!("predicate registration timeout thread panicked"))?;
+    let actual = actual?;
+    assert_same_rows(
+        &session,
+        &v1_dtype(&fixture.layout, &query)?,
+        &oracle,
+        &actual,
+    )?;
+
+    let recorded = recorded.lock();
+    assert!(
+        predicate_gate
+            .first_polled_after_three
+            .load(Ordering::Acquire),
+        "the leading predicate became readable before all predicate groups registered"
+    );
+    assert_eq!(recorded.len(), 4);
+    assert_eq!(
+        &recorded[..3],
+        &expected_groups[..3]
+            .iter()
+            .map(|(_, ids)| ids.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(recorded[3], expected_groups[3].1);
+    Ok(())
+}
+
+#[test]
+fn opted_in_external_frontier_pairs_adjacent_q6_predicates_before_projection() -> VortexResult<()> {
+    let session = session();
+    let values = (0..64).collect::<Vec<i32>>();
+    let fixture = block_on(|_handle| async {
+        write_fixture(
+            vec![
+                Column::new("p0", i32_chunks(&values, &[32, 64])),
+                Column::new("p1", i32_chunks(&values, &[32, 64])),
+                Column::new("p2", i32_chunks(&values, &[32, 64])),
+                Column::new("out", i32_chunks(&values, &[32, 64])),
+            ],
+            &session,
+        )
+        .await
+    })?;
+    let filter = and(
+        gt(get_item("p0", root()), lit(-1i32)),
+        and(
+            gt(get_item("p1", root()), lit(-1i32)),
+            gt(get_item("p2", root()), lit(-1i32)),
+        ),
+    );
+    let projection = select(vec!["out"], root());
+    let plan = crate::build_plan(
+        &fixture.layout,
+        &projection,
+        Some(&filter),
+        ConjunctMode::Cascade,
+    )?;
+    let mut expected = Vec::<Vec<SegmentId>>::new();
+    let mut projection_ids = Vec::new();
+    for range in [0..32, 32..64] {
+        let mut frontier = plan.execution_frontier(range);
+        let mut group = 0usize;
+        loop {
+            let batch = frontier.next_io(u32::MAX)?;
+            assert!(batch.is_complete());
+            let ids = batch
+                .io()
+                .iter()
+                .map(|key| {
+                    let crate::IoKey::Segment(id) = *key;
+                    id
+                })
+                .collect::<Vec<_>>();
+            match batch.kind() {
+                crate::IoGroupKind::Conjunct => {
+                    if expected.len() == group {
+                        expected.push(Vec::new());
+                    }
+                    expected[group].extend(ids);
+                }
+                crate::IoGroupKind::Projection => projection_ids.extend(ids),
+                crate::IoGroupKind::Pruning => {
+                    return Err(vortex_err!(
+                        "execution frontier unexpectedly contains pruning"
+                    ));
+                }
+            }
+            if !frontier.right()? {
+                break;
+            }
+            group += 1;
+        }
+    }
+    assert_eq!(expected.len(), 3);
+    for ids in &mut expected {
+        ids.sort_unstable();
+        ids.dedup();
+    }
+
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let predicate_gate = Arc::new(PredicateRegistrationGate::default());
+    let (cancel_timeout, timeout_cancelled) = mpsc::channel();
+    let timeout_gate = Arc::clone(&predicate_gate);
+    let timeout = std::thread::spawn(move || {
+        if timeout_cancelled
+            .recv_timeout(Duration::from_secs(10))
+            .is_ok()
+        {
+            return;
+        }
+        let wake = {
+            let mut first_waker = timeout_gate.first_waker.lock();
+            timeout_gate.timed_out.store(true, Ordering::Release);
+            first_waker.take()
+        };
+        if let Some(waker) = wake {
+            waker.wake();
+        }
+    });
+    let source: Arc<dyn SegmentSource> = Arc::new(BackgroundBatchRecordingSource {
+        inner: Arc::clone(&fixture.segments),
+        batches: Arc::clone(&recorded),
+        predicate_gate: Arc::clone(&predicate_gate),
+    });
+    let runtime = CurrentThreadRuntime::new();
+    let tick_runtime = runtime.clone();
+    let executor = PushMorselScanExecutor::new(Arc::clone(&fixture.layout), source)
+        .with_target_rows(32)
+        .with_threads(1)
+        .with_frontier_io(true)
+        .with_external_frontier_bundle_parallelism(1)
+        .with_external_threads(Arc::new(move || {
+            let mut ran = false;
+            while tick_runtime.try_tick() {
+                ran = true;
+            }
+            ran
+        }));
+    let tasks = executor.build(
+        session.clone().with_handle(runtime.handle()),
+        projection.bind(fixture.layout.dtype())?,
+        Some(filter.bind(fixture.layout.dtype())?),
+        None,
+        vortex_scan::selection::Selection::All,
+        None,
+        0,
+    )?;
+    assert_eq!(
+        tasks.len(),
+        1,
+        "two adjacent morsels should form one bundle"
+    );
+    let mut outputs = runtime.block_on(try_join_all(tasks))?;
+    let _ = cancel_timeout.send(());
+    timeout
+        .join()
+        .map_err(|_| vortex_err!("predicate registration timeout thread panicked"))?;
+    let output = outputs
+        .pop()
+        .flatten()
+        .ok_or_else(|| vortex_err!("paired external scan produced no rows"))?;
+    let expected_output = StructArray::try_new(
+        ["out"].into(),
+        vec![PrimitiveArray::from_iter(values).into_array()],
+        64,
+        Validity::NonNullable,
+    )?
+    .into_array();
+    assert_arrays_eq!(output, expected_output, &mut session.create_execution_ctx());
+
+    assert_eq!(
+        predicate_gate.first_polled_at.load(Ordering::Acquire),
+        3,
+        "projection must not be registered before predicate execution begins"
+    );
+    let recorded = recorded.lock();
+    assert!(recorded.len() >= 4, "projection demand was never submitted");
+    for (actual, expected) in recorded.iter().take(3).zip(expected) {
+        let mut actual = actual.clone();
+        actual.sort_unstable();
+        actual.dedup();
+        assert_eq!(actual, expected);
+        assert!(actual.iter().all(|id| !projection_ids.contains(id)));
+    }
+    Ok(())
+}
+
+#[test]
+fn predicate_only_frontier_deduplicates_repeated_predicate_segments() -> VortexResult<()> {
+    let session = session();
+    let fixture = aligned_fixture(&session, 64)?;
+    let query = Query {
+        name: "predicate-frontier-dedup",
+        projection: select(vec!["a"], root()),
+        filter: Some(and(
+            gt(get_item("a", root()), lit(-1i32)),
+            and(
+                gt(get_item("b", root()), lit(-1i32)),
+                lt(get_item("a", root()), lit(i32::MAX)),
+            ),
+        )),
+    };
+    let requests = Arc::new(AtomicUsize::new(0));
+    let source: Arc<dyn SegmentSource> = Arc::new(BackgroundCountingSource {
+        inner: Arc::clone(&fixture.segments),
+        requests: Arc::clone(&requests),
+    });
+    let oracle = run_v1(&session, &fixture.layout, &fixture.segments, &query)?;
+    let actual = run_morsel_with_predicate_frontiers(
+        &session,
+        &fixture.layout,
+        &source,
+        &query,
+        MorselConfig {
+            morsel_rows: 128,
+            frontier_lookahead_per_thread: Some(0),
+            ..Default::default()
+        },
+        2,
+    )?;
+    assert_same_rows(
+        &session,
+        &v1_dtype(&fixture.layout, &query)?,
+        &oracle,
+        &actual,
+    )?;
+    let stats = actual.stats.as_ref().expect("morsel runs report stats");
+    assert_eq!(stats.io_requests, 2);
+    assert_eq!(requests.load(Ordering::Relaxed), 2);
+    Ok(())
+}
+
+#[test]
 fn cascade_frontier_cursor_moves_down_rows_and_right_groups() -> VortexResult<()> {
     let session = session();
     let fixture = misaligned_fixture(&session, ROWS)?;
@@ -530,33 +1010,42 @@ fn frontier_scheduler_depths_match_v1() -> VortexResult<()> {
 
     for mode in [ConjunctMode::Cascade, ConjunctMode::Parallel] {
         for resident in [1, 2, 3] {
-            for (depth, speculative, adaptive) in [
-                (None, 0, false),
-                (Some(0), 0, false),
-                (Some(1), 0, false),
-                (Some(1), 1, false),
-                (Some(1), 2, false),
-                (Some(1), 0, true),
+            for (depth, speculative, adaptive, predicate_only) in [
+                (None, 0, false, false),
+                (Some(0), 0, false, false),
+                (Some(1), 0, false, false),
+                (Some(1), 1, false, false),
+                (Some(1), 2, false, false),
+                (Some(1), 0, true, false),
+                // Production PushFrontier policy: current range, three predicate groups, and
+                // projection left to its exact gate.
+                (Some(0), 2, false, true),
             ] {
                 let refill_widths: &[usize] = if depth.is_some() { &[1, 4] } else { &[1] };
                 for &frontier_refill_ranges in refill_widths {
-                    let actual = run_morsel(
-                        &session,
-                        &fixture.layout,
-                        &segments,
-                        &query,
-                        MorselConfig {
-                            threads: 2,
-                            morsel_rows: 64,
-                            mode,
-                            resident_morsels_per_thread: resident,
-                            frontier_lookahead_per_thread: depth,
-                            speculative_frontiers: speculative,
-                            adaptive_frontiers: adaptive,
-                            frontier_refill_ranges,
-                            ..Default::default()
-                        },
-                    )?;
+                    let config = MorselConfig {
+                        threads: 2,
+                        morsel_rows: 64,
+                        mode,
+                        resident_morsels_per_thread: resident,
+                        frontier_lookahead_per_thread: depth,
+                        speculative_frontiers: speculative,
+                        adaptive_frontiers: adaptive,
+                        frontier_refill_ranges,
+                        ..Default::default()
+                    };
+                    let actual = if predicate_only {
+                        run_morsel_with_predicate_frontiers(
+                            &session,
+                            &fixture.layout,
+                            &segments,
+                            &query,
+                            config,
+                            speculative,
+                        )?
+                    } else {
+                        run_morsel(&session, &fixture.layout, &segments, &query, config)?
+                    };
                     assert_same_rows(
                         &session,
                         &v1_dtype(&fixture.layout, &query)?,
@@ -1300,10 +1789,82 @@ struct RecordingSegmentSource {
     requests: Arc<Mutex<Vec<SegmentId>>>,
 }
 
+struct BackgroundBatchRecordingSource {
+    inner: Arc<dyn SegmentSource>,
+    batches: Arc<Mutex<Vec<Vec<SegmentId>>>>,
+    predicate_gate: Arc<PredicateRegistrationGate>,
+}
+
+#[derive(Default)]
+struct PredicateRegistrationGate {
+    registered_batches: AtomicUsize,
+    first_polled_after_three: AtomicBool,
+    first_polled_at: AtomicUsize,
+    timed_out: AtomicBool,
+    first_waker: Mutex<Option<Waker>>,
+}
+
 impl SegmentSource for RecordingSegmentSource {
     fn request(&self, id: SegmentId) -> SegmentFuture {
         self.requests.lock().push(id);
         self.inner.request(id)
+    }
+}
+
+impl SegmentSource for BackgroundBatchRecordingSource {
+    fn request(&self, id: SegmentId) -> SegmentFuture {
+        self.inner.request(id)
+    }
+
+    fn request_background_batch(&self, ids: &[SegmentId]) -> Vec<SegmentFuture> {
+        self.batches.lock().push(ids.to_vec());
+        let batch = self
+            .predicate_gate
+            .registered_batches
+            .fetch_add(1, Ordering::AcqRel);
+        if batch == 2
+            && let Some(waker) = self.predicate_gate.first_waker.lock().take()
+        {
+            waker.wake();
+        }
+        let mut futures = self.inner.request_background_batch(ids);
+        if batch == 0
+            && let Some(first) = futures.first_mut()
+        {
+            let mut future = std::mem::replace(first, futures::future::pending().boxed());
+            let gate = Arc::clone(&self.predicate_gate);
+            *first = poll_fn(move |cx| {
+                if gate.timed_out.load(Ordering::Acquire) {
+                    return Poll::Ready(Err(vortex_err!(
+                        "timed out waiting for three predicate batches to register"
+                    )));
+                }
+                if gate.registered_batches.load(Ordering::Acquire) < 3 {
+                    let mut first_waker = gate.first_waker.lock();
+                    if gate.timed_out.load(Ordering::Acquire) {
+                        return Poll::Ready(Err(vortex_err!(
+                            "timed out waiting for three predicate batches to register"
+                        )));
+                    }
+                    *first_waker = Some(cx.waker().clone());
+                    return Poll::Pending;
+                }
+                gate.first_polled_after_three.store(true, Ordering::Release);
+                let _ = gate.first_polled_at.compare_exchange(
+                    0,
+                    gate.registered_batches.load(Ordering::Acquire),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+                future.poll_unpin(cx)
+            })
+            .boxed();
+        }
+        futures
+    }
+
+    fn prefers_background_reads(&self) -> bool {
+        true
     }
 }
 
@@ -2202,9 +2763,91 @@ struct SlowSpeculativeSource {
     gate: Arc<Mutex<SpeculativeGate>>,
 }
 
+#[derive(Default)]
+struct PredicateAdmissionGate {
+    registrations: [usize; 2],
+    batches: Vec<Vec<usize>>,
+    polls: [usize; 2],
+    first_waker: Option<Waker>,
+    later_waker: Option<Waker>,
+    timed_out: bool,
+}
+
+struct PredicateAdmissionSource {
+    buffers: Arc<[ByteBuffer]>,
+    gate: Arc<Mutex<PredicateAdmissionGate>>,
+}
+
 struct FailingProjectionSource {
     buffers: Arc<[ByteBuffer]>,
     projection_polls: Arc<AtomicUsize>,
+}
+
+#[derive(Default)]
+struct DelayedPredicateFailure {
+    polls: usize,
+    released: bool,
+    watchdog_fired: bool,
+    waker: Option<Waker>,
+}
+
+struct DelayedFailingPredicateSource {
+    buffers: Arc<[ByteBuffer]>,
+    failed_index: usize,
+    failure: Arc<Mutex<DelayedPredicateFailure>>,
+}
+
+impl SegmentSource for DelayedFailingPredicateSource {
+    fn request(&self, id: SegmentId) -> SegmentFuture {
+        let index = *id as usize;
+        let buffer = self.buffers.get(index).cloned();
+        let failed_index = self.failed_index;
+        let failure = Arc::clone(&self.failure);
+        poll_fn(move |cx| {
+            if index != failed_index {
+                return Poll::Ready(
+                    buffer
+                        .clone()
+                        .map(BufferHandle::new_host)
+                        .ok_or_else(|| vortex_err!("missing segment {index}")),
+                );
+            }
+            let mut failure = failure.lock();
+            failure.polls += 1;
+            if failure.released {
+                Poll::Ready(Err(vortex_err!("injected later predicate failure")))
+            } else {
+                failure.waker = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        })
+        .boxed()
+    }
+
+    fn prefers_background_reads(&self) -> bool {
+        true
+    }
+}
+
+fn arm_predicate_failure_watchdog(
+    failure: Arc<Mutex<DelayedPredicateFailure>>,
+) -> (mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    let (cancel, cancelled) = mpsc::channel();
+    let watchdog = std::thread::spawn(move || {
+        if cancelled.recv_timeout(Duration::from_secs(1)).is_ok() {
+            return;
+        }
+        let wake = {
+            let mut failure = failure.lock();
+            failure.watchdog_fired = true;
+            failure.released = true;
+            failure.waker.take()
+        };
+        if let Some(waker) = wake {
+            waker.wake();
+        }
+    });
+    (cancel, watchdog)
 }
 
 impl SegmentSource for FailingProjectionSource {
@@ -2252,6 +2895,62 @@ impl SegmentSource for SlowSpeculativeSource {
             }
         })
         .boxed()
+    }
+}
+
+impl SegmentSource for PredicateAdmissionSource {
+    fn request(&self, id: SegmentId) -> SegmentFuture {
+        let index = *id as usize;
+        let buffer = self.buffers.get(index).cloned();
+        let gate = Arc::clone(&self.gate);
+        poll_fn(move |cx| {
+            let Some(buffer) = buffer.as_ref() else {
+                return Poll::Ready(Err(vortex_err!(
+                    "missing predicate-admission segment {index}"
+                )));
+            };
+            let mut gate = gate.lock();
+            gate.polls[index] += 1;
+            if gate.timed_out {
+                return Poll::Ready(Err(vortex_err!(
+                    "timed out waiting for speculative predicate cancellation"
+                )));
+            }
+            if index == 1 {
+                gate.later_waker = Some(cx.waker().clone());
+                return Poll::Pending;
+            }
+            if gate.registrations[1] == 0 {
+                gate.first_waker = Some(cx.waker().clone());
+                return Poll::Pending;
+            }
+            Poll::Ready(Ok(BufferHandle::new_host(buffer.clone())))
+        })
+        .boxed()
+    }
+
+    fn request_background_batch(&self, ids: &[SegmentId]) -> Vec<SegmentFuture> {
+        let wake = {
+            let mut gate = self.gate.lock();
+            let batch = ids.iter().map(|id| **id as usize).collect::<Vec<_>>();
+            for &index in &batch {
+                if index < gate.registrations.len() {
+                    gate.registrations[index] += 1;
+                }
+            }
+            gate.batches.push(batch);
+            (gate.registrations[1] != 0)
+                .then(|| gate.first_waker.take())
+                .flatten()
+        };
+        if let Some(waker) = wake {
+            waker.wake();
+        }
+        ids.iter().map(|&id| self.request(id)).collect()
+    }
+
+    fn prefers_background_reads(&self) -> bool {
+        true
     }
 }
 
@@ -2320,8 +3019,226 @@ fn empty_filter_cancels_pending_speculative_io() -> VortexResult<()> {
     Ok(())
 }
 
+/// Predicate-only speculation may start a later conjunct, but short-circuiting the leading
+/// conjunct must cancel it without waiting. Projection remains unsubmitted by lookahead.
+#[test]
+fn predicate_only_frontier_cancels_short_circuited_conjunct() -> VortexResult<()> {
+    let session = session();
+    let values: Vec<i32> = (0..32).collect();
+    let fixture = block_on(|_handle| async {
+        write_fixture(
+            vec![
+                Column::new("a", i32_chunks(&values, &[32])),
+                Column::new("b", i32_chunks(&values, &[32])),
+            ],
+            &session,
+        )
+        .await
+    })?;
+
+    let gate = Arc::new(Mutex::new(PredicateAdmissionGate::default()));
+    let (cancel_timeout, timeout_cancelled) = mpsc::channel();
+    let watchdog_gate = Arc::clone(&gate);
+    let watchdog = std::thread::spawn(move || {
+        if timeout_cancelled
+            .recv_timeout(Duration::from_secs(10))
+            .is_ok()
+        {
+            return;
+        }
+        let wakes = {
+            let mut gate = watchdog_gate.lock();
+            gate.timed_out = true;
+            [gate.first_waker.take(), gate.later_waker.take()]
+        };
+        for waker in wakes.into_iter().flatten() {
+            waker.wake();
+        }
+    });
+
+    let source: Arc<dyn SegmentSource> = Arc::new(PredicateAdmissionSource {
+        buffers: Arc::from(fixture.segment_buffers.clone()),
+        gate: Arc::clone(&gate),
+    });
+    let query = Query {
+        name: "cancel-speculative-conjunct",
+        projection: select(vec!["a"], root()),
+        filter: Some(and(
+            gt(get_item("a", root()), lit(i32::MAX - 1)),
+            gt(get_item("b", root()), lit(-1i32)),
+        )),
+    };
+    let plan = crate::build_plan(
+        &fixture.layout,
+        &query.projection,
+        query.filter.as_ref(),
+        ConjunctMode::Cascade,
+    )?;
+    let mut frontier = plan.execution_frontier(0..32);
+    let mut groups = Vec::new();
+    loop {
+        let batch = frontier.next_io(u32::MAX)?;
+        groups.push((batch.kind(), batch.io().to_vec()));
+        if !frontier.right()? {
+            break;
+        }
+    }
+    assert_eq!(
+        groups,
+        [
+            (
+                crate::IoGroupKind::Conjunct,
+                vec![crate::IoKey::Segment(SegmentId::from(0))],
+            ),
+            (
+                crate::IoGroupKind::Conjunct,
+                vec![crate::IoKey::Segment(SegmentId::from(1))],
+            ),
+            (
+                crate::IoGroupKind::Projection,
+                vec![crate::IoKey::Segment(SegmentId::from(0))],
+            ),
+        ]
+    );
+    let v1 = run_v1(&session, &fixture.layout, &fixture.segments, &query)?;
+    let morsel = run_morsel_with_predicate_frontiers(
+        &session,
+        &fixture.layout,
+        &source,
+        &query,
+        MorselConfig {
+            threads: 1,
+            frontier_lookahead_per_thread: Some(0),
+            ..Default::default()
+        },
+        2,
+    );
+    let _ = cancel_timeout.send(());
+    watchdog
+        .join()
+        .map_err(|_| vortex_err!("predicate admission watchdog panicked"))?;
+    let morsel = morsel?;
+
+    assert_same_rows(&session, &v1_dtype(&fixture.layout, &query)?, &v1, &morsel)?;
+    let gate = gate.lock();
+    assert_eq!(gate.registrations, [1, 1]);
+    assert_eq!(gate.batches, [vec![0], vec![1]]);
+    assert_eq!(gate.polls, [1, 1]);
+    assert!(!gate.timed_out, "later predicate admission timed out");
+    drop(gate);
+    let stats = morsel.stats.as_ref().expect("morsel runs report stats");
+    assert_eq!(stats.io_requests, 2, "both predicate reads reached Start");
+    assert_eq!(
+        stats.io_batches, 2,
+        "the conjunct frontier groups retained separate Start batches"
+    );
+    assert_eq!(stats.io_cancellations, 1);
+    assert_eq!(stats.io_cells_live, 0);
+    assert_eq!(stats.io_retained_bytes, 0);
+    Ok(())
+}
+
+#[test]
+fn predicate_only_later_failure_is_ignored_or_authoritative_by_demand() -> VortexResult<()> {
+    let session = session();
+    let values: Vec<i32> = (0..32).collect();
+    let fixture = block_on(|_handle| async {
+        write_fixture(
+            vec![
+                Column::new("a", i32_chunks(&values, &[32])),
+                Column::new("b", i32_chunks(&values, &[32])),
+            ],
+            &session,
+        )
+        .await
+    })?;
+
+    let early_false = Query {
+        name: "unused-failing-conjunct",
+        projection: select(vec!["a"], root()),
+        filter: Some(and(
+            gt(get_item("a", root()), lit(i32::MAX - 1)),
+            gt(get_item("b", root()), lit(-1i32)),
+        )),
+    };
+    let failure = Arc::new(Mutex::new(DelayedPredicateFailure::default()));
+    let source: Arc<dyn SegmentSource> = Arc::new(DelayedFailingPredicateSource {
+        buffers: Arc::from(fixture.segment_buffers.clone()),
+        failed_index: 1,
+        failure: Arc::clone(&failure),
+    });
+    let (cancel_watchdog, watchdog) = arm_predicate_failure_watchdog(Arc::clone(&failure));
+    let oracle = run_v1(&session, &fixture.layout, &fixture.segments, &early_false)?;
+    let actual = run_morsel_with_predicate_frontiers(
+        &session,
+        &fixture.layout,
+        &source,
+        &early_false,
+        MorselConfig {
+            frontier_lookahead_per_thread: Some(0),
+            ..Default::default()
+        },
+        2,
+    )?;
+    let _ = cancel_watchdog.send(());
+    watchdog
+        .join()
+        .map_err(|_| vortex_err!("predicate failure watchdog panicked"))?;
+    assert_same_rows(
+        &session,
+        &v1_dtype(&fixture.layout, &early_false)?,
+        &oracle,
+        &actual,
+    )?;
+    let failure_state = failure.lock();
+    assert!(failure_state.polls > 0);
+    assert!(!failure_state.watchdog_fired);
+    drop(failure_state);
+    let stats = actual.stats.as_ref().expect("morsel runs report stats");
+    assert_eq!(stats.io_cancellations, 1);
+    assert_eq!(stats.io_cells_live, 0);
+    assert_eq!(stats.io_retained_bytes, 0);
+
+    let surviving = Query {
+        name: "required-failing-conjunct",
+        projection: select(vec!["a"], root()),
+        filter: Some(and(
+            gt(get_item("a", root()), lit(-1i32)),
+            gt(get_item("b", root()), lit(-1i32)),
+        )),
+    };
+    let failure = Arc::new(Mutex::new(DelayedPredicateFailure::default()));
+    let source: Arc<dyn SegmentSource> = Arc::new(DelayedFailingPredicateSource {
+        buffers: Arc::from(fixture.segment_buffers.clone()),
+        failed_index: 1,
+        failure: Arc::clone(&failure),
+    });
+    let (_cancel_watchdog, watchdog) = arm_predicate_failure_watchdog(Arc::clone(&failure));
+    let error = run_morsel_with_predicate_frontiers(
+        &session,
+        &fixture.layout,
+        &source,
+        &surviving,
+        MorselConfig {
+            frontier_lookahead_per_thread: Some(0),
+            ..Default::default()
+        },
+        2,
+    )
+    .err()
+    .ok_or_else(|| vortex_err!("a demanded later predicate failure must be authoritative"))?;
+    watchdog
+        .join()
+        .map_err(|_| vortex_err!("predicate failure watchdog panicked"))?;
+    assert!(format!("{error}").contains("injected later predicate failure"));
+    let failure = failure.lock();
+    assert!(failure.polls > 0);
+    assert!(failure.watchdog_fired);
+    Ok(())
+}
+
 #[rstest]
-fn speculative_projection_errors_are_authoritative_only(
+fn predicate_only_projection_errors_are_authoritative_only(
     #[values(
         DemandHintDelivery::Immediate,
         DemandHintDelivery::Disabled,
@@ -2352,15 +3269,17 @@ fn speculative_projection_errors_are_authoritative_only(
         filter: Some(gt(get_item("a", root()), lit(i32::MAX - 1))),
     };
     let v1 = run_v1(&session, &fixture.layout, &fixture.segments, &empty)?;
-    let morsel = run_morsel(
+    let morsel = run_morsel_with_predicate_frontiers(
         &session,
         &fixture.layout,
         &source,
         &empty,
         MorselConfig {
             demand_hints,
+            frontier_lookahead_per_thread: Some(0),
             ..Default::default()
         },
+        2,
     )?;
     assert_same_rows(&session, &v1_dtype(&fixture.layout, &empty)?, &v1, &morsel)?;
     let stats = morsel.stats.as_ref().expect("morsel runs report stats");
@@ -2377,15 +3296,17 @@ fn speculative_projection_errors_are_authoritative_only(
         projection: select(vec!["b"], root()),
         filter: Some(gt(get_item("a", root()), lit(-1_i32))),
     };
-    let error = run_morsel(
+    let error = run_morsel_with_predicate_frontiers(
         &session,
         &fixture.layout,
         &source,
         &selected,
         MorselConfig {
             demand_hints,
+            frontier_lookahead_per_thread: Some(0),
             ..Default::default()
         },
+        2,
     )
     .err()
     .ok_or_else(|| vortex_err!("an authoritative projection read must surface its error"))?;

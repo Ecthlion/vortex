@@ -44,6 +44,7 @@ vortex-utils = { workspace = true }
 
 futures = { workspace = true }
 crossbeam-channel = { workspace = true }
+tracing = { workspace = true }
 vortex-io = { workspace = true }
 vortex-btrblocks = { workspace = true, optional = true }
 vortex-arrow = { workspace = true, optional = true }
@@ -69,6 +70,7 @@ vortex = { workspace = true, features = ["files"] }
 vortex-scan = { workspace = true }
 rstest = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+tracing-subscriber = { workspace = true }
 
 [[bin]]
 name = "morsel-push-eval"

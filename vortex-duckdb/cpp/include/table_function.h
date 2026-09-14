@@ -29,6 +29,7 @@ typedef struct {
     size_t column_ids_count;
     duckdb_vx_table_filter_set filters;
     duckdb_client_context client_context;
+    idx_t execution_threads;
 } duckdb_vx_tfunc_init_input;
 
 // Result data returned from the cardinality callback.

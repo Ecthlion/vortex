@@ -60,6 +60,8 @@ pub fn scan_backend_from_env() -> VortexResult<ScanBackend> {
 pub struct ScanExecutorOptions {
     threads: usize,
     external_driver: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    external_frontier_bundle_parallelism: Option<usize>,
+    external_frontier_bundle_min_waves: usize,
 }
 
 impl Default for ScanExecutorOptions {
@@ -67,6 +69,8 @@ impl Default for ScanExecutorOptions {
         Self {
             threads: DEFAULT_THREADS,
             external_driver: None,
+            external_frontier_bundle_parallelism: None,
+            external_frontier_bundle_min_waves: 1,
         }
     }
 }
@@ -86,6 +90,20 @@ impl ScanExecutorOptions {
         driver: impl Fn() -> bool + Send + Sync + 'static,
     ) -> Self {
         self.external_driver = Some(Arc::new(driver));
+        self
+    }
+
+    /// Enable an experimental adjacent-morsel bundle for external PushFrontier scans.
+    #[doc(hidden)]
+    pub fn with_external_frontier_bundle_parallelism(mut self, parallelism: usize) -> Self {
+        self.external_frontier_bundle_parallelism = Some(parallelism.max(1));
+        self
+    }
+
+    /// Require this many paired-output waves per configured external worker before bundling.
+    #[doc(hidden)]
+    pub fn with_external_frontier_bundle_min_waves(mut self, min_waves: usize) -> Self {
+        self.external_frontier_bundle_min_waves = min_waves.max(1);
         self
     }
 

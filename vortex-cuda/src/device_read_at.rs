@@ -27,6 +27,10 @@ impl<T: VortexReadAt + Clone> CopyDeviceReadAt<T> {
 }
 
 impl<T: VortexReadAt + Clone> VortexReadAt for CopyDeviceReadAt<T> {
+    fn diagnostic_instance_id(&self) -> Option<u64> {
+        forwarded_diagnostic_instance_id(&self.read)
+    }
+
     fn uri(&self) -> Option<&Arc<str>> {
         self.read.uri()
     }
@@ -62,5 +66,51 @@ impl<T: VortexReadAt + Clone> VortexReadAt for CopyDeviceReadAt<T> {
             stream.copy_to_device(host_buffer)?.await
         }
         .boxed()
+    }
+}
+
+fn forwarded_diagnostic_instance_id(read: &impl VortexReadAt) -> Option<u64> {
+    read.diagnostic_instance_id()
+}
+
+#[cfg(test)]
+mod tests {
+    use vortex::array::buffer::BufferHandle;
+    use vortex::buffer::ByteBuffer;
+
+    use super::*;
+
+    #[derive(Clone)]
+    struct IdentifiedReadAt;
+
+    impl VortexReadAt for IdentifiedReadAt {
+        fn diagnostic_instance_id(&self) -> Option<u64> {
+            Some(73)
+        }
+
+        fn concurrency(&self) -> usize {
+            1
+        }
+
+        fn size(&self) -> BoxFuture<'static, VortexResult<u64>> {
+            async { Ok(0) }.boxed()
+        }
+
+        fn read_at(
+            &self,
+            _offset: u64,
+            _length: usize,
+            _alignment: Alignment,
+        ) -> BoxFuture<'static, VortexResult<BufferHandle>> {
+            async { Ok(BufferHandle::new_host(ByteBuffer::from(Vec::<u8>::new()))) }.boxed()
+        }
+    }
+
+    #[test]
+    fn copy_device_reader_forwards_diagnostic_instance_id() {
+        assert_eq!(
+            forwarded_diagnostic_instance_id(&IdentifiedReadAt),
+            Some(73)
+        );
     }
 }

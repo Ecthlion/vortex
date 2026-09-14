@@ -42,6 +42,9 @@ use crate::stats::LockContentionStats;
 use crate::stats::ScanStats;
 use crate::stats::scan_diagnostics_enabled;
 
+static NEXT_SCAN_ID: AtomicU64 = AtomicU64::new(0);
+const MAX_DIAGNOSTIC_BATCH_ITEMS: usize = 64;
+
 /// The scan-wide key of one whole stored unit.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum IoKey {
@@ -67,6 +70,95 @@ pub enum IoPriority {
     Required,
     /// Useful lookahead that may finish while required CPU work runs.
     Speculative,
+}
+
+impl IoPriority {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Required => "required",
+            Self::Speculative => "speculative",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IoRole {
+    Predicate,
+    Projection,
+    Other,
+}
+
+impl IoRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Predicate => "predicate",
+            Self::Projection => "projection",
+            Self::Other => "other",
+        }
+    }
+
+    pub(crate) fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Projection, _) | (_, Self::Projection) => Self::Projection,
+            (Self::Predicate, _) | (_, Self::Predicate) => Self::Predicate,
+            (Self::Other, Self::Other) => Self::Other,
+        }
+    }
+
+    fn code(self) -> u8 {
+        match self {
+            Self::Other => 0,
+            Self::Predicate => 1,
+            Self::Projection => 2,
+        }
+    }
+
+    fn from_code(code: u8) -> Self {
+        match code {
+            2 => Self::Projection,
+            1 => Self::Predicate,
+            _ => Self::Other,
+        }
+    }
+}
+
+struct IoDiagnostics {
+    scan_id: u64,
+    source_id: OnceLock<Option<u64>>,
+}
+
+struct IoStartTrace {
+    total: usize,
+    segment_ids: Vec<SegmentId>,
+    roles: Vec<&'static str>,
+    priorities: Vec<&'static str>,
+}
+
+impl IoStartTrace {
+    fn new(requests: &[IoRequest], roles: &[IoRole]) -> Self {
+        debug_assert_eq!(requests.len(), roles.len());
+        let recorded = requests.len().min(MAX_DIAGNOSTIC_BATCH_ITEMS);
+        Self {
+            total: requests.len(),
+            segment_ids: requests
+                .iter()
+                .take(recorded)
+                .map(|request| match request.key {
+                    IoKey::Segment(id) => id,
+                })
+                .collect(),
+            roles: roles
+                .iter()
+                .take(recorded)
+                .map(|role| role.as_str())
+                .collect(),
+            priorities: requests
+                .iter()
+                .take(recorded)
+                .map(|request| request.priority.as_str())
+                .collect(),
+        }
+    }
 }
 
 /// Identifies a source node in planning errors.
@@ -145,7 +237,14 @@ struct IoCell {
     required: AtomicBool,
     submitted: AtomicBool,
     remaining_uses: AtomicUsize,
+    // This byte exists only while diagnostics are enabled and the cell remains in the scan's
+    // active I/O registry. The final lease removes the cell, so diagnostic state is bounded by
+    // the scheduler's live morsel/window concurrency rather than the file's segment count.
+    diagnostic_state: Option<AtomicU8>,
 }
+
+const DIAGNOSTIC_ROLE_MASK: u8 = 0b11;
+const DIAGNOSTIC_PROJECTION_NEEDED: u8 = 0b100;
 
 /// Planning registers thousands of segment cells concurrently with completion delivery. Segment
 /// ids are already dense and scan-local, so use their low bits to keep unrelated cells off one
@@ -503,6 +602,29 @@ impl IoCell {
         }
     }
 
+    fn record_first_projection_need(&self) -> bool {
+        self.diagnostic_state.as_ref().is_some_and(|state| {
+            state.fetch_or(DIAGNOSTIC_PROJECTION_NEEDED, Ordering::AcqRel)
+                & DIAGNOSTIC_PROJECTION_NEEDED
+                == 0
+        })
+    }
+
+    fn merge_diagnostic_role(&self, role: IoRole) {
+        if let Some(state) = &self.diagnostic_state {
+            let _ = state.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                let merged = IoRole::from_code(current & DIAGNOSTIC_ROLE_MASK).merge(role);
+                Some((current & !DIAGNOSTIC_ROLE_MASK) | merged.code())
+            });
+        }
+    }
+
+    fn diagnostic_role(&self) -> Option<IoRole> {
+        self.diagnostic_state
+            .as_ref()
+            .map(|state| IoRole::from_code(state.load(Ordering::Relaxed) & DIAGNOSTIC_ROLE_MASK))
+    }
+
     fn wake_waiters(waiters: Vec<Waker>) {
         for waiter in waiters {
             waiter.wake();
@@ -538,13 +660,17 @@ pub(crate) struct IoService {
     peak_retained_bytes: AtomicU64,
     io_cancellations: AtomicU64,
     oracle: OnceLock<IoOracle>,
+    diagnostics: Option<IoDiagnostics>,
 }
 
 impl IoService {
     /// Create a service and the demand stream it will emit reads on.
     pub(crate) fn new() -> (Arc<Self>, IoDemandStream) {
+        Self::new_with_diagnostics(scan_diagnostics_enabled())
+    }
+
+    pub(crate) fn new_with_diagnostics(diagnostics: bool) -> (Arc<Self>, IoDemandStream) {
         let (demand, stream) = mpsc::unbounded();
-        let diagnostics = scan_diagnostics_enabled();
         let service = Arc::new(Self {
             demand,
             cells: (0..IO_CELL_SHARDS)
@@ -574,8 +700,33 @@ impl IoService {
             peak_retained_bytes: AtomicU64::new(0),
             io_cancellations: AtomicU64::new(0),
             oracle: OnceLock::new(),
+            diagnostics: diagnostics.then(|| IoDiagnostics {
+                scan_id: NEXT_SCAN_ID.fetch_add(1, Ordering::Relaxed),
+                source_id: OnceLock::new(),
+            }),
         });
         (service, stream)
+    }
+
+    pub(crate) fn link_source(&self, source_id: Option<u64>) {
+        let Some(diagnostics) = &self.diagnostics else {
+            return;
+        };
+        if diagnostics.source_id.set(source_id).is_err() {
+            return;
+        }
+        tracing::trace!(
+            target: "vortex_morsel_push::scan_source",
+            scan_id = diagnostics.scan_id,
+            source_id = source_id.unwrap_or_default(),
+            has_source_id = source_id.is_some(),
+            t_link_ns = vortex_io::diagnostic_timestamp_ns(),
+            "linking scan to segment source"
+        );
+    }
+
+    pub(crate) fn diagnostics_enabled(&self) -> bool {
+        self.diagnostics.is_some()
     }
 
     fn lock_cell_shard(&self, key: IoKey) -> parking_lot::MutexGuard<'_, IoCellShardState> {
@@ -762,6 +913,7 @@ impl IoService {
             required: AtomicBool::new(priority == IoPriority::Required),
             submitted: AtomicBool::new(false),
             remaining_uses: AtomicUsize::new(remaining_uses),
+            diagnostic_state: self.diagnostics.as_ref().map(|_| AtomicU8::new(0)),
         });
         shard.cells.insert(key, Arc::clone(&cell));
         let live = self.live_cells.fetch_add(1, Ordering::Relaxed) + 1;
@@ -772,15 +924,20 @@ impl IoService {
     /// Register a scan-level lookahead set before morsel-local planning starts.
     pub(crate) fn register_reads(
         &self,
-        keys: impl IntoIterator<Item = IoKey>,
+        reads: impl IntoIterator<Item = (IoKey, IoRole)>,
         priority: IoPriority,
     ) -> Vec<IoRead> {
-        keys.into_iter()
-            .filter_map(|key| {
-                let (cell, _) = self.register(key, priority);
-                (!cell.submitted.swap(true, Ordering::AcqRel)).then_some(IoRead { cell })
-            })
-            .collect()
+        let mut registered = Vec::new();
+        for (key, role) in reads {
+            let (cell, _) = self.register(key, priority);
+            if self.diagnostics.is_some() {
+                cell.merge_diagnostic_role(role);
+            }
+            if !cell.submitted.swap(true, Ordering::AcqRel) {
+                registered.push(IoRead { cell });
+            }
+        }
+        registered
     }
 
     /// Hand every still-unissued read in `reads` out as one demand batch.
@@ -791,6 +948,10 @@ impl IoService {
     pub(crate) fn start(&self, reads: &[IoRead]) -> usize {
         let mut requests = Vec::with_capacity(reads.len());
         let mut cells = Vec::with_capacity(reads.len());
+        let mut roles = self
+            .diagnostics
+            .as_ref()
+            .map(|_| Vec::with_capacity(reads.len()));
         for read in reads {
             let mut sync = read.cell.lock_sync();
             if !matches!(sync.state, CellState::Unissued) {
@@ -804,6 +965,9 @@ impl IoService {
                 priority: read.cell.priority(),
             });
             cells.push(Arc::clone(&read.cell));
+            if let Some(roles) = &mut roles {
+                roles.push(read.cell.diagnostic_role().unwrap_or(IoRole::Other));
+            }
         }
         if requests.is_empty() {
             return 0;
@@ -814,6 +978,21 @@ impl IoService {
         let started = requests.len();
         self.io_starts.fetch_add(started as u64, Ordering::Relaxed);
         self.io_start_batches.fetch_add(1, Ordering::Relaxed);
+        if let Some(diagnostics) = &self.diagnostics {
+            let trace = IoStartTrace::new(&requests, roles.as_deref().unwrap_or(&[]));
+            tracing::trace!(
+                target: "vortex_morsel_push::io_start",
+                scan_id = diagnostics.scan_id,
+                t_start_ns = vortex_io::diagnostic_timestamp_ns(),
+                total = trace.total,
+                recorded = trace.segment_ids.len(),
+                truncated = trace.total > trace.segment_ids.len(),
+                segment_ids = ?trace.segment_ids,
+                roles = ?trace.roles,
+                priorities = ?trace.priorities,
+                "starting logical segment batch"
+            );
+        }
         if self
             .demand
             .unbounded_send(IoDemand::Start(requests))
@@ -842,6 +1021,24 @@ impl IoService {
         {
             self.fail_cell(&read.cell);
         }
+    }
+
+    pub(crate) fn mark_projection_need(&self, read: &IoRead) {
+        if !read.cell.record_first_projection_need() {
+            return;
+        }
+        let Some(diagnostics) = &self.diagnostics else {
+            return;
+        };
+        let IoKey::Segment(segment_id) = read.cell.key;
+        tracing::trace!(
+            target: "vortex_morsel_push::projection_need",
+            scan_id = diagnostics.scan_id,
+            t_need_ns = vortex_io::diagnostic_timestamp_ns(),
+            ?segment_id,
+            priority = read.cell.priority().as_str(),
+            "projection segment first needed by execution"
+        );
     }
 
     /// Settle a cell as failed because its demand can no longer be answered.
@@ -1113,6 +1310,9 @@ impl IoPlane {
             .cloned()
             .ok_or_else(|| vortex_err!("IO ticket was accessed without registration"))?;
         let mut sync = cell.lock_sync();
+        if matches!(sync.state, CellState::Released) {
+            return Err(vortex_err!("IO ticket was accessed after its final use"));
+        }
         if let Some(oracle) = self.service.oracle.get() {
             let first_need_state = match &sync.state {
                 CellState::Ready(_) | CellState::Failed(_) => FirstNeedState::Ready,
@@ -1235,7 +1435,10 @@ mod tests {
     use super::IoKey;
     use super::IoOracleTrace;
     use super::IoPriority;
+    use super::IoRole;
     use super::IoService;
+    use super::IoStartTrace;
+    use super::MAX_DIAGNOSTIC_BATCH_ITEMS;
     use super::deadline_miss_order;
     use super::order_inversions;
 
@@ -1244,10 +1447,130 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_roles_merge_conservatively_without_a_catalog() {
+        assert_eq!(IoRole::Other.merge(IoRole::Predicate), IoRole::Predicate);
+        assert_eq!(IoRole::Predicate.merge(IoRole::Other), IoRole::Predicate);
+        assert_eq!(
+            IoRole::Predicate.merge(IoRole::Projection),
+            IoRole::Projection
+        );
+        assert_eq!(IoRole::Projection.merge(IoRole::Other), IoRole::Projection);
+
+        let (service, _demand) = IoService::new_with_diagnostics(true);
+        let reads = service.register_reads(
+            [
+                (key(4), IoRole::Predicate),
+                (key(4), IoRole::Other),
+                (key(4), IoRole::Projection),
+            ],
+            IoPriority::Speculative,
+        );
+        assert_eq!(reads.len(), 1);
+        assert_eq!(reads[0].cell.diagnostic_role(), Some(IoRole::Projection));
+    }
+
+    #[test]
+    fn diagnostic_start_batch_is_bounded_and_positionally_aligned() {
+        let (service, mut demand) = IoService::new_with_diagnostics(true);
+        let reads = service.register_reads(
+            (0..70).map(|id| {
+                let role = if id == 0 {
+                    IoRole::Projection
+                } else {
+                    IoRole::Predicate
+                };
+                (key(id), role)
+            }),
+            IoPriority::Speculative,
+        );
+        assert_eq!(service.start(&reads), 70);
+        let IoDemand::Start(requests) = demand.try_recv().expect("start batch must be emitted")
+        else {
+            panic!("expected start batch");
+        };
+        let trace = IoStartTrace::new(
+            &requests,
+            &reads
+                .iter()
+                .map(|read| read.cell.diagnostic_role().unwrap_or(IoRole::Other))
+                .collect::<Vec<_>>(),
+        );
+
+        assert_eq!(trace.total, 70);
+        assert_eq!(trace.segment_ids.len(), MAX_DIAGNOSTIC_BATCH_ITEMS);
+        assert_eq!(trace.roles.len(), MAX_DIAGNOSTIC_BATCH_ITEMS);
+        assert_eq!(trace.priorities.len(), MAX_DIAGNOSTIC_BATCH_ITEMS);
+        assert_eq!(trace.roles[0], "projection");
+        assert!(trace.roles[1..].iter().all(|role| *role == "predicate"));
+        assert!(
+            trace
+                .priorities
+                .iter()
+                .all(|priority| *priority == "speculative")
+        );
+    }
+
+    #[test]
+    fn predicate_first_shared_key_records_later_projection_need_once() {
+        let (service, _demand) = IoService::new_with_diagnostics(true);
+        let reads = service.register_reads([(key(3), IoRole::Predicate)], IoPriority::Speculative);
+        assert_eq!(reads[0].cell.diagnostic_role(), Some(IoRole::Predicate));
+
+        let duplicate =
+            service.register_reads([(key(3), IoRole::Projection)], IoPriority::Speculative);
+        assert!(duplicate.is_empty());
+        assert_eq!(reads[0].cell.diagnostic_role(), Some(IoRole::Projection));
+
+        let projection_read = service.read_key(key(3)).expect("cell must remain live");
+        service.mark_projection_need(&projection_read);
+        service.mark_projection_need(&projection_read);
+        assert!(!projection_read.cell.record_first_projection_need());
+    }
+
+    #[test]
+    fn diagnostic_scan_links_are_distinct_and_once_per_scan() {
+        let (first, _first_demand) = IoService::new_with_diagnostics(true);
+        let (second, _second_demand) = IoService::new_with_diagnostics(true);
+        first.link_source(Some(91));
+        first.link_source(Some(92));
+        second.link_source(Some(91));
+
+        let first_diagnostics = first.diagnostics.as_ref().expect("diagnostics enabled");
+        let second_diagnostics = second.diagnostics.as_ref().expect("diagnostics enabled");
+        assert_ne!(first_diagnostics.scan_id, second_diagnostics.scan_id);
+        assert_eq!(first_diagnostics.source_id.get(), Some(&Some(91)));
+        assert_eq!(second_diagnostics.source_id.get(), Some(&Some(91)));
+    }
+
+    #[test]
+    fn diagnostics_off_allocates_no_scan_or_cell_diagnostic_state() {
+        let (service, _demand) = IoService::new_with_diagnostics(false);
+        assert!(service.diagnostics.is_none());
+        let reads = service.register_reads([(key(0), IoRole::Projection)], IoPriority::Required);
+        assert!(reads[0].cell.diagnostic_state.is_none());
+    }
+
+    #[test]
+    fn diagnostic_cell_state_is_bounded_by_live_leases() {
+        let (service, _demand) = IoService::new_with_diagnostics(true);
+        for id in 0..256 {
+            let key = key(id);
+            service.add_leases(&[(key, 1)].into_iter().collect());
+            let reads = service.register_reads([(key, IoRole::Projection)], IoPriority::Required);
+            assert_eq!(reads.len(), 1);
+            assert!(reads[0].cell.diagnostic_state.is_some());
+            service.release_use(key);
+            assert_eq!(service.live_cells(), 0);
+            assert!(service.read_key(key).is_none());
+        }
+        assert_eq!(service.peak_live_cells(), 1);
+    }
+
+    #[test]
     fn final_lease_removes_ready_cell_and_drops_retained_bytes() -> VortexResult<()> {
         let (service, mut demand) = IoService::new();
         service.add_leases(&[(key(7), 1)].into_iter().collect());
-        let reads = service.register_reads([key(7)], IoPriority::Required);
+        let reads = service.register_reads([(key(7), IoRole::Other)], IoPriority::Required);
         assert_eq!(service.start(&reads), 1);
         assert!(matches!(demand.try_recv(), Ok(IoDemand::Start(_))));
 
@@ -1270,7 +1593,7 @@ mod tests {
     fn final_lease_cancels_an_outstanding_read() {
         let (service, mut demand) = IoService::new();
         service.add_leases(&[(key(8), 1)].into_iter().collect());
-        let reads = service.register_reads([key(8)], IoPriority::Speculative);
+        let reads = service.register_reads([(key(8), IoRole::Other)], IoPriority::Speculative);
         assert_eq!(service.start(&reads), 1);
         assert!(matches!(demand.try_recv(), Ok(IoDemand::Start(_))));
 
@@ -1287,7 +1610,10 @@ mod tests {
     fn replay_order_is_applied_and_scored_against_first_use() -> VortexResult<()> {
         let (service, _demand) = IoService::new();
         service.enable_oracle([key(2), key(0)]);
-        let mut reads = service.register_reads([key(0), key(1), key(2)], IoPriority::Speculative);
+        let mut reads = service.register_reads(
+            [key(0), key(1), key(2)].map(|key| (key, IoRole::Other)),
+            IoPriority::Speculative,
+        );
 
         service.sort_reads(&mut reads);
         assert_eq!(

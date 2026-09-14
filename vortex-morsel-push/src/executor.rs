@@ -43,6 +43,7 @@ use crate::io::IoService;
 use crate::nodes::ConjunctMode;
 use crate::source::SegmentSourceDriver;
 use crate::stats::ScanStats;
+use crate::stats::scan_diagnostics_enabled;
 
 type PlanCacheKey = (Expression, Option<Expression>, ConjunctMode, u64);
 /// One independently awaitable output unit returned by [`PushMorselScanExecutor`].
@@ -74,12 +75,19 @@ impl ScanShape {
 /// file driver sees enough adjacent segments to coalesce and cold reads overlap execution.
 const SHARED_LOOKAHEAD_MORSELS: usize = 16;
 
-/// Production SQL defaults for grouped-I/O frontier scheduling. These mirror
-/// `MorselConfig::frontier_defaults`: resident morsels expose their own first frontier, with no
-/// additional down lookahead or speculative right traversal, and row frontiers refill in batches.
+/// Production SQL defaults for grouped-I/O frontier scheduling. Resident morsels expose their
+/// own first frontier with no down lookahead. Up to two later predicate groups are admitted to
+/// keep storage busy, while projection remains demand-gated. The controlled external bundling
+/// experiment overrides only the per-thread down lookahead for its paired morsels.
 const FRONTIER_LOOKAHEAD_PER_THREAD: usize = 0;
-const FRONTIER_SPECULATIVE_RIGHT: usize = 0;
+const FRONTIER_SPECULATIVE_PREDICATES_RIGHT: usize = 2;
 const FRONTIER_REFILL_RANGES: usize = 32;
+
+/// Adjacent natural morsels owned by one externally driven PushFrontier scheduler.
+///
+/// Two ranges are enough to turn independently timed predicate requests into one storage-visible
+/// wave while keeping work stealing and retained output bounded tightly per engine thread.
+const EXTERNAL_FRONTIER_BUNDLE_MORSELS: usize = 2;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum ExecutorIoPolicy {
@@ -99,7 +107,7 @@ struct ExecutorIoSettings {
     eager_lookahead: bool,
     lookahead_morsels: usize,
     frontier_lookahead_per_thread: Option<usize>,
-    speculative_frontiers: usize,
+    speculative_predicate_frontiers: usize,
     frontier_refill_ranges: usize,
 }
 
@@ -118,21 +126,21 @@ impl ExecutorIoPolicy {
                 eager_lookahead: true,
                 lookahead_morsels: SHARED_LOOKAHEAD_MORSELS,
                 frontier_lookahead_per_thread: None,
-                speculative_frontiers: 0,
+                speculative_predicate_frontiers: 0,
                 frontier_refill_ranges: FRONTIER_REFILL_RANGES,
             },
             (Self::EagerLookahead, ExecutorDriver::External) => ExecutorIoSettings {
                 eager_lookahead: true,
                 lookahead_morsels: 0,
                 frontier_lookahead_per_thread: None,
-                speculative_frontiers: 0,
+                speculative_predicate_frontiers: 0,
                 frontier_refill_ranges: FRONTIER_REFILL_RANGES,
             },
             (Self::Frontier, _) => ExecutorIoSettings {
                 eager_lookahead: false,
                 lookahead_morsels: 0,
                 frontier_lookahead_per_thread: Some(FRONTIER_LOOKAHEAD_PER_THREAD),
-                speculative_frontiers: FRONTIER_SPECULATIVE_RIGHT,
+                speculative_predicate_frontiers: FRONTIER_SPECULATIVE_PREDICATES_RIGHT,
                 frontier_refill_ranges: FRONTIER_REFILL_RANGES,
             },
         }
@@ -146,7 +154,7 @@ impl ExecutorIoPolicy {
         match settings.frontier_lookahead_per_thread {
             Some(frontiers) => scan
                 .with_frontier_lookahead_per_thread(frontiers)
-                .with_speculative_frontiers(settings.speculative_frontiers)
+                .with_speculative_predicate_frontiers(settings.speculative_predicate_frontiers)
                 .with_frontier_refill_ranges(settings.frontier_refill_ranges),
             None => scan,
         }
@@ -169,6 +177,8 @@ pub struct PushMorselScanExecutor {
     threads: usize,
     io_policy: ExecutorIoPolicy,
     external_driver: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    external_frontier_bundle_parallelism: Option<usize>,
+    external_frontier_bundle_min_waves: usize,
     plan_cache: Mutex<HashMap<PlanCacheKey, Arc<ExecPlan>>>,
 }
 
@@ -183,6 +193,8 @@ impl PushMorselScanExecutor {
             threads: 4,
             io_policy: ExecutorIoPolicy::default(),
             external_driver: None,
+            external_frontier_bundle_parallelism: None,
+            external_frontier_bundle_min_waves: 1,
             plan_cache: Mutex::default(),
         }
     }
@@ -207,9 +219,9 @@ impl PushMorselScanExecutor {
 
     /// Select grouped-I/O frontier scheduling for this executor.
     ///
-    /// The frontier production defaults add no down-frontier lookahead or speculative right
-    /// traversal and refill up to 32 row ranges together. Disabling it preserves the established
-    /// eager-lookahead push policy.
+    /// The frontier production defaults admit at most two later predicate groups without
+    /// speculating projection or adding down-frontier lookahead. Disabling it preserves the
+    /// established eager-lookahead push policy.
     pub fn with_frontier_io(mut self, frontier_io: bool) -> Self {
         self.io_policy = ExecutorIoPolicy::from_frontier_io(frontier_io);
         self
@@ -218,6 +230,20 @@ impl PushMorselScanExecutor {
     /// Run each returned morsel future on the thread that polls it.
     pub fn with_external_threads(mut self, driver: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
         self.external_driver = Some(driver);
+        self
+    }
+
+    /// Enable the experimental adjacent-morsel bundle for an externally driven frontier scan.
+    #[doc(hidden)]
+    pub fn with_external_frontier_bundle_parallelism(mut self, parallelism: usize) -> Self {
+        self.external_frontier_bundle_parallelism = Some(parallelism.max(1));
+        self
+    }
+
+    /// Require this many paired-output waves per external worker before bundling.
+    #[doc(hidden)]
+    pub fn with_external_frontier_bundle_min_waves(mut self, min_waves: usize) -> Self {
+        self.external_frontier_bundle_min_waves = min_waves.max(1);
         self
     }
 
@@ -311,6 +337,7 @@ impl PushMorselScanExecutor {
         let plan = self.plan(&projection, filter.as_ref(), row_offset)?;
         let full_range = row_range.unwrap_or_else(|| 0..plan.row_count());
         let natural_morsels = morsels(&plan, self.target_rows);
+        let natural_morsel_count = natural_morsels.len();
         let morsels_in_row_range = if collect_stats {
             count_intersecting_morsels(&natural_morsels, &full_range)
         } else {
@@ -383,6 +410,61 @@ impl PushMorselScanExecutor {
             .transpose()?;
 
         if let Some(driver) = &self.external_driver {
+            let bundle_parallelism = external_frontier_bundle_parallelism(
+                self.external_frontier_bundle_parallelism,
+                self.io_policy,
+                filter.is_some(),
+                limit.is_some(),
+            );
+            if let Some(parallelism) = bundle_parallelism {
+                return build_external_frontier_bundle_outputs(
+                    session,
+                    plan,
+                    Arc::clone(&self.segments),
+                    morsels,
+                    Arc::clone(driver),
+                    pruner,
+                    self.io_policy,
+                    parallelism,
+                    self.external_frontier_bundle_min_waves,
+                    natural_morsel_count,
+                )
+                .map(|outputs| (outputs, None));
+            }
+            if scan_diagnostics_enabled() {
+                let parallelism = self
+                    .external_frontier_bundle_parallelism
+                    .unwrap_or_default();
+                let candidate_bundle_count =
+                    morsels.len().div_ceil(EXTERNAL_FRONTIER_BUNDLE_MORSELS);
+                let bundle_threshold =
+                    parallelism.saturating_mul(self.external_frontier_bundle_min_waves);
+                let fallback_reason = if self.external_frontier_bundle_parallelism.is_none() {
+                    "not_configured"
+                } else if self.io_policy != ExecutorIoPolicy::Frontier {
+                    "non_frontier"
+                } else if filter.is_none() {
+                    "no_filter"
+                } else if limit.is_some() {
+                    "limit"
+                } else {
+                    "unknown"
+                };
+                tracing::trace!(
+                    target: "vortex_morsel_push::external_frontier_bundle",
+                    configured_parallelism = parallelism,
+                    min_bundle_waves = self.external_frontier_bundle_min_waves,
+                    bundle_threshold,
+                    natural_morsels = natural_morsel_count,
+                    selected_morsels = morsels.len(),
+                    candidate_bundle_count,
+                    selected_bundle_size = 1,
+                    resulting_bundles = morsels.len(),
+                    paired_bundles = 0,
+                    fallback_reason,
+                    "planning external frontier morsel bundles"
+                );
+            }
             return build_external_outputs(
                 session,
                 plan,
@@ -582,8 +664,10 @@ fn build_external_outputs(
 ) -> VortexResult<Vec<BoxFuture<'static, VortexResult<Option<ArrayRef>>>>> {
     // One I/O service, and therefore one demand stream, spans every morsel of this file so
     // reads dedupe across them. The engine's threads advance the runtime the driver runs on.
+    let source_id = segments.diagnostic_instance_id();
     let source = SegmentSourceDriver::new(segments);
     let (io, demand) = IoService::new();
+    io.link_source(source_id);
     io.set_background_reads(source.prefers_background_reads());
     io.set_probe(Some(source.nowait_probe()));
     session
@@ -603,8 +687,7 @@ fn build_external_outputs(
             if ranges.is_empty() {
                 return Ok(None);
             }
-            let scan = MorselScan::new_with_morsels(plan, session, ranges)
-                .with_io_service(io)
+            let scan = MorselScan::new_with_shared_io(plan, session, ranges, io)
                 .with_external_driver(driver)
                 .with_share_decodes(false)
                 .with_sparse_morsels(true);
@@ -615,6 +698,228 @@ fn build_external_outputs(
                 (Some(array), Some(cap)) if array.len() > cap => Ok(Some(array.slice(0..cap)?)),
                 (batch, _) => Ok(batch),
             }
+        })
+            as BoxFuture<'static, VortexResult<Option<ArrayRef>>>);
+    }
+    Ok(outputs)
+}
+
+fn external_frontier_bundle_parallelism(
+    configured_parallelism: Option<usize>,
+    io_policy: ExecutorIoPolicy,
+    has_filter: bool,
+    has_limit: bool,
+) -> Option<usize> {
+    configured_parallelism
+        .filter(|_| io_policy == ExecutorIoPolicy::Frontier && has_filter && !has_limit)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ExternalFrontierBundlePlan {
+    bundle_size: usize,
+    candidate_bundle_count: usize,
+    threshold: usize,
+}
+
+fn external_frontier_bundle_plan(
+    morsel_count: usize,
+    parallelism: usize,
+    min_waves: usize,
+) -> ExternalFrontierBundlePlan {
+    let candidate_bundle_count = morsel_count.div_ceil(EXTERNAL_FRONTIER_BUNDLE_MORSELS);
+    let threshold = parallelism.max(1).saturating_mul(min_waves.max(1));
+    let bundle_size = if morsel_count >= EXTERNAL_FRONTIER_BUNDLE_MORSELS
+        && candidate_bundle_count >= threshold
+    {
+        EXTERNAL_FRONTIER_BUNDLE_MORSELS
+    } else {
+        1
+    };
+    ExternalFrontierBundlePlan {
+        bundle_size,
+        candidate_bundle_count,
+        threshold,
+    }
+}
+
+struct ExternalFrontierBundle {
+    coverage: Range<u64>,
+    first: SelectedMorsel,
+    second: Option<SelectedMorsel>,
+}
+
+impl ExternalFrontierBundle {
+    fn into_morsels(self) -> Vec<SelectedMorsel> {
+        let mut morsels = Vec::with_capacity(EXTERNAL_FRONTIER_BUNDLE_MORSELS);
+        morsels.push(self.first);
+        morsels.extend(self.second);
+        morsels
+    }
+}
+
+fn bundle_adjacent_contiguous_morsels(morsels: Vec<SelectedMorsel>) -> Vec<ExternalFrontierBundle> {
+    let mut morsels = morsels.into_iter().peekable();
+    let mut bundles = Vec::new();
+    while let Some(first) = morsels.next() {
+        let first_coverage = contiguous_selected_coverage(&first);
+        let pair_next = first_coverage.as_ref().is_some_and(|first_coverage| {
+            morsels.peek().is_some_and(|second| {
+                contiguous_selected_coverage(second)
+                    .is_some_and(|second_coverage| first_coverage.end == second_coverage.start)
+            })
+        });
+        let second = if pair_next { morsels.next() } else { None };
+        let coverage = match (
+            &first_coverage,
+            second.as_ref().and_then(contiguous_selected_coverage),
+        ) {
+            (Some(first), Some(second)) => first.start..second.end,
+            (Some(first), None) => first.clone(),
+            (None, _) => selected_coverage(&first),
+        };
+        bundles.push(ExternalFrontierBundle {
+            coverage,
+            first,
+            second,
+        });
+    }
+    bundles
+}
+
+fn contiguous_selected_coverage(morsel: &SelectedMorsel) -> Option<Range<u64>> {
+    match morsel.selected_ranges.as_slice() {
+        [range] => Some(range.clone()),
+        _ => None,
+    }
+}
+
+fn selected_coverage(morsel: &SelectedMorsel) -> Range<u64> {
+    match (
+        morsel.selected_ranges.first(),
+        morsel.selected_ranges.last(),
+    ) {
+        (Some(first), Some(last)) => first.start..last.end,
+        _ => 0..0,
+    }
+}
+
+fn bundled_frontier_down(pruned: &[SelectedMorsel]) -> usize {
+    let [first, second] = pruned else {
+        return 0;
+    };
+    let ([first], [second]) = (
+        first.selected_ranges.as_slice(),
+        second.selected_ranges.as_slice(),
+    ) else {
+        return 0;
+    };
+    usize::from(first.end == second.start)
+}
+
+#[expect(clippy::too_many_arguments)]
+fn build_external_frontier_bundle_outputs(
+    session: VortexSession,
+    plan: Arc<ExecPlan>,
+    segments: Arc<dyn SegmentSource>,
+    morsels: Vec<SelectedMorsel>,
+    driver: Arc<dyn Fn() -> bool + Send + Sync>,
+    pruner: Option<StaticPruner>,
+    io_policy: ExecutorIoPolicy,
+    parallelism: usize,
+    min_bundle_waves: usize,
+    natural_morsel_count: usize,
+) -> VortexResult<Vec<BoxFuture<'static, VortexResult<Option<ArrayRef>>>>> {
+    let bundle_plan = external_frontier_bundle_plan(morsels.len(), parallelism, min_bundle_waves);
+    if bundle_plan.bundle_size == 1 {
+        if scan_diagnostics_enabled() {
+            tracing::trace!(
+                target: "vortex_morsel_push::external_frontier_bundle",
+                configured_parallelism = parallelism,
+                min_bundle_waves,
+                bundle_threshold = bundle_plan.threshold,
+                natural_morsels = natural_morsel_count,
+                selected_morsels = morsels.len(),
+                candidate_bundle_count = bundle_plan.candidate_bundle_count,
+                selected_bundle_size = 1,
+                resulting_bundles = morsels.len(),
+                paired_bundles = 0,
+                fallback_reason = "min_bundle_waves",
+                "planning external frontier morsel bundles"
+            );
+        }
+        return build_external_outputs(
+            session, plan, segments, morsels, None, driver, pruner, io_policy,
+        );
+    }
+
+    let source_id = segments.diagnostic_instance_id();
+    let source = SegmentSourceDriver::new(segments);
+    let (io, demand) = IoService::new();
+    io.link_source(source_id);
+    io.set_background_reads(source.prefers_background_reads());
+    io.set_probe(Some(source.nowait_probe()));
+    session
+        .handle()
+        .spawn(source.drive(demand, io.completions()))
+        .detach();
+    let bundles = bundle_adjacent_contiguous_morsels(morsels);
+    if scan_diagnostics_enabled() {
+        let paired_bundles = bundles
+            .iter()
+            .filter(|bundle| bundle.second.is_some())
+            .count();
+        let fallback_reason = if paired_bundles == 0 {
+            "no_adjacent_contiguous_pair"
+        } else if paired_bundles < bundles.len() {
+            "odd_tail_or_selection_gap"
+        } else {
+            "none"
+        };
+        tracing::trace!(
+            target: "vortex_morsel_push::external_frontier_bundle",
+            configured_parallelism = parallelism,
+            min_bundle_waves,
+            bundle_threshold = bundle_plan.threshold,
+            natural_morsels = natural_morsel_count,
+            selected_morsels = bundles.len() + paired_bundles,
+            candidate_bundle_count = bundle_plan.candidate_bundle_count,
+            selected_bundle_size = EXTERNAL_FRONTIER_BUNDLE_MORSELS,
+            resulting_bundles = bundles.len(),
+            paired_bundles,
+            fallback_reason,
+            "planning external frontier morsel bundles"
+        );
+    }
+    let mut outputs = Vec::with_capacity(bundles.len());
+    for bundle in bundles {
+        debug_assert!(bundle.coverage.start <= bundle.coverage.end);
+        let plan = Arc::clone(&plan);
+        let io = Arc::clone(&io);
+        let driver = Arc::clone(&driver);
+        let session = session.clone();
+        let pruner = pruner.clone();
+        outputs.push(Box::pin(async move {
+            let pruned = prune_morsels(pruner.as_ref(), bundle.into_morsels()).await?;
+            let down = bundled_frontier_down(&pruned);
+            let ranges = pruned
+                .into_iter()
+                .flat_map(|morsel| morsel.selected_ranges)
+                .collect::<Vec<_>>();
+            if ranges.is_empty() {
+                return Ok(None);
+            }
+            let scan = MorselScan::new_with_shared_io(plan, session, ranges, io)
+                .with_external_driver(driver)
+                .with_share_decodes(false)
+                .with_sparse_morsels(true);
+            let scan = io_policy.configure(scan, ExecutorDriver::External);
+            let scan = if down == 0 {
+                scan
+            } else {
+                scan.with_frontier_lookahead_per_thread(down)
+            };
+            let (batches, _) = scan.run_on_current_thread()?;
+            combine_batches(batches)
         })
             as BoxFuture<'static, VortexResult<Option<ArrayRef>>>);
     }
@@ -890,17 +1195,26 @@ fn selected_morsels(
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Range;
+
+    use super::EXTERNAL_FRONTIER_BUNDLE_MORSELS;
     use super::ExecutorDriver;
     use super::ExecutorIoPolicy;
     use super::ExecutorIoSettings;
+    use super::ExternalFrontierBundlePlan;
     use super::FRONTIER_LOOKAHEAD_PER_THREAD;
     use super::FRONTIER_REFILL_RANGES;
-    use super::FRONTIER_SPECULATIVE_RIGHT;
+    use super::FRONTIER_SPECULATIVE_PREDICATES_RIGHT;
     use super::SHARED_LOOKAHEAD_MORSELS;
+    use super::SelectedMorsel;
+    use super::bundle_adjacent_contiguous_morsels;
+    use super::bundled_frontier_down;
     use super::coalesce_ranges;
+    use super::external_frontier_bundle_parallelism;
+    use super::external_frontier_bundle_plan;
 
     #[test]
-    fn production_frontier_policy_is_explicit_and_uses_harness_defaults() {
+    fn production_frontier_policy_is_explicit_and_predicate_only() {
         assert_eq!(
             ExecutorIoPolicy::from_frontier_io(false),
             ExecutorIoPolicy::EagerLookahead
@@ -915,17 +1229,17 @@ mod tests {
                 eager_lookahead: false,
                 lookahead_morsels: 0,
                 frontier_lookahead_per_thread: Some(FRONTIER_LOOKAHEAD_PER_THREAD),
-                speculative_frontiers: FRONTIER_SPECULATIVE_RIGHT,
+                speculative_predicate_frontiers: FRONTIER_SPECULATIVE_PREDICATES_RIGHT,
                 frontier_refill_ranges: FRONTIER_REFILL_RANGES,
             }
         );
         assert_eq!(
             (
                 FRONTIER_LOOKAHEAD_PER_THREAD,
-                FRONTIER_SPECULATIVE_RIGHT,
+                FRONTIER_SPECULATIVE_PREDICATES_RIGHT,
                 FRONTIER_REFILL_RANGES,
             ),
-            (0, 0, 32)
+            (0, 2, 32)
         );
         assert_eq!(
             ExecutorIoPolicy::Frontier.settings(ExecutorDriver::External),
@@ -941,7 +1255,7 @@ mod tests {
                 eager_lookahead: true,
                 lookahead_morsels: 0,
                 frontier_lookahead_per_thread: None,
-                speculative_frontiers: 0,
+                speculative_predicate_frontiers: 0,
                 frontier_refill_ranges: FRONTIER_REFILL_RANGES,
             }
         );
@@ -951,10 +1265,176 @@ mod tests {
                 eager_lookahead: true,
                 lookahead_morsels: SHARED_LOOKAHEAD_MORSELS,
                 frontier_lookahead_per_thread: None,
-                speculative_frontiers: 0,
+                speculative_predicate_frontiers: 0,
                 frontier_refill_ranges: FRONTIER_REFILL_RANGES,
             }
         );
+    }
+
+    #[test]
+    fn external_frontier_pairing_requires_eight_full_worker_waves() {
+        assert_eq!(
+            external_frontier_bundle_plan(222, 14, 8),
+            ExternalFrontierBundlePlan {
+                bundle_size: 1,
+                candidate_bundle_count: 111,
+                threshold: 112,
+            }
+        );
+        assert_eq!(
+            external_frontier_bundle_plan(223, 14, 8),
+            ExternalFrontierBundlePlan {
+                bundle_size: EXTERNAL_FRONTIER_BUNDLE_MORSELS,
+                candidate_bundle_count: 112,
+                threshold: 112,
+            }
+        );
+        assert_eq!(
+            external_frontier_bundle_plan(224, 14, 8),
+            ExternalFrontierBundlePlan {
+                bundle_size: EXTERNAL_FRONTIER_BUNDLE_MORSELS,
+                candidate_bundle_count: 112,
+                threshold: 112,
+            }
+        );
+        assert_eq!(external_frontier_bundle_plan(223, 15, 8).bundle_size, 1);
+        assert_eq!(
+            external_frontier_bundle_plan(15, 1, 8).bundle_size,
+            EXTERNAL_FRONTIER_BUNDLE_MORSELS
+        );
+        assert_eq!(external_frontier_bundle_plan(15, 2, 8).bundle_size, 1);
+    }
+
+    #[test]
+    fn external_frontier_pairing_handles_one_worker_and_overflow() {
+        assert_eq!(external_frontier_bundle_plan(1, 1, 1).bundle_size, 1);
+        assert_eq!(
+            external_frontier_bundle_plan(2, 1, 1).bundle_size,
+            EXTERNAL_FRONTIER_BUNDLE_MORSELS
+        );
+        assert_eq!(
+            external_frontier_bundle_plan(usize::MAX, usize::MAX, 2),
+            ExternalFrontierBundlePlan {
+                bundle_size: 1,
+                candidate_bundle_count: usize::MAX.div_ceil(2),
+                threshold: usize::MAX,
+            }
+        );
+    }
+
+    #[test]
+    fn external_frontier_pairing_is_backend_filter_and_limit_isolated() {
+        assert_eq!(
+            external_frontier_bundle_parallelism(None, ExecutorIoPolicy::Frontier, true, false),
+            None
+        );
+        assert_eq!(
+            external_frontier_bundle_parallelism(
+                Some(14),
+                ExecutorIoPolicy::EagerLookahead,
+                true,
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            external_frontier_bundle_parallelism(
+                Some(14),
+                ExecutorIoPolicy::Frontier,
+                false,
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            external_frontier_bundle_parallelism(Some(14), ExecutorIoPolicy::Frontier, true, true),
+            None
+        );
+        assert_eq!(
+            external_frontier_bundle_parallelism(Some(14), ExecutorIoPolicy::Frontier, true, false),
+            Some(14)
+        );
+    }
+
+    #[test]
+    fn adjacent_pairs_are_stable_disjoint_and_keep_an_odd_tail() {
+        let morsels = (0..5)
+            .map(|index| selected_one(index * 10, (index + 1) * 10))
+            .collect::<Vec<_>>();
+        let bundles = bundle_adjacent_contiguous_morsels(morsels);
+        let coverages = bundles
+            .iter()
+            .map(|bundle| bundle.coverage.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(coverages, [0..20, 20..40, 40..50]);
+        assert!(
+            coverages
+                .iter()
+                .zip(coverages.iter().skip(1))
+                .all(|(left, right)| left.end <= right.start)
+        );
+        assert!(bundles[0].second.is_some());
+        assert!(bundles[1].second.is_some());
+        assert!(bundles[2].second.is_none());
+    }
+
+    #[test]
+    fn selection_gap_breaks_an_external_frontier_pair() {
+        let bundles = bundle_adjacent_contiguous_morsels(vec![
+            selected_one(0, 10),
+            selected_one(20, 30),
+            selected_one(30, 40),
+        ]);
+        assert_eq!(
+            bundles
+                .iter()
+                .map(|bundle| bundle.coverage.clone())
+                .collect::<Vec<_>>(),
+            [0..10, 20..40]
+        );
+    }
+
+    #[test]
+    fn down_one_requires_one_surviving_range_from_each_paired_morsel() {
+        assert_eq!(
+            bundled_frontier_down(&[selected_one(0, 10), selected_one(10, 20)]),
+            1
+        );
+        assert_eq!(
+            bundled_frontier_down(&[selected_one(0, 10), selected([])]),
+            0
+        );
+        assert_eq!(
+            bundled_frontier_down(&[selected([0..4, 6..10]), selected_one(10, 20)]),
+            0
+        );
+        assert_eq!(
+            bundled_frontier_down(&[selected_one(0, 9), selected_one(10, 20)]),
+            0
+        );
+        assert_eq!(
+            bundled_frontier_down(&[selected_one(0, 10), selected_one(11, 20)]),
+            0
+        );
+        assert_eq!(bundled_frontier_down(&[selected_one(0, 10)]), 0);
+    }
+
+    #[test]
+    fn noncontiguous_preprune_selection_never_pairs() {
+        let bundles =
+            bundle_adjacent_contiguous_morsels(vec![selected([0..4, 6..10]), selected_one(10, 20)]);
+        assert_eq!(bundles.len(), 2);
+        assert!(bundles.iter().all(|bundle| bundle.second.is_none()));
+    }
+
+    fn selected(selected_ranges: impl IntoIterator<Item = Range<u64>>) -> SelectedMorsel {
+        SelectedMorsel {
+            selected_ranges: selected_ranges.into_iter().collect(),
+        }
+    }
+
+    fn selected_one(start: u64, end: u64) -> SelectedMorsel {
+        selected(std::iter::once(start..end))
     }
 
     #[test]

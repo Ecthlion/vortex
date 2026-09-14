@@ -106,6 +106,7 @@ impl SegmentSourceDriver {
     /// dropped with it, which cancels them at sources that support cancellation.
     pub fn connect(&self, scan: MorselScan, handle: &Handle) -> VortexResult<MorselScan> {
         let (demand, completions) = scan.take_io()?;
+        scan.link_io_source(self.source.diagnostic_instance_id());
         handle.spawn(self.drive(demand, completions)).detach();
         Ok(scan
             .with_background_reads(self.prefers_background_reads())
@@ -118,6 +119,7 @@ impl SegmentSourceDriver {
     /// synchronously. The thread exits when the scan is dropped.
     pub fn connect_on_thread(&self, scan: MorselScan) -> VortexResult<MorselScan> {
         let (demand, completions) = scan.take_io()?;
+        scan.link_io_source(self.source.diagnostic_instance_id());
         let drive = self.drive(demand, completions);
         let driver = std::thread::Builder::new()
             .name("vortex-morsel-io".into())
@@ -363,7 +365,8 @@ mod tests {
         let (service, demand) = IoService::new();
         let key = IoKey::Segment(SegmentId::from(0));
         service.add_leases(&[(key, 1)].into_iter().collect());
-        let reads = service.register_reads([key], IoPriority::Speculative);
+        let reads =
+            service.register_reads([(key, crate::io::IoRole::Other)], IoPriority::Speculative);
         assert_eq!(service.start(&reads), 1);
 
         let drive = driver.drive(demand, service.completions());

@@ -30,8 +30,10 @@ The executor does not poll storage futures. `SegmentSourceDriver` answers the sc
 stream on a separate runtime task or thread. `MorselScan::into_stream` provides ordered output,
 bounded capacity, and cancellation; `run` collects the output. Leased shared cells retain decoded
 chunks until the last overlapping morsel retires. Raw segment cells carry exact planned-use
-counts; their final use drops ready bytes or cancels the outstanding source future. A scan-owned
-driver is shut down and joined before the scan can leave a query run.
+counts; their final use drops ready bytes or cancels the outstanding source future. The
+dedicated-thread, owned-I/O variant is shut down and joined before the scan leaves a query run.
+Shared external drivers, including DuckDB's detached runtime task, instead terminate when demand
+and service ownership close; they are not synchronously joined by the subscan.
 
 The prototype supports flat, chunked, and non-nullable struct layouts, plus transparent zoned
 and legacy-statistics wrappers. Unsupported layouts are build errors. Import provenance is in
@@ -62,5 +64,14 @@ row when comparing the two push schedulers.
 
 SQL integrations select this executor with `VORTEX_SCAN_BACKEND=push`. That label retains the
 established eager-lookahead policy. `VORTEX_SCAN_BACKEND=push-frontier` selects the grouped-I/O
-frontier scheduler with the production defaults: zero additional frontier lookahead, zero bounded
-right speculation, and row-frontier refills of 32 ranges.
+frontier scheduler with the current production-integration policy: zero additional down-frontier
+lookahead, up to two predicate-only right groups for the current range, and row-frontier refills of
+32 ranges. Projection remains demand-gated. DuckDB's adjacent-morsel bundle-size-two/W8 experiment
+is a separate opt-in. It computes eligibility from selected pre-static-prune morsels after
+row-range/Selection and applicable executor-limit truncation, then pairs contiguous selected
+morsels before static pruning. The pair remains bundled after pruning; the second morsel receives
+one predicate-only down frontier only when both members retain exactly one range and remain exactly
+adjacent, otherwise down lookahead becomes zero. It is default-off because its final SF10 resource
+gate failed. Its current `MorselScan` limit guard is not a SQL LIMIT guarantee because DuckDB does
+not yet propagate that limit; see
+[IO_FRONTIER_HANDOVER.md](IO_FRONTIER_HANDOVER.md).

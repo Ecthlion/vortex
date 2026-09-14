@@ -156,6 +156,13 @@ impl MorselScanBuilder<ArrayRef> {
                 if let Some(driver) = &options.external_driver {
                     executor = executor.with_external_threads(Arc::clone(driver));
                 }
+                if let Some(parallelism) = options.external_frontier_bundle_parallelism {
+                    executor = executor
+                        .with_external_frontier_bundle_parallelism(parallelism)
+                        .with_external_frontier_bundle_min_waves(
+                            options.external_frontier_bundle_min_waves,
+                        );
+                }
                 executor
             }
         };

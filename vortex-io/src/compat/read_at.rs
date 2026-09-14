@@ -20,6 +20,10 @@ use crate::compat::Compat;
 /// Compatibility adapter for `VortexReadAt` implementations that are based on Tokio.
 #[deny(clippy::missing_trait_methods)]
 impl<R: VortexReadAt> VortexReadAt for Compat<R> {
+    fn diagnostic_instance_id(&self) -> Option<u64> {
+        self.inner().diagnostic_instance_id()
+    }
+
     fn uri(&self) -> Option<&Arc<str>> {
         self.inner().uri()
     }

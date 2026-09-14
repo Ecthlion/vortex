@@ -36,6 +36,12 @@ struct DuckResult {
     internal_data: *mut c_void,
 }
 
+#[repr(C)]
+struct DuckString {
+    data: *mut c_char,
+    size: u64,
+}
+
 unsafe extern "C" {
     fn duckdb_create_config(config: *mut DuckConfig) -> u32;
     fn duckdb_set_config(config: DuckConfig, name: *const c_char, value: *const c_char) -> u32;
@@ -56,9 +62,19 @@ unsafe extern "C" {
     ) -> u32;
     fn duckdb_result_error(result: *mut DuckResult) -> *const c_char;
     fn duckdb_destroy_result(result: *mut DuckResult);
+    fn duckdb_column_count(result: *mut DuckResult) -> u64;
+    fn duckdb_column_name(result: *mut DuckResult, column: u64) -> *const c_char;
+    fn duckdb_column_logical_type(result: *mut DuckResult, column: u64) -> *mut c_void;
+    fn duckdb_destroy_logical_type(logical_type: *mut *mut c_void);
     fn duckdb_row_count(result: *mut DuckResult) -> u64;
     fn duckdb_rows_changed(result: *mut DuckResult) -> u64;
+    fn duckdb_value_is_null(result: *mut DuckResult, column: u64, row: u64) -> bool;
+    fn duckdb_value_string(result: *mut DuckResult, column: u64, row: u64) -> DuckString;
     fn duckdb_free(ptr: *mut c_void);
+}
+
+unsafe extern "C-unwind" {
+    fn duckdb_vx_logical_type_stringify(logical_type: *mut c_void) -> *mut c_char;
 }
 
 /// DuckDB context for benchmarks.
@@ -127,7 +143,10 @@ impl DuckClient {
             unsafe { duckdb_destroy_result(&raw mut result) };
             anyhow::bail!("failed to execute query: {error}");
         }
-        Ok(DuckQueryResult(result))
+        Ok(DuckQueryResult {
+            result,
+            prepared_display: None,
+        })
     }
 
     fn open_and_setup_database(
@@ -311,11 +330,14 @@ fn result_error(result: &mut DuckResult) -> String {
     }
 }
 
-pub struct DuckQueryResult(DuckResult);
+pub struct DuckQueryResult {
+    result: DuckResult,
+    prepared_display: Option<String>,
+}
 
 impl DuckQueryResult {
     fn result_row_count(&self) -> usize {
-        let result = (&raw const self.0).cast_mut();
+        let result = (&raw const self.result).cast_mut();
         let changed = unsafe { duckdb_rows_changed(result) };
         usize::try_from(if changed == 0 {
             unsafe { duckdb_row_count(result) }
@@ -324,11 +346,126 @@ impl DuckQueryResult {
         })
         .unwrap_or(0)
     }
+
+    /// Render the materialized result in a deterministic, schema-aware, row-order-independent
+    /// text format. Duplicate rows remain distinct entries in the sorted row multiset.
+    ///
+    /// DuckDB's legacy value accessor is intentionally used only by opt-in inspection and EXPLAIN
+    /// modes. Normal benchmark execution never pays the per-cell conversion cost.
+    pub fn deterministic_display(&self) -> Result<String> {
+        use std::fmt::Write as _;
+
+        let result = (&raw const self.result).cast_mut();
+        let column_count = unsafe { duckdb_column_count(result) };
+        let row_count = unsafe { duckdb_row_count(result) };
+        let mut output = String::new();
+        writeln!(
+            output,
+            "duckdb-result-v1 columns={column_count} rows={row_count}"
+        )?;
+
+        for column in 0..column_count {
+            let name_ptr = unsafe { duckdb_column_name(result, column) };
+            if name_ptr.is_null() {
+                anyhow::bail!("DuckDB returned no name for result column {column}");
+            }
+            let name = unsafe { CStr::from_ptr(name_ptr) }
+                .to_str()
+                .with_context(|| format!("result column {column} name is not UTF-8"))?;
+
+            let mut logical_type = unsafe { duckdb_column_logical_type(result, column) };
+            if logical_type.is_null() {
+                anyhow::bail!("DuckDB returned no logical type for result column {column}");
+            }
+            let type_ptr = unsafe { duckdb_vx_logical_type_stringify(logical_type) };
+            let logical_type_result = take_duckdb_c_string(type_ptr).with_context(|| {
+                format!("failed to stringify logical type for result column {column}")
+            });
+            unsafe { duckdb_destroy_logical_type(&raw mut logical_type) };
+            let logical_type = logical_type_result?;
+
+            writeln!(
+                output,
+                "column={column} name={} logical_type={}",
+                quoted(name),
+                quoted(&logical_type)
+            )?;
+        }
+
+        let mut rows = Vec::with_capacity(usize::try_from(row_count)?);
+        for row in 0..row_count {
+            let mut encoded_row = String::new();
+            for column in 0..column_count {
+                if unsafe { duckdb_value_is_null(result, column, row) } {
+                    writeln!(encoded_row, "value={column} null")?;
+                    continue;
+                }
+                let value = take_duckdb_string(unsafe { duckdb_value_string(result, column, row) })
+                    .with_context(|| {
+                        format!("failed to read result value at row {row}, column {column}")
+                    })?;
+                writeln!(encoded_row, "value={column} text={}", quoted(&value))?;
+            }
+            rows.push(encoded_row);
+        }
+        rows.sort_unstable();
+        for (row, encoded_row) in rows.into_iter().enumerate() {
+            writeln!(output, "row={row}")?;
+            output.push_str(&encoded_row);
+        }
+
+        Ok(output)
+    }
+
+    /// Materialize and retain the deterministic display so EXPLAIN validation and display use the
+    /// exact same conversion result.
+    pub fn prepare_deterministic_display(&mut self) -> Result<&str> {
+        if self.prepared_display.is_none() {
+            self.prepared_display = Some(self.deterministic_display()?);
+        }
+        self.prepared_display
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("prepared DuckDB display is missing"))
+    }
+}
+
+fn quoted(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    escaped.extend(value.escape_default());
+    escaped.push('"');
+    escaped
+}
+
+fn take_duckdb_c_string(value: *mut c_char) -> Result<String> {
+    if value.is_null() {
+        anyhow::bail!("DuckDB returned a null string pointer");
+    }
+    let result = unsafe { CStr::from_ptr(value) }
+        .to_str()
+        .context("DuckDB returned non-UTF-8 text")
+        .map(str::to_owned);
+    unsafe { duckdb_free(value.cast()) };
+    result
+}
+
+fn take_duckdb_string(value: DuckString) -> Result<String> {
+    if value.data.is_null() {
+        anyhow::bail!("DuckDB returned a null string pointer");
+    }
+    let result = (|| {
+        let size = usize::try_from(value.size).context("DuckDB string is too large")?;
+        std::str::from_utf8(unsafe { std::slice::from_raw_parts(value.data.cast::<u8>(), size) })
+            .context("DuckDB returned non-UTF-8 text")
+            .map(str::to_owned)
+    })();
+    unsafe { duckdb_free(value.data.cast()) };
+    result
 }
 
 impl Drop for DuckQueryResult {
     fn drop(&mut self) {
-        unsafe { duckdb_destroy_result(&raw mut self.0) };
+        unsafe { duckdb_destroy_result(&raw mut self.result) };
     }
 }
 
@@ -337,7 +474,10 @@ impl BenchmarkQueryResult for DuckQueryResult {
         self.result_row_count()
     }
 
-    fn display(self) -> String {
-        format!("{} rows", self.result_row_count())
+    fn display(mut self) -> String {
+        self.prepared_display.take().unwrap_or_else(|| {
+            self.deterministic_display()
+                .unwrap_or_else(|error| format!("failed to display DuckDB result: {error:#}"))
+        })
     }
 }

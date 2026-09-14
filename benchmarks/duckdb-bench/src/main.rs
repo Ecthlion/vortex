@@ -3,6 +3,7 @@
 
 mod validation;
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -21,6 +22,7 @@ use vortex_bench::create_benchmark;
 use vortex_bench::create_output_writer;
 use vortex_bench::display::DisplayFormat;
 use vortex_bench::runner::BenchmarkMode;
+use vortex_bench::runner::BenchmarkQueryResult;
 use vortex_bench::runner::SqlBenchmarkRunner;
 use vortex_bench::runner::filter_queries;
 use vortex_bench::setup_logging_and_tracing;
@@ -101,6 +103,17 @@ struct Args {
         to keep all work on the same threads"
     )]
     reuse: bool,
+
+    /// Emit a deterministic schema and exact text representation of every materialized result.
+    /// This inspection happens after DuckDB's internally reported query duration.
+    #[arg(long, default_value_t = false)]
+    emit_results: bool,
+
+    /// Fail the process when a query fails or its result row count differs from the benchmark's
+    /// expected count. Without this flag, the common benchmark runner retains its historical
+    /// behavior of warning and dropping that measurement.
+    #[arg(long, default_value_t = false)]
+    strict: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -177,6 +190,12 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     let benchmark_name = benchmark.dataset().to_string();
+    let expected_row_counts = if args.strict {
+        benchmark.expected_row_counts()
+    } else {
+        None
+    };
+    let fatal_failure = RefCell::new(None::<String>);
     let mut duckdb_init_sql = Vec::new();
     if benchmark.data_url().scheme() == "s3" {
         duckdb_init_sql.extend(S3_HTTP_INIT_SQL.map(String::from));
@@ -219,12 +238,70 @@ fn main() -> anyhow::Result<()> {
             ]);
 
             // Make sure to reopen the duckdb connection between iterations
-            if !args.reuse {
-                ctx.reopen()?;
+            if !args.reuse
+                && let Err(error) = ctx.reopen()
+            {
+                if args.strict {
+                    record_first_failure(
+                        &fatal_failure,
+                        format!("Q{query_idx} [{format}] failed to reopen DuckDB: {error:#}"),
+                    );
+                }
+                return Err(error);
             }
-            ctx.execute_query_result(query)
+            let execution = ctx.execute_query_result(query);
+            let (timing, mut result) = match execution {
+                Ok(result) => result,
+                Err(error) => {
+                    if args.strict {
+                        record_first_failure(
+                            &fatal_failure,
+                            format!("Q{query_idx} [{format}] failed: {error:#}"),
+                        );
+                    }
+                    return Err(error);
+                }
+            };
+
+            if args.strict
+                && !args.explain
+                && let Some(expected) = expected_row_counts
+                    .as_ref()
+                    .and_then(|counts| counts.get(query_idx))
+                && result.row_count() != *expected
+            {
+                let message = format!(
+                    "Q{query_idx} [{format}] returned {} rows; expected {expected}",
+                    result.row_count()
+                );
+                record_first_failure(&fatal_failure, message.clone());
+                anyhow::bail!(message);
+            }
+
+            if args.emit_results || args.explain {
+                match result.prepare_deterministic_display() {
+                    Ok(display) if args.emit_results && !args.explain => {
+                        println!("=== Q{query_idx} [{format}] result ===");
+                        print!("{display}");
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        let kind = if args.explain { "EXPLAIN" } else { "result" };
+                        let message =
+                            format!("failed to display Q{query_idx} [{format}] {kind}: {error:#}");
+                        record_first_failure(&fatal_failure, message.clone());
+                        anyhow::bail!(message);
+                    }
+                }
+            }
+
+            Ok((timing, result))
         },
     )?;
+
+    if let Some(message) = fatal_failure.borrow_mut().take() {
+        anyhow::bail!(message);
+    }
 
     if !args.explain {
         if let Some(path) = args.ingest_output.as_ref() {
@@ -237,4 +314,11 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn record_first_failure(failure: &RefCell<Option<String>>, message: String) {
+    let mut failure = failure.borrow_mut();
+    if failure.is_none() {
+        *failure = Some(message);
+    }
 }

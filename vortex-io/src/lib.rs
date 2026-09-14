@@ -30,3 +30,18 @@ pub mod std_file;
 #[cfg(feature = "tokio")]
 mod tokio;
 mod write;
+
+/// Process-monotonic timestamp used to correlate opt-in scan diagnostics across crates.
+///
+/// Callers must invoke this only inside their diagnostics-enabled branch.
+#[doc(hidden)]
+pub fn diagnostic_timestamp_ns() -> u64 {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    u64::try_from(
+        EPOCH
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_nanos(),
+    )
+    .unwrap_or(u64::MAX)
+}

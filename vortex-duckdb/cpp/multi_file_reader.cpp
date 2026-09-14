@@ -7,6 +7,8 @@
 #include "vortex_duckdb.h"
 #include "vortex.h"
 
+#include "duckdb/parallel/task_scheduler.hpp"
+
 unique_ptr<FunctionData> VortexBindData::Copy() const {
     auto result = make_uniq<VortexBindData>();
     if (ffi_bind_data) {
@@ -157,6 +159,7 @@ VortexReaderInterface::InitializeGlobalState(ClientContext &context,
         .column_ids_count = column_ids.size(),
         .filters = reinterpret_cast<duckdb_vx_table_filter_set>(input.filters.get()),
         .client_context = reinterpret_cast<duckdb_client_context>(&context),
+        .execution_threads = NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads()),
     };
 
     duckdb_vx_error error_out = nullptr;

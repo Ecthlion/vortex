@@ -1,9 +1,15 @@
 # Push-frontier public benchmark checklist
 
-Status as of 2026-09-12. This is the authoritative completion matrix for comparing the established
-V1 scan path with the grouped-I/O push-frontier path through the public DataFusion benchmark
-integration. It records source inventory separately from execution evidence. Timing is claimed only
-for rows with a fresh, reproducible measurement artifact recorded below.
+Status as of 2026-09-14. The authoritative current production-integration handover and acceptance
+artifact are [IO_FRONTIER_HANDOVER.md](IO_FRONTIER_HANDOVER.md) and the DuckDB SF10 V1/W8 campaign
+at `/private/tmp/duckdb-thread-bridge-v1-w8-full22.ahG9bN`. That result passes the HOT all-core time
+gate and **fails the resource gate**; W8 therefore remains opt-in.
+
+The matrices below are retained historical evidence for the public DataFusion integration. Their
+checked boxes certify the recorded 2026-09-12 source, correctness, RSS, and timing artifacts only;
+they do not describe the current DuckDB path, current frontier defaults, W8 activation, or current
+working-tree acceptance. Timing is claimed only for rows with a reproducible artifact recorded
+below.
 
 Legend: `[x]` means the source inventory is present and was inspected. `[ ]` means that a fresh,
 reproducible artifact satisfying the contract below has not yet been attached. A row is complete
@@ -57,12 +63,11 @@ box.
   query. Record failures by phase: planning, scan construction/layout, execution, exact mismatch,
   memory, or timing.
 
-The common persistent opener applies selection, filter, limit, concurrency, projection, byte-range
-translation, scan-order metadata, and Arrow conversion after choosing the backend
-(`vortex-datafusion/src/persistent/opener.rs:434-615`). The root/default projection and default
-selection/filter/scan-order values are defined by the two builders
-(`vortex-layout/src/scan/scan_builder.rs:89-111` and
-`vortex-morsel-scan/src/scan_builder.rs:51-88`).
+The common persistent opener constructs the selected backend at
+`vortex-datafusion/src/persistent/opener.rs:795-851` and applies shared selection, filter, limit,
+concurrency, projection, byte-range translation, scan-order metadata, and Arrow conversion at
+`vortex-datafusion/src/persistent/opener.rs:854-997`. The morsel builder's corresponding defaults and
+options are at `vortex-morsel-scan/src/scan_builder.rs:137-183`.
 
 ## Known path/default differences
 
@@ -72,12 +77,14 @@ selection/filter/scan-order values are defined by the two builders
 | Backend identity | `VORTEX_SCAN_BACKEND=v1` | `VORTEX_SCAN_BACKEND=push-frontier` | Capture env and emitted label with every artifact. |
 | Task concurrency | Without `--threads`: builder default `4 × available_parallelism`; with `--threads N`: `N` Tokio workers and builder factor `1` | Without `--threads`: builder default `4 × available_parallelism` and one push worker; with `--threads N`: the same `N` Tokio workers, builder factor `1`, and one push worker | Record the explicit `N`, DataFusion target partitions, Tokio workers, and host parallelism; use the same command for both backends. |
 | Work unit | Layout boundaries subdivided toward 100,000 rows | Physical morsels target 128 Ki rows | Record both, or add a common experimental setting before attributing differences. |
-| I/O scheduling | Current asynchronous LayoutReader path | Grouped frontier: zero extra down lookahead, zero speculative right groups, 32-range refills | Preserve production defaults; record them. |
+| I/O scheduling | Current asynchronous LayoutReader path | At the historical matrix commit: zero extra down lookahead, zero speculative right groups, 32-range refills | Preserve the measured identity; see the current policy in the canonical handover. |
 | Pruning | V1 layout scan pruning | Push performs a fresh bounded LayoutReader zone-pruning prepass, then runs the physical plan | Include prepass cost and memory in the frontier measurement. |
 | Supported layouts | General LayoutReader path | Physical root must be a non-null struct; columns must lower through zoned/legacy-stats, flat, or recursively chunked layouts | Verify every shared file; never generate a frontier-only substitute. |
 
 Relevant source anchors are `vortex-morsel-scan/src/lib.rs:21-55`,
-`vortex-morsel-scan/src/scan_builder.rs:51-88`,
+`vortex-morsel-scan/src/scan_builder.rs:137-183`,
+`vortex-datafusion/src/persistent/opener.rs:795-851`,
+`vortex-datafusion/src/persistent/opener.rs:854-997`,
 `vortex-morsel-push/src/executor.rs:48-148`,
 `vortex-layout/src/scan/split_by.rs:16-64`, and
 `vortex-layout/src/scan/mod.rs:16-19`.
@@ -1096,12 +1103,20 @@ within-process memory growth.
 
 ## Completion gate
 
-- [ ] The public benchmark emits backend identity and immutable input-file fingerprints.
-- [x] `--threads N` reaches DataFusion target partitions and Tokio runtime workers; both scan
-  builders use a per-file factor of `1`, and push/frontier retain one executor worker per file.
-- [ ] The public correctness mode is validated on all result dtypes and all matrix queries.
-- [ ] Peak RSS is sampled or obtained as a true process high-water mark and reset per process.
-- [ ] One cache protocol is implemented, verified, and applied symmetrically.
-- [ ] FineWeb data is prepared and layout provenance recorded.
-- [ ] TPC-DS SF1 data is prepared and layout provenance recorded.
-- [ ] Every query row above is fully checked with artifact paths recorded in the commit/PR report.
+Current DuckDB production-integration status is maintained in
+[IO_FRONTIER_HANDOVER.md](IO_FRONTIER_HANDOVER.md); do not infer it by aggregating the historical
+DataFusion boxes above.
+
+- [x] A frozen DuckDB SF10 Q1-Q22 V1/W8 campaign records backend, binary/source, SQL, and immutable
+  input identities; all `176/176` measured children and all 22 V1/W8 plan pairs pass.
+- [x] DuckDB `--threads 14` reaches scan initialization through the retained thread bridge.
+- [x] The current HOT all-core time gate passes: internal equal-query geometric mean `0.876156x`,
+  CI `[0.846938,0.903788]`, with `72/88` wins.
+- [ ] The current W8 resource gate passes. It **fails**: RSS geometric mean `1.140203x`, Q8
+  `1.528545x`, and 16/88 hard child violations.
+- [ ] W8 has verified LIMIT semantics and a production name/configuration. It remains opt-in;
+  DuckDB SQL LIMIT is not yet propagated into the `MorselScan` limit checked by W8.
+- [ ] Cold-cache and remote object-store behavior are measured with the same correctness/fairness
+  contract.
+- [x] The DataFusion TPC-H, ClickBench, FineWeb, and TPC-DS matrices remain below as historical
+  evidence, with their original artifact references and caveats.

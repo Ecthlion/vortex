@@ -359,7 +359,28 @@ pub fn run_morsel(
     query: &Query,
     config: MorselConfig,
 ) -> VortexResult<RunOutcome> {
-    run_morsel_with_output(session, layout, segments, query, config, true)
+    run_morsel_with_output(session, layout, segments, query, config, true, None)
+}
+
+/// Run the morsel executor with predicate-only frontier speculation.
+#[cfg(test)]
+pub(crate) fn run_morsel_with_predicate_frontiers(
+    session: &VortexSession,
+    layout: &LayoutRef,
+    segments: &Arc<dyn SegmentSource>,
+    query: &Query,
+    config: MorselConfig,
+    frontiers: usize,
+) -> VortexResult<RunOutcome> {
+    run_morsel_with_output(
+        session,
+        layout,
+        segments,
+        query,
+        config,
+        true,
+        Some(frontiers),
+    )
 }
 
 /// Run the morsel executor while consuming output batches immediately.
@@ -370,7 +391,7 @@ pub fn run_morsel_discard(
     query: &Query,
     config: MorselConfig,
 ) -> VortexResult<RunOutcome> {
-    run_morsel_with_output(session, layout, segments, query, config, false)
+    run_morsel_with_output(session, layout, segments, query, config, false, None)
 }
 
 fn run_morsel_with_output(
@@ -380,6 +401,7 @@ fn run_morsel_with_output(
     query: &Query,
     config: MorselConfig,
     retain_output: bool,
+    predicate_frontiers: Option<usize>,
 ) -> VortexResult<RunOutcome> {
     let capture_path = std::env::var_os("VORTEX_MORSEL_IO_ORACLE_CAPTURE").map(PathBuf::from);
     let replay_path = std::env::var_os("VORTEX_MORSEL_IO_ORACLE_REPLAY").map(PathBuf::from);
@@ -420,7 +442,9 @@ fn run_morsel_with_output(
             let scan = scan
                 .with_frontier_lookahead_per_thread(frontiers)
                 .with_frontier_refill_ranges(config.frontier_refill_ranges);
-            if config.adaptive_frontiers {
+            if let Some(frontiers) = predicate_frontiers {
+                scan.with_speculative_predicate_frontiers(frontiers)
+            } else if config.adaptive_frontiers {
                 scan.with_adaptive_frontier_speculation()
             } else {
                 scan.with_speculative_frontiers(config.speculative_frontiers)

@@ -15,6 +15,11 @@ pub type SegmentFuture = BoxFuture<'static, VortexResult<BufferHandle>>;
 /// Implementations may issue asynchronous file reads, object-store requests, cache lookups, or
 /// in-memory buffer slices. Returned futures must be independent and safe to poll concurrently.
 pub trait SegmentSource: 'static + Send + Sync {
+    /// Stable identity for correlating diagnostics emitted by wrappers around this source.
+    fn diagnostic_instance_id(&self) -> Option<u64> {
+        None
+    }
+
     /// Request a segment, returning a future that will eventually resolve to the segment data.
     fn request(&self, id: SegmentId) -> SegmentFuture;
 
@@ -50,5 +55,31 @@ pub trait SegmentSource: 'static + Send + Sync {
     /// default so execution can resolve them inline without scheduler round trips.
     fn prefers_background_reads(&self) -> bool {
         false
+    }
+}
+
+impl<S: SegmentSource + ?Sized> SegmentSource for std::sync::Arc<S> {
+    fn diagnostic_instance_id(&self) -> Option<u64> {
+        self.as_ref().diagnostic_instance_id()
+    }
+
+    fn request(&self, id: SegmentId) -> SegmentFuture {
+        self.as_ref().request(id)
+    }
+
+    fn request_background(&self, id: SegmentId) -> SegmentFuture {
+        self.as_ref().request_background(id)
+    }
+
+    fn request_background_batch(&self, ids: &[SegmentId]) -> Vec<SegmentFuture> {
+        self.as_ref().request_background_batch(ids)
+    }
+
+    fn request_nowait(&self, id: SegmentId) -> VortexResult<ReadAtNowait> {
+        self.as_ref().request_nowait(id)
+    }
+
+    fn prefers_background_reads(&self) -> bool {
+        self.as_ref().prefers_background_reads()
     }
 }

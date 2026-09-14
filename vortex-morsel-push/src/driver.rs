@@ -54,6 +54,7 @@ use crate::io::IoKey;
 use crate::io::IoPlane;
 use crate::io::IoPriority;
 use crate::io::IoRead;
+use crate::io::IoRole;
 use crate::io::IoService;
 use crate::io::NowaitProbe;
 use crate::node::ActivationRows;
@@ -111,6 +112,35 @@ impl FrontierSpeculation {
     }
 }
 
+/// Internal admission policy for moving right from a visible row frontier.
+///
+/// The public policies retain their existing behavior. Production SQL scans additionally use a
+/// predicate-only policy so admitting later conjuncts cannot accidentally admit projection when a
+/// filter contains fewer groups than expected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FrontierAdmissionPolicy {
+    General(FrontierSpeculation),
+    PredicateOnly(usize),
+}
+
+impl FrontierAdmissionPolicy {
+    fn admits(self, kind: crate::IoGroupKind, group: usize, projection_likely: bool) -> bool {
+        match self {
+            Self::General(speculation) => speculation.admits(kind, group, projection_likely),
+            Self::PredicateOnly(right) => kind == crate::IoGroupKind::Conjunct && group <= right,
+        }
+    }
+
+    fn right_limit(self) -> Option<usize> {
+        match self {
+            Self::General(FrontierSpeculation::Bounded(right)) | Self::PredicateOnly(right) => {
+                Some(right)
+            }
+            Self::General(FrontierSpeculation::Adaptive) => None,
+        }
+    }
+}
+
 const ADAPTIVE_PROJECTION_MIN_MORSELS: usize = 8;
 
 fn projection_is_likely(completed: usize, non_empty: usize) -> bool {
@@ -136,7 +166,7 @@ pub struct MorselScan {
     lookahead_morsels: usize,
     resident_morsels_per_thread: usize,
     frontier_lookahead_per_thread: Option<usize>,
-    frontier_speculation: FrontierSpeculation,
+    frontier_admission: FrontierAdmissionPolicy,
     frontier_refill_ranges: usize,
     output_rows: usize,
     output_bytes: u64,
@@ -269,7 +299,7 @@ struct WorkerRun {
     lookahead_morsels: usize,
     resident_morsels_per_thread: usize,
     frontier_lookahead_per_thread: Option<usize>,
-    frontier_speculation: FrontierSpeculation,
+    frontier_admission: FrontierAdmissionPolicy,
     frontier_refill_ranges: usize,
     output_rows: usize,
     output_bytes: u64,
@@ -1429,6 +1459,52 @@ fn observe_prebound_demand(
     }
 }
 
+/// Collect every selected read named by a projection activation, independently of whether that
+/// read is still unissued. This is diagnostics-only scratch: it lives for one gate call and is
+/// bounded by the projection sources and segment uses overlapping the active row coverage.
+fn collect_selected_projection_reads(
+    coverage: &Range<u64>,
+    selection: &vortex_mask::Mask,
+    source_nodes: &[NodeId],
+    pending: &[Option<PendingPushSource>],
+    sources: &[Option<Arc<[BoundDemandIo]>>],
+) -> Vec<IoRead> {
+    let mut seen = Vec::new();
+    let mut reads = Vec::new();
+    for &node in source_nodes {
+        let source = pending
+            .get(node as usize)
+            .and_then(Option::as_ref)
+            .and_then(|source| source.demand_io.as_ref())
+            .or_else(|| sources.get(node as usize).and_then(Option::as_ref));
+        let Some(segments) = source else {
+            continue;
+        };
+        let first = segments.partition_point(|segment| segment.source_range.end <= coverage.start);
+        let end = segments.partition_point(|segment| segment.source_range.start < coverage.end);
+        for segment in &segments[first..end.max(first)] {
+            let start = coverage.start.max(segment.source_range.start);
+            let end = coverage.end.min(segment.source_range.end);
+            let (Ok(start), Ok(end)) = (
+                usize::try_from(start.saturating_sub(coverage.start)),
+                usize::try_from(end.saturating_sub(coverage.start)),
+            ) else {
+                continue;
+            };
+            if start >= end || selection.count_range(start, end) == 0 {
+                continue;
+            }
+            for read in &segment.work.reads {
+                if !seen.contains(&read.key()) {
+                    seen.push(read.key());
+                    reads.push(read.clone());
+                }
+            }
+        }
+    }
+    reads
+}
+
 #[derive(Default)]
 struct SourceActivationScratch {
     parts: Vec<Vec<(Range<u64>, ActivationRows)>>,
@@ -1740,6 +1816,17 @@ impl PushHost<'_> {
                     .iter()
                     .map(|&index| scheduler.run.plan.sources()[index].node),
             );
+        }
+        if target == DemandTarget::Projection && scheduler.run.io.diagnostics_enabled() {
+            for read in collect_selected_projection_reads(
+                &coverage,
+                &selection,
+                &self.control.source_nodes,
+                &self.control.projection_sources,
+                &self.control.demand_sources,
+            ) {
+                scheduler.run.io.mark_projection_need(&read);
+            }
         }
         observe_prebound_demand(
             stats,
@@ -2394,7 +2481,7 @@ impl Scheduler {
         }
         if self.run.frontier_lookahead_per_thread.is_some() && self.run.plan.has_filter() {
             let mut batches = Vec::<Vec<IoRead>>::new();
-            let speculation = self.run.frontier_speculation;
+            let admission = self.run.frontier_admission;
             let projection_likely = self.projection_likely();
             // `MorselScan` receives ranges after the executor's pruning prelude, so its first
             // runnable group is the first conjunct (or projection for an unfiltered scan).
@@ -2409,7 +2496,7 @@ impl Scheduler {
                 };
                 let mut group = 0;
                 loop {
-                    if matches!(speculation, FrontierSpeculation::Bounded(right) if group > right) {
+                    if admission.right_limit().is_some_and(|right| group > right) {
                         break;
                     }
                     let mut admitted = None;
@@ -2422,11 +2509,11 @@ impl Scheduler {
                             }
                         };
                         let admit = *admitted.get_or_insert_with(|| {
-                            speculation.admits(batch.kind(), group, projection_likely)
+                            admission.admits(batch.kind(), group, projection_likely)
                         });
                         debug_assert_eq!(
                             admit,
-                            speculation.admits(batch.kind(), group, projection_likely),
+                            admission.admits(batch.kind(), group, projection_likely),
                             "one frontier group changed kind between bounded pieces"
                         );
                         if !admit {
@@ -2435,10 +2522,15 @@ impl Scheduler {
                         if batches.len() == group {
                             batches.push(Vec::new());
                         }
-                        let reads = self
-                            .run
-                            .io
-                            .register_reads(batch.io().iter().copied(), IoPriority::Speculative);
+                        let role = match batch.kind() {
+                            crate::IoGroupKind::Conjunct => IoRole::Predicate,
+                            crate::IoGroupKind::Projection => IoRole::Projection,
+                            crate::IoGroupKind::Pruning => IoRole::Other,
+                        };
+                        let reads = self.run.io.register_reads(
+                            batch.io().iter().copied().map(|key| (key, role)),
+                            IoPriority::Speculative,
+                        );
                         batches[group].extend(reads);
                         if batch.is_complete() {
                             break;
@@ -2473,7 +2565,7 @@ impl Scheduler {
 
     fn submit_catalog_lookahead_slice(self: &Arc<Self>, start: usize, end: usize) {
         let filtered = self.run.plan.has_filter();
-        let mut admission: HashMap<IoKey, bool> = HashMap::default();
+        let mut admission: HashMap<IoKey, (bool, IoRole)> = HashMap::default();
         let mut source_indices = Vec::new();
         // An unfiltered scan knows every read is required. Collect one bounded refill wave before
         // submitting so the storage driver can coalesce across row-range boundaries without
@@ -2511,20 +2603,29 @@ impl Scheduler {
                                 ..
                             }
                         );
+                    let role = match role {
+                        SourceRole::Projection => IoRole::Projection,
+                        SourceRole::Predicate { .. } => IoRole::Predicate,
+                    };
                     admission
                         .entry(key)
-                        .and_modify(|admitted| *admitted |= eager)
-                        .or_insert(eager);
+                        .and_modify(|(admitted, existing_role)| {
+                            *admitted |= eager;
+                            *existing_role = existing_role.merge(role);
+                        })
+                        .or_insert((eager, role));
                 }
             }
-            let mut reads = self
-                .run
-                .io
-                .register_reads(admission.keys().copied(), priority);
+            let mut reads = self.run.io.register_reads(
+                admission.iter().map(|(&key, &(_, role))| (key, role)),
+                priority,
+            );
             self.run.io.sort_reads(&mut reads);
-            let (eager, deferred): (Vec<_>, Vec<_>) = reads
-                .into_iter()
-                .partition(|read| admission.get(&read.key()).copied().unwrap_or(false));
+            let (eager, deferred): (Vec<_>, Vec<_>) = reads.into_iter().partition(|read| {
+                admission
+                    .get(&read.key())
+                    .is_some_and(|(admitted, _)| *admitted)
+            });
             if let Some(reads) = unfiltered_reads.as_mut() {
                 reads.extend(eager);
                 unfiltered_ranges += 1;
@@ -3417,6 +3518,13 @@ impl<'a> LocalMorsel<'a> {
                         });
                     continue;
                 }
+                if source.role == SourceRole::Projection {
+                    for (_, key, ..) in plan.source_io_uses_at(source_index, self.range.clone()) {
+                        if let Some(read) = scheduler.run.io.read_key(key) {
+                            scheduler.run.io.mark_projection_need(&read);
+                        }
+                    }
+                }
                 let selection = ActivationRows::selected(vortex_mask::Mask::new_true(rows));
                 let runtime = self
                     .physical
@@ -3491,6 +3599,17 @@ impl<'a> LocalMorsel<'a> {
                 .iter()
                 .map(|&index| scheduler.run.plan.sources()[index].node),
         );
+        if target == DemandTarget::Projection && scheduler.run.io.diagnostics_enabled() {
+            for read in collect_selected_projection_reads(
+                &coverage,
+                &selection,
+                &self.push_control.source_nodes,
+                &self.push_control.projection_sources,
+                &self.push_control.demand_sources,
+            ) {
+                scheduler.run.io.mark_projection_need(&read);
+            }
+        }
         observe_prebound_demand(
             &mut self.stats,
             coverage,
@@ -3787,10 +3906,31 @@ impl MorselScan {
         morsels: Vec<Range<u64>>,
     ) -> Self {
         let (io, demand) = IoService::new();
+        Self::new_with_io_parts(plan, session, morsels, io, Some(demand), true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_diagnostics(
+        plan: Arc<ExecPlan>,
+        session: VortexSession,
+        morsels: Vec<Range<u64>>,
+    ) -> Self {
+        let (io, demand) = IoService::new_with_diagnostics(true);
+        Self::new_with_io_parts(plan, session, morsels, io, Some(demand), true)
+    }
+
+    fn new_with_io_parts(
+        plan: Arc<ExecPlan>,
+        session: VortexSession,
+        morsels: Vec<Range<u64>>,
+        io: Arc<IoService>,
+        demand: Option<IoDemandStream>,
+        shutdown_io_on_drop: bool,
+    ) -> Self {
         Self {
             plan,
             io,
-            demand: Mutex::new(Some(demand)),
+            demand: Mutex::new(demand),
             session,
             morsels: Arc::from(morsels),
             threads: 1,
@@ -3798,7 +3938,7 @@ impl MorselScan {
             lookahead_morsels: 0,
             resident_morsels_per_thread: 1,
             frontier_lookahead_per_thread: None,
-            frontier_speculation: FrontierSpeculation::Adaptive,
+            frontier_admission: FrontierAdmissionPolicy::General(FrontierSpeculation::Adaptive),
             frontier_refill_ranges: 32,
             output_rows: usize::MAX,
             output_bytes: u64::MAX,
@@ -3810,7 +3950,7 @@ impl MorselScan {
             external_driver: None,
             cancellation: None,
             io_driver: Mutex::new(None),
-            shutdown_io_on_drop: true,
+            shutdown_io_on_drop,
         }
     }
 
@@ -3921,6 +4061,10 @@ impl MorselScan {
         Ok((demand, self.io.completions()))
     }
 
+    pub(crate) fn link_io_source(&self, source_id: Option<u64>) {
+        self.io.link_source(source_id);
+    }
+
     /// Let execution resolve a read inline when `probe` can prove the bytes are available
     /// without waiting on storage.
     pub fn with_nowait_probe(self, probe: NowaitProbe) -> Self {
@@ -3956,14 +4100,13 @@ impl MorselScan {
     }
 
     /// Share one I/O service, and therefore one demand stream, across several scans.
-    ///
-    /// Call this before `with_nowait_probe` or `with_background_reads`: it replaces the service
-    /// those methods configure, and the scan's own demand stream is discarded.
-    pub(crate) fn with_io_service(mut self, io: Arc<IoService>) -> Self {
-        self.io = io;
-        self.demand = Mutex::new(None);
-        self.shutdown_io_on_drop = false;
-        self
+    pub(crate) fn new_with_shared_io(
+        plan: Arc<ExecPlan>,
+        session: VortexSession,
+        morsels: Vec<Range<u64>>,
+        io: Arc<IoService>,
+    ) -> Self {
+        Self::new_with_io_parts(plan, session, morsels, io, None, false)
     }
 
     pub(crate) fn with_io_driver(self, driver: JoinHandle<()>) -> Self {
@@ -4001,7 +4144,18 @@ impl MorselScan {
     /// separate ordered I/O batch, and a later correctness-bearing gate promotes the same cells
     /// instead of submitting them again.
     pub fn with_speculative_frontiers(mut self, frontiers: usize) -> Self {
-        self.frontier_speculation = FrontierSpeculation::Bounded(frontiers);
+        self.frontier_admission =
+            FrontierAdmissionPolicy::General(FrontierSpeculation::Bounded(frontiers));
+        self
+    }
+
+    /// Speculatively admit at most this many later conjunct groups for every visible range.
+    ///
+    /// Projection and pruning groups are never admitted by this policy, even when their ordinal
+    /// falls inside the bound. A later correctness-bearing gate starts projection with its exact
+    /// selected coverage.
+    pub(crate) fn with_speculative_predicate_frontiers(mut self, frontiers: usize) -> Self {
+        self.frontier_admission = FrontierAdmissionPolicy::PredicateOnly(frontiers);
         self
     }
 
@@ -4011,7 +4165,7 @@ impl MorselScan {
     /// quarters of them produced output. This keeps sparse scans demand-driven while allowing
     /// dense scans to coalesce projection with their predicate I/O.
     pub fn with_adaptive_frontier_speculation(mut self) -> Self {
-        self.frontier_speculation = FrontierSpeculation::Adaptive;
+        self.frontier_admission = FrontierAdmissionPolicy::General(FrontierSpeculation::Adaptive);
         self
     }
 
@@ -4107,7 +4261,7 @@ impl MorselScan {
             lookahead_morsels: self.lookahead_morsels,
             resident_morsels_per_thread: self.resident_morsels_per_thread,
             frontier_lookahead_per_thread: self.frontier_lookahead_per_thread,
-            frontier_speculation: self.frontier_speculation,
+            frontier_admission: self.frontier_admission,
             frontier_refill_ranges: self.frontier_refill_ranges,
             output_rows: self.output_rows,
             output_bytes: self.output_bytes,
@@ -4259,7 +4413,7 @@ impl MorselScan {
             lookahead_morsels: self.lookahead_morsels,
             resident_morsels_per_thread: self.resident_morsels_per_thread,
             frontier_lookahead_per_thread: self.frontier_lookahead_per_thread,
-            frontier_speculation: self.frontier_speculation,
+            frontier_admission: self.frontier_admission,
             frontier_refill_ranges: self.frontier_refill_ranges,
             output_rows: self.output_rows,
             output_bytes: self.output_bytes,
@@ -4351,6 +4505,7 @@ mod tests {
     use super::BoundDemandIo;
     use super::DemandIoAction;
     use super::DemandObservationScratch;
+    use super::FrontierAdmissionPolicy;
     use super::FrontierSpeculation;
     use super::GateTrace;
     use super::IoWork;
@@ -4376,6 +4531,7 @@ mod tests {
     use super::assignment_lookahead_target;
     use super::claim_lookahead_extension;
     use super::claim_lookahead_refill;
+    use super::collect_selected_projection_reads;
     use super::current_pipeline_wait;
     use super::frontier_refill_target;
     use super::observe_prebound_demand;
@@ -4393,6 +4549,8 @@ mod tests {
     use crate::io::IoKey;
     use crate::io::IoPlane;
     use crate::io::IoPriority;
+    use crate::io::IoRead;
+    use crate::io::IoRole;
     use crate::io::IoService;
     use crate::node::ActivationRows;
     use crate::node::ActivationTarget;
@@ -4429,7 +4587,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_frontier_policy_follows_conjuncts_and_guards_projection() {
+    fn frontier_admission_policies_bound_groups_and_guard_projection() {
         let adaptive = FrontierSpeculation::Adaptive;
         assert!(adaptive.admits(IoGroupKind::Conjunct, 0, false));
         assert!(adaptive.admits(IoGroupKind::Conjunct, 17, false));
@@ -4440,6 +4598,17 @@ mod tests {
         let bounded = FrontierSpeculation::Bounded(2);
         assert!(bounded.admits(IoGroupKind::Projection, 2, false));
         assert!(!bounded.admits(IoGroupKind::Conjunct, 3, true));
+
+        let predicate_only = FrontierAdmissionPolicy::PredicateOnly(2);
+        assert!(predicate_only.admits(IoGroupKind::Conjunct, 0, false));
+        assert!(predicate_only.admits(IoGroupKind::Conjunct, 1, false));
+        assert!(predicate_only.admits(IoGroupKind::Conjunct, 2, false));
+        assert!(!predicate_only.admits(IoGroupKind::Conjunct, 3, false));
+        assert!(!predicate_only.admits(IoGroupKind::Projection, 0, false));
+        assert!(!predicate_only.admits(IoGroupKind::Projection, 1, true));
+        assert!(!predicate_only.admits(IoGroupKind::Projection, 2, true));
+        assert!(!predicate_only.admits(IoGroupKind::Pruning, 0, true));
+        assert_eq!(predicate_only.right_limit(), Some(2));
 
         assert!(!projection_is_likely(7, 7));
         assert!(projection_is_likely(8, 6));
@@ -5247,7 +5416,7 @@ mod tests {
 
     fn unissued_test_work(service: &Arc<IoService>, segment: u32) -> VortexResult<IoWork> {
         let mut reads = service.register_reads(
-            [IoKey::Segment(SegmentId::from(segment))],
+            [(IoKey::Segment(SegmentId::from(segment)), IoRole::Other)],
             IoPriority::Speculative,
         );
         let read = reads
@@ -5354,6 +5523,79 @@ mod tests {
                 .all(|request| request.priority == IoPriority::Required)
         );
         assert!(demand.try_recv().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn projection_collection_includes_ready_and_speculative_reads_and_deduplicates()
+    -> VortexResult<()> {
+        let (service, _demand) = IoService::new_with_diagnostics(true);
+        let ready_key = IoKey::Segment(SegmentId::from(31));
+        service.add_leases(&[(ready_key, 1)].into_iter().collect());
+        let ready =
+            service.register_reads([(ready_key, IoRole::Predicate)], IoPriority::Speculative);
+        assert_eq!(service.start(&ready), 1);
+        assert!(service.completions().complete(
+            ready_key,
+            Ok(vortex_array::buffer::BufferHandle::new_host(
+                vortex_buffer::ByteBuffer::from(vec![1]),
+            )),
+        ));
+        assert!(
+            service
+                .register_reads([(ready_key, IoRole::Projection)], IoPriority::Speculative)
+                .is_empty()
+        );
+        let ready = service
+            .read_key(ready_key)
+            .ok_or_else(|| vortex_err!("ready shared read disappeared"))?;
+
+        let speculative_key = IoKey::Segment(SegmentId::from(32));
+        service.add_leases(&[(speculative_key, 1)].into_iter().collect());
+        let speculative = service.register_reads(
+            [(speculative_key, IoRole::Projection)],
+            IoPriority::Speculative,
+        );
+        assert_eq!(service.start(&speculative), 1);
+
+        let ready_work = Arc::new(IoWork {
+            required: AtomicBool::new(true),
+            reads: vec![ready],
+        });
+        let speculative_work = Arc::new(IoWork {
+            required: AtomicBool::new(false),
+            reads: speculative,
+        });
+        let bindings: Arc<[BoundDemandIo]> = Arc::from([
+            BoundDemandIo {
+                key: ready_key,
+                source_range: 0..2,
+                work: Arc::clone(&ready_work),
+            },
+            BoundDemandIo {
+                key: speculative_key,
+                source_range: 2..4,
+                work: speculative_work,
+            },
+        ]);
+        let sources = vec![Some(Arc::clone(&bindings)), Some(bindings)];
+        let collected = collect_selected_projection_reads(
+            &(0..4),
+            &vortex_mask::Mask::new_true(4),
+            &[0, 1],
+            &[None, None],
+            &sources,
+        );
+
+        assert_eq!(
+            collected.iter().map(IoRead::key).collect::<Vec<_>>(),
+            [ready_key, speculative_key]
+        );
+        assert!(collected.iter().all(|read| !read.is_unissued()));
+        for read in &collected {
+            service.mark_projection_need(read);
+            service.mark_projection_need(read);
+        }
         Ok(())
     }
 

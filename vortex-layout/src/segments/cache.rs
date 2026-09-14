@@ -147,6 +147,10 @@ impl SegmentCacheSourceAdapter {
 }
 
 impl SegmentSource for SegmentCacheSourceAdapter {
+    fn diagnostic_instance_id(&self) -> Option<u64> {
+        self.source.diagnostic_instance_id()
+    }
+
     fn request(&self, id: SegmentId) -> SegmentFuture {
         self.request_with(id, self.source.request(id))
     }
@@ -191,5 +195,32 @@ impl SegmentCacheSourceAdapter {
             Ok(result)
         }
         .boxed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::FutureExt;
+    use vortex_error::VortexResult;
+
+    use super::*;
+
+    struct IdentifiedSource;
+
+    impl SegmentSource for IdentifiedSource {
+        fn diagnostic_instance_id(&self) -> Option<u64> {
+            Some(52)
+        }
+
+        fn request(&self, _id: SegmentId) -> SegmentFuture {
+            futures::future::pending::<VortexResult<BufferHandle>>().boxed()
+        }
+    }
+
+    #[test]
+    fn cache_adapter_forwards_diagnostic_identity() {
+        let source =
+            SegmentCacheSourceAdapter::new(Arc::new(NoOpSegmentCache), Arc::new(IdentifiedSource));
+        assert_eq!(source.diagnostic_instance_id(), Some(52));
     }
 }
