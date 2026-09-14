@@ -97,8 +97,9 @@ function(_vortex_resolve_ffi_package
         set(_archive_name "libvortex_cuda_ffi.a")
         set(_manifest "${workspace_root}/vortex-cuda/ffi/Cargo.toml")
         list(APPEND _headers "${workspace_root}/vortex-cuda/ffi/cinclude/vortex_cuda.h")
-        # CMake's FindCUDAToolkit module sets these after find_package succeeds.
-        set(_nvcc "${CUDAToolkit_NVCC_EXECUTABLE}")
+        # NVCC locates its configuration and includes relative to its invocation path.
+        # Resolve toolkit symlinks without changing the CUDA target root.
+        file(REAL_PATH "${CUDAToolkit_NVCC_EXECUTABLE}" _nvcc)
         set(_cuda_root "${CUDAToolkit_TARGET_DIR}")
     endif()
 

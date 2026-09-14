@@ -3,6 +3,7 @@
 
 """Exercise CUDA policy and Cargo forwarding without a CUDA toolkit."""
 
+import shutil
 import unittest
 from pathlib import Path
 
@@ -54,9 +55,15 @@ class CudaArchitectureTests(CMakeTest):
                 else:
                     self.assertEqual((self.work / "flags.txt").read_text(encoding="utf-8"), expected)
 
-    def cuda_fixture(self) -> tuple[Path, Path]:
+    def cuda_fixture(self, *, symlink_nvcc: bool = False) -> tuple[Path, Path]:
         cuda_root = self.work / "fake CUDA toolkit's"
         nvcc = self.executable("fake CUDA toolkit's/bin/nvcc", "raise SystemExit('No native compilation expected')\n")
+        if symlink_nvcc:
+            cuda_root /= "targets/sbsa-linux"
+            target_nvcc = cuda_root / "bin/nvcc"
+            target_nvcc.parent.mkdir(parents=True)
+            target_nvcc.symlink_to("../../../bin/nvcc")
+            nvcc = str(target_nvcc)
         # Stub discovery only; production Configure.cmake and its Cargo driver run unchanged.
         self.write(
             "source/FindCUDAToolkit.cmake",
@@ -130,6 +137,16 @@ class CudaArchitectureTests(CMakeTest):
                 self.assertEqual(args[args.index("--package") + 1], "vortex-cuda-ffi" if cuda == "ON" else "vortex-ffi")
                 self.assertEqual(forwarded.get("VORTEX_CUDA_ARCH_FLAGS"), expected)
                 self.assertEqual(forwarded.get("CUDA_PATH"), str(cuda_root) if cuda == "ON" else None)
+
+    def test_configure_resolves_nvcc_symlink_and_preserves_cuda_root(self) -> None:
+        source, cuda_root = self.cuda_fixture(symlink_nvcc=True)
+        build = self.work / "symlink-nvcc"
+        self.cmake_configure(source, build, "-DVORTEX_ENABLE_CUDA=ON")
+        self.cmake_build(build, "--target", "vortex_ffi_cargo_build")
+        forwarded = self.cargo_recording(build / "cargo-target")["env"]
+        self.assertEqual(forwarded["CUDA_PATH"], str(cuda_root))
+        # Compare the invocation path: resolving the lookup result would hide the bug.
+        self.assertEqual(shutil.which("nvcc", path=forwarded["PATH"]), str((cuda_root / "bin/nvcc").resolve()))
 
     def test_host_compiler_forwarding_and_fallback(self) -> None:
         source, _ = self.cuda_fixture()

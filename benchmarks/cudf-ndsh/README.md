@@ -67,7 +67,8 @@ applies `upstream.patch`, and builds Release cuDF, CUDA-enabled Vortex, the smok
 tests and all five query executables. It uses the original generator.
 
 Start in a working **Linux cuDF development environment** with an NVIDIA CUDA toolkit
-**12.8 or newer**, a compatible host compiler/driver, CMake 4+, Ninja, Python 3.11+,
+**12.8 or newer** including profiler headers (`cuda-profiler-api` in conda), a compatible
+host compiler/driver, CMake 4+, Ninja, Python 3.11+,
 Git and curl. Vortex also requires libclang and Rustup with the toolchain in
 [`rust-toolchain.toml`](../../rust-toolchain.toml). See
 [Validation](VALIDATION.md#current-build-status) for current compatibility evidence.
