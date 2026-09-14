@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-use vortex_buffer::BitBuffer;
-use vortex_buffer::BufferAllocatorRef;
-use vortex_buffer::BufferMut;
-use vortex_compute::lane_kernels::IndexedSourceExt;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 use vortex_session::VortexSession;
@@ -18,7 +14,6 @@ use crate::arrays::ConstantArray;
 use crate::arrays::PrimitiveArray;
 use crate::arrays::ScalarFnArray;
 use crate::dtype::DType;
-use crate::dtype::NativePType;
 use crate::dtype::Nullability;
 use crate::match_each_float_ptype;
 use crate::scalar::Scalar;
@@ -29,6 +24,7 @@ use crate::scalar_fn::ExecutionArgs;
 use crate::scalar_fn::ScalarFnId;
 use crate::scalar_fn::ScalarFnVTable;
 use crate::scalar_fn::ScalarFnVTableExt;
+use crate::scalar_fn::fns::binary::collect_bits;
 
 /// Expression that checks for IEEE 754 NaN values.
 ///
@@ -114,7 +110,11 @@ impl ScalarFnVTable for IsNan {
         // never read.
         let validity = primitive.as_ref().validity()?;
         let bits = match_each_float_ptype!(primitive.ptype(), |F| {
-            collect_nan_bits(primitive.as_slice::<F>(), ctx.allocator())
+            collect_bits(
+                primitive.as_slice::<F>(),
+                |value| value.is_nan(),
+                ctx.allocator(),
+            )
         });
         Ok(BoolArray::new(bits, validity).into_array())
     }
@@ -126,16 +126,6 @@ impl ScalarFnVTable for IsNan {
     fn is_infallible(&self, _instance: &Self::Options) -> bool {
         true
     }
-}
-
-/// Bit-pack `is_nan` over a float slice.
-fn collect_nan_bits<T: NativePType>(values: &[T], allocator: &BufferAllocatorRef) -> BitBuffer {
-    let len = values.len();
-    let mut words = BufferMut::<u64>::zeroed_in(len.div_ceil(64), allocator.clone());
-    values.map_bits_into(words.as_mut_slice(), |value| value.is_nan());
-    let mut bytes = words.into_byte_buffer();
-    bytes.truncate(len.div_ceil(8));
-    BitBuffer::new(bytes.freeze(), len)
 }
 
 #[cfg(test)]
@@ -156,6 +146,7 @@ mod tests {
     use crate::dtype::Nullability;
     use crate::dtype::PType;
     use crate::dtype::StructFields;
+    use crate::expr::Expression;
     use crate::expr::col;
     use crate::expr::eq;
     use crate::expr::is_nan;
@@ -163,6 +154,9 @@ mod tests {
     use crate::expr::not;
     use crate::expr::or;
     use crate::expr::root;
+    use crate::scalar_fn::EmptyOptions;
+    use crate::scalar_fn::ScalarFnVTableExt;
+    use crate::scalar_fn::internal::row_count::RowCount;
     use crate::stats::StatsSession;
     use crate::stats::all_non_nan;
     use crate::stats::nan_count;
@@ -181,6 +175,10 @@ mod tests {
 
     fn float_struct_dtype() -> DType {
         struct_dtype(PType::F64, Nullability::Nullable)
+    }
+
+    fn row_count() -> Expression {
+        RowCount.new_expr(EmptyOptions, [])
     }
 
     #[test]
@@ -277,6 +275,32 @@ mod tests {
         let dtype = float_struct_dtype();
         assert_eq!(
             is_nan(col("a")).bind(&dtype)?.falsify(&STATS_SESSION)?,
+            Some(or(eq(nan_count(col("a")), lit(0u64)), all_non_nan(col("a"))).bind(&dtype)?)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn not_nan_falsifies_from_the_nan_stats() -> VortexResult<()> {
+        // `not(is_nan(x))` is false on every row exactly when every row is NaN, which is what
+        // `is_nan`'s satisfier proves. Without the `not` rule this predicate had no proof at all.
+        let dtype = float_struct_dtype();
+        assert_eq!(
+            not(is_nan(col("a")))
+                .bind(&dtype)?
+                .falsify(&STATS_SESSION)?,
+            Some(eq(nan_count(col("a")), row_count()).bind(&dtype)?)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn not_nan_satisfies_where_nan_falsifies() -> VortexResult<()> {
+        let dtype = float_struct_dtype();
+        assert_eq!(
+            not(is_nan(col("a")))
+                .bind(&dtype)?
+                .satisfy(&STATS_SESSION)?,
             Some(or(eq(nan_count(col("a")), lit(0u64)), all_non_nan(col("a"))).bind(&dtype)?)
         );
         Ok(())

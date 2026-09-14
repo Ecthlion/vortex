@@ -45,6 +45,7 @@ use crate::scalar_fn::fns::like::Like;
 use crate::scalar_fn::fns::like::LikeVariant;
 use crate::scalar_fn::fns::list_contains::ListContains;
 use crate::scalar_fn::fns::literal::Literal;
+use crate::scalar_fn::fns::not::Not;
 use crate::scalar_fn::fns::operators::CompareOperator;
 use crate::scalar_fn::fns::operators::Operator;
 use crate::scalar_fn::internal::row_count::RowCount;
@@ -67,6 +68,7 @@ pub(crate) fn register_builtins(session: &StatsSession) {
     session.register_rewrite(IsNotNullAllNullStatsRewrite);
     session.register_rewrite(IsNotNullAllNonNullStatsRewrite);
     session.register_rewrite(LikeStatsRewrite);
+    session.register_rewrite(NotStatsRewrite);
     session.register_rewrite(ListContainsNanCountStatsRewrite);
     session.register_rewrite(ListContainsAllNonNanStatsRewrite);
     session.register_rewrite(DynamicComparisonNanCountStatsRewrite);
@@ -209,6 +211,36 @@ impl StatsRewriteRule for BetweenStatsRewrite {
         let lhs = binary(options.lower_strict.to_operator(), lower, arr.clone());
         let rhs = binary(options.upper_strict.to_operator(), arr, upper);
         ctx.falsify(&and(lhs, rhs))
+    }
+}
+
+/// `not` swaps the two proofs. Under Kleene logic a row where `x` is true is exactly a row where
+/// `not(x)` is false and vice versa, while a null `x` stays null, so a proof that `x` holds on
+/// every row proves `not(x)` fails on every row, and a proof that `x` fails on every row proves
+/// `not(x)` holds. Without this rule a negated predicate — `NOT IN`, `NOT NaN`, `IS NOT ...` spelled
+/// with `not` — has no stats proof at all and the scan reads every zone.
+#[derive(Debug)]
+struct NotStatsRewrite;
+
+impl StatsRewriteRule for NotStatsRewrite {
+    fn scalar_fn_id(&self) -> ScalarFnId {
+        Not.id()
+    }
+
+    fn falsify(
+        &self,
+        expr: &BoundExpression,
+        ctx: &StatsRewriteCtx<'_>,
+    ) -> VortexResult<Option<BoundExpression>> {
+        ctx.satisfy(expr.child(0))
+    }
+
+    fn satisfy(
+        &self,
+        expr: &BoundExpression,
+        ctx: &StatsRewriteCtx<'_>,
+    ) -> VortexResult<Option<BoundExpression>> {
+        ctx.falsify(expr.child(0))
     }
 }
 
