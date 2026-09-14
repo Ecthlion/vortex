@@ -40,7 +40,6 @@ use vortex::editions::EditionSessionExt;
 use vortex::error::VortexExpect;
 use vortex::error::VortexResult;
 use vortex::error::vortex_bail;
-use vortex::error::vortex_err;
 use vortex::error::vortex_panic;
 use vortex::layout::Layout;
 use vortex::layout::LayoutChildType;
@@ -577,16 +576,13 @@ pub fn register_cuda_layout(session: &VortexSession) {
                 origin: "vortex-cuda",
                 doc: "CUDA-readable layouts, enabled only when CUDA layout support is registered.",
             })
-            .map_err(|error| vortex_err!("{error}"))
             .vortex_expect("CUDA edition family is valid");
         session
             .register_edition(&CUDA_EDITION_DECLARATION)
-            .map_err(|error| vortex_err!("{error}"))
             .vortex_expect("CUDA edition declaration is valid");
     }
     session
         .enable_edition(CUDA_EDITION)
-        .map_err(|error| vortex_err!("{error}"))
         .vortex_expect("CUDA edition is registered");
 }
 
@@ -604,6 +600,7 @@ mod tests {
     use vortex::editions::CORE_2025_05_0;
     use vortex::editions::ComponentKind;
     use vortex::editions::DEFAULT_CORE_EDITION;
+    use vortex::error::vortex_err;
     use vortex::file::OpenOptionsSessionExt;
     use vortex::file::WriteOptionsSessionExt;
     use vortex::file::WriteStrategyBuilder;
@@ -661,9 +658,7 @@ mod tests {
         #[values(DEFAULT_CORE_EDITION, CORE_2025_05_0)] core: EditionId,
     ) -> VortexResult<()> {
         let session = VortexSession::default();
-        session
-            .enable_edition(core)
-            .map_err(|error| vortex_err!("{error}"))?;
+        session.enable_edition(core)?;
         let kinds = [
             ComponentKind::Array,
             ComponentKind::Layout,
@@ -697,10 +692,7 @@ mod tests {
         let mut enabled_editions = session.enabled_editions().editions();
         enabled_editions.sort_unstable();
         assert_eq!(enabled_editions, expected_editions);
-        session
-            .editions()
-            .validate()
-            .map_err(|error| vortex_err!("{error}"))?;
+        session.editions().validate()?;
         assert!(
             !VortexSession::default()
                 .enabled_component_ids(ComponentKind::Layout)
