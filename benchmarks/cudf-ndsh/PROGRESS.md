@@ -11,19 +11,20 @@ GPU decompression, and independent correctness checks. The README defines the
 [dataset choices](README.md#dataset-and-correctness), and
 [tracked Release build/run recipe](README.md#build-from-a-clean-checkout).
 
-**The clean recipe and current-source runtime measurements are not yet validated.**
-[Validation](VALIDATION.md) records compiler limitations and historical build/runtime
-evidence, not current baselines. The ≥2× goal for reads and queries at SF1/SF10,
-warm/cold, remains open.
+**Release SF1 is validated at `91142e2c18`: all 56 warm/cold read/query states pass,**
+along with smoke and 15 adapter tests, using CUDA 13.0.88 / GCC 14.3.0 on GH200.
+Vortex is faster in all 28 format pairs; 24 reach 2×. Warm Q1/Q5 queries and Q6
+read/query remain below 2×. The original generator produces empty Q6/Q10 results;
+those full-query timings are not representative of nonempty queries.
+[Validation](VALIDATION.md) records timings, variability, and build provenance.
+Current SF10 measurements and memcheck remain pending.
 
 ## Next steps
 
-1. Build the tracked recipe from a clean committed checkout, then run adapter and
-   query correctness/memcheck validation.
-2. Collect fresh SF1, then SF10 warm/cold read/query baselines.
-   Run GPU benchmarks sequentially and report generator choice and match counts.
-   The original generator can yield degenerate Q6/Q10 results and low-SF supplier
-   joins; use nondegenerate results for full-query performance claims.
+1. Run current-source memcheck validation when requested.
+2. Collect SF10 warm/cold read/query baselines. Run GPU benchmarks sequentially and
+   report generator choice and match counts. Use nondegenerate results for full-query
+   performance claims; collect generator-fixed comparisons separately if selected.
 3. Profile full reads and queries using the
    [profiling safety guard](VALIDATION.md#profile-evidence-and-safety), then optimize
    the measured bottlenecks. Scale to SF100 once matrices are stable, with separate
@@ -43,5 +44,7 @@ warm/cold, remains open.
   `build/cudf-ndsh-build`, whose dependencies have advanced and whose objects are
   mixed-era. Historical isolated-build artifacts remain under
   `build/cudf-ndsh-sf1-rebased/`; they are not inputs to the new recipe.
+- Current SF1 artifacts: `build/cudf-ndsh-repro-cuda130-release-v2/results/20260914T173000.589488Z/`.
+  The recorded build/run revision is `91142e2c18`; `run` requires that clean revision.
 - Benchmark JSON, logs, binaries, Nsight reports, and SQLite exports are ignored.
   Old profiles contain sensitive environment metadata; follow the profiling safety guard.

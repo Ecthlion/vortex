@@ -18,8 +18,9 @@ Native Parquet-pushdown/output benchmarks remain separate.
 - [`vortex.cmake`](vortex.cmake) builds the harness and Vortex library from the same
   checkout. [`tests/`](tests/) contains the adapter and build-smoke executables.
 
-Current-source build/runtime validation and performance measurements are pending;
-see [Validation](VALIDATION.md) and [Progress](PROGRESS.md).
+**Release SF1 passes at `91142e2c18`** on GH200 with CUDA 13.0.88 and GCC 14.3.0:
+all seven executables built, smoke and 15 adapter checks passed, and all 56 benchmark
+states passed. See [Validation](VALIDATION.md) for timings, provenance, and limitations.
 
 ## I/O and timing contract
 
@@ -66,12 +67,18 @@ collect separately labeled baselines.
 applies `upstream.patch`, and builds Release cuDF, CUDA-enabled Vortex, the smoke/adapter
 tests and all five query executables. It uses the original generator.
 
-Start in a working **Linux cuDF development environment** with an NVIDIA CUDA toolkit
-**12.8 or newer** including profiler headers (`cuda-profiler-api` in conda), a compatible
-host compiler/driver, CMake 4+, Ninja, Python 3.11+,
-Git and curl. Vortex also requires libclang and Rustup with the toolchain in
-[`rust-toolchain.toml`](../../rust-toolchain.toml). See
-[Validation](VALIDATION.md#current-build-status) for current compatibility evidence.
+Start in a working **Linux cuDF development environment** with a **full CUDA SDK**,
+a compatible host compiler/driver, CMake 4+, Ninja, Python 3.11+, Git and curl.
+The SDK must include runtime/development libraries and headers for **CUDART, NVRTC,
+cuRAND, nvJitLink and cuFile**, plus **NVTX and profiler development headers**
+(`cuda-nvtx-dev` and `cuda-profiler-api` in conda); an NVCC-only installation is
+insufficient. Vortex also requires libclang and Rustup with the toolchain in
+[`rust-toolchain.toml`](../../rust-toolchain.toml).
+
+The validated configuration is **NVCC 13.0.88 / GCC 14.3.0**, with GH200 driver
+595.71.05. The recipe accepts CUDA 12.8+, but the tested 12.8 and 13.1 compilers fail
+in cuDF; see [compatibility evidence](VALIDATION.md#current-build-status). Select your
+installed toolkit with the standard CMake settings below.
 
 From the Vortex root, with source changes committed; this example selects Hopper:
 
@@ -84,8 +91,8 @@ python3 benchmarks/cudf-ndsh/reproduce.py run --scale-factor 1
 
 The runner preserves build settings such as `CC`, `CXX`, `CUDACXX`, `CUDAHOSTCXX`,
 `CMAKE_PREFIX_PATH` and `LIBCLANG_PATH`. Additional CMake definitions can be passed
-with repeated `--cmake-arg=-DNAME=VALUE`, including `CMAKE_CUDA_COMPILER` and
-`CMAKE_CUDA_HOST_COMPILER`. The runner selects this checkout through
+with repeated `--cmake-arg=-DNAME=VALUE`, including `CMAKE_CUDA_COMPILER`,
+`CMAKE_CUDA_HOST_COMPILER` and `CUDAToolkit_ROOT`. The runner selects this checkout through
 `FETCHCONTENT_SOURCE_DIR_VORTEX`; direct cuDF CMake users set that path alongside
 `CUDF_NDSH_WITH_VORTEX=ON`. Use absolute paths for file-valued definitions. Vortex's
 CMake-to-Cargo bridge forwards the selected toolkit, architectures and explicit CUDA
@@ -119,8 +126,9 @@ Commands, selected environment and tool versions go under `<work-dir>/logs/`;
 benchmark JSON and build provenance go under `<work-dir>/results/`. Temporary fixtures
 use `<work-dir>/tmp/`, on the chosen filesystem. Missing, skipped or untimed states fail
 the run. Build artifacts and results are ignored; the harness sources, cuDF patch,
-recipe and dependency lock are versioned. **The clean recipe has not yet been
-executed end to end**; recorded build evidence is in [Validation](VALIDATION.md).
+recipe and dependency lock are versioned. The latest command, CPU-wall timings,
+sampling caveats, and historical evidence are in
+[Validation](VALIDATION.md#current-release-sf1-run).
 
 Prefix profiler launches with `env -u ANTHROPIC_API_KEY` and follow the
 [profile metadata safety rules](VALIDATION.md#profile-evidence-and-safety).

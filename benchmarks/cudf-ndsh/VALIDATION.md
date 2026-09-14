@@ -1,30 +1,120 @@
 # Validation
 
-Checkpoint: 2026-09-14. Pinned cuDF:
+Checkpoint: 2026-09-14. Built/run Vortex source: `91142e2c18`
+(full revision `91142e2c18733e2c45515271439c3934d3fd2f9e`). Pinned cuDF:
 `5339497a1a17d799687cbf189fb113411fb015ca`, Release (`-O3 -DNDEBUG`).
+Hardware/toolchain: NVIDIA GH200, driver **595.71.05**, NVCC **13.0.88**, GCC **14.3.0**.
 [Current state](PROGRESS.md) · [Setup and commands](README.md)
 
 ## Current build status
 
-The [clean build/run recipe](README.md#build-from-a-clean-checkout) pins source inputs
-and records the caller-selected toolchain. **It has not been executed end to end.**
-Current-source runtime validation, memcheck and performance measurements remain pending.
-The RAPIDS-CMake pin defines the recipe going forward; historical build records do not
-establish which RAPIDS-CMake revision they used.
+The [build recipe](README.md#build-from-a-clean-checkout) produced fresh Release
+cuDF and CUDA-enabled Vortex, plus **all seven executables**. After the Python runner
+was interrupted, its CMake child finished. An incremental target build passed
+(**0.5 s, exit 0**); source and toolchain checks then allowed recovery of the binary
+hash record through `reproduce.py` helpers. `resumed_from` identifies the original logs.
 
-CUDA 12.8+ is the recipe's version floor, not a claim that every compiler release is
-validated. Recorded NVCC 13.1/GCC 14 probes fail in unmodified cuDF join code with a
-private `cudf::ast::literal::ast_scalar` access error at `std::bool_constant<true>`.
-A standalone standard-C++ reproducer has the same failure. NVCC 12.8 compiled the
-isolated probes; its complete cuDF/Vortex build is still unvalidated. This compiler
-issue needs a separate upstream resolution. Probe sources/logs are under ignored
-`build/cudf-ndsh-build/access-repro/`.
+Three in-branch build/runtime fixes are included: `1ab26426d8` resolves the NVCC
+realpath before Cargo tool lookup; `a9d705465e` declares explicit NVTX/KvikIO links;
+`91142e2c18` initializes the smoke test with `cudaSetDevice` before its stream check.
 
-## Earlier isolated build
+NVCC **13.0.88** is validated with the full SDK described in the README. The recipe's
+12.8 minimum does not imply compiler compatibility: tested NVCC **12.8.93** has a
+parameter-pack emission bug, and **13.1.115** a private
+`cudf::ast::literal::ast_scalar` access bug; both were reproduced with host GCC 13
+and 14. Earlier 12.8 success on isolated access probes did not validate a complete
+build. Compatibility probes are under ignored
+`build/cudf-ndsh-repro-cuda128-release-v2/compiler-compat-probes-20260914/`.
+
+## Current Release SF1 run
+
+Successful command from the Vortex root:
+
+```sh
+python3 -B benchmarks/cudf-ndsh/reproduce.py run \
+  --work-dir=/home/ubuntu/vortex/build/cudf-ndsh-repro-cuda130-release-v2 \
+  --scale-factor=1 --timeout=1200 --min-samples=3 --sample-timeout=30
+```
+
+Artifacts below are relative to ignored `build/cudf-ndsh-repro-cuda130-release-v2/`:
+
+- Initial build: `logs/20260914T171459.140647Z/`.
+- Completion/provenance recovery: `logs/20260914T172951.677938Z/`.
+- Successful run: `logs/20260914T173000.589177Z/`.
+- Results: `results/20260914T173000.589488Z/sf1-q{1,5,6,9,10}.json`, with
+  `build.json` (hashes/toolchain/`resumed_from`) and `run.json` in the same directory.
+
+Recorded checks at this checkpoint (not rerun for this documentation update):
+
+| Check                                              | Result                                    |
+| -------------------------------------------------- | ----------------------------------------- |
+| Fresh Release cuDF + Vortex / executables          | Built / 7 of 7 built                      |
+| Build smoke / adapter tests                        | Passed / 15 passed                        |
+| Offline harness / CUDA CMake tests                 | 38 passed / 8 passed                      |
+| SF1 read/query × format × cache × Q9 engine matrix | 56 unique, valid passing states; no skips |
+| Sampling                                           | 20–1,376 samples/state; 31,226 total      |
+
+No runtime hard errors occurred. **No current-source memcheck was run**; sanitizer
+results below are historical only.
+
+### Dataset and match counts
+
+This run used the **original pinned generator**, not `generator-fixes.patch`.
+Exact projected values and independent CPU references passed for both formats:
+
+| Query            | Matched rows | Result                 |
+| ---------------- | -----------: | ---------------------- |
+| Q1               |    4,497,687 | 4 groups               |
+| Q5               |        5,104 | 5 countries            |
+| Q6               |            0 | SUM/revenue `NULL`     |
+| Q9 (all engines) |       64,353 | 175 nation/year groups |
+| Q10              |            0 | 0 customers            |
+
+Q6/Q10 are degenerate: their timings establish execution/read behavior, **not
+meaningful nonempty full-query performance**.
+
+### CPU-wall timings
+
+CPU wall means in **ms**, taken from JSON `nv/cold/time/cpu/mean` × 1,000; query
+includes reads. Cache labels refer to the harness axis, not NVBench's sampling
+label. See the [timing contract](#timing-contract): cold means verified **OS page-cache
+eviction, not all caches**, with `O_DIRECT` Vortex data reads versus native Parquet.
+
+| Query / engine | Cache | Parquet read | Vortex read | Parquet query | Vortex query |
+| -------------- | ----- | -----------: | ----------: | ------------: | -----------: |
+| Q1             | warm  |       14.068 |       6.348 |        18.760 |       10.800 |
+| Q1             | cold  |       18.808 |       5.593 |        23.676 |       10.167 |
+| Q5             | warm  |       17.512 |       8.423 |        20.514 |       11.242 |
+| Q5             | cold  |       22.463 |       9.167 |        25.540 |       12.088 |
+| Q6             | warm  |        7.914 |       4.105 |         8.390 |        4.604 |
+| Q6             | cold  |       11.074 |       3.241 |        11.658 |        3.807 |
+| Q9 binaryop    | warm  |       27.020 |       8.510 |        30.128 |       11.536 |
+| Q9 AST         | warm  |       26.999 |       8.491 |        29.984 |       11.453 |
+| Q9 transform   | warm  |       27.007 |       8.503 |        30.020 |       11.516 |
+| Q9 binaryop    | cold  |       32.746 |       9.322 |        36.044 |       12.125 |
+| Q9 AST         | cold  |       32.865 |       9.248 |        35.877 |       12.160 |
+| Q9 transform   | cold  |       32.749 |       9.279 |        36.090 |       12.268 |
+| Q10            | warm  |       26.096 |      11.065 |        27.366 |       12.393 |
+| Q10            | cold  |       30.724 |      10.872 |        32.125 |       11.882 |
+
+Q9 read is repeated under three engine labels; these are not three distinct read
+implementations. Across the 28 labeled Parquet/Vortex comparisons, speedups range
+from **1.74× to 3.55×**, with **24/28 ≥2×**. The four below target are warm Q1 query
+(1.74×), Q5 query (1.82×), Q6 read (1.93×) and Q6 query (1.82×).
+
+Median CPU relative standard deviation is **1.30%**; 8 states exceed 5%, including
+3 above 10%: Vortex Q1 cold read **11.52%**, Q6 cold read **11.45%**, and Q6 cold
+query **10.39%**. Two NVBench sampling-timeout warnings still emitted valid passes:
+Parquet Q9 binaryop warm read (**1,109 samples, 0.59% CPU SD**) and Parquet Q9 AST
+warm query (**1,000 samples, 0.75% CPU SD**). These hit the 30-second sampling limit
+above NVBench's 0.50% GPU-noise threshold, not the runner's 1,200-second command limit.
+
+## Historical isolated build
 
 The rebased Vortex Release archive and all six consumer executables built and linked
 against an existing pinned Release cuDF library. This did not perform a clean,
-fully pinned cuDF build.
+fully pinned cuDF build. Historical build records do not establish which
+RAPIDS-CMake revision they used; they are separate from the current pinned recipe.
 
 | Check                                              | Result                           |
 | -------------------------------------------------- | -------------------------------- |
@@ -48,9 +138,9 @@ Records under ignored `build/cudf-ndsh-sf1-rebased/`:
 - Ready executables: `consumer/bin/NDSH_Q{01,05,06,09,10}_NVBENCH` and
   `consumer/bin/NDSH_VORTEX_IO_TEST`.
 
-## Recorded source checks
+## Historical source checks
 
-These checks preceded the rebase and this documentation update:
+These checks preceded the rebase and are not validation of `91142e2c18`:
 
 | Check                                                           | Result                    |
 | --------------------------------------------------------------- | ------------------------- |
@@ -115,8 +205,9 @@ cuDF generator. Details: [README.md](README.md).
 ## Historical timings
 
 **These measurements describe earlier source/dataset configurations, not current
-baselines.** Fresh baselines require regenerated paired fixtures and labels for the
-generator and match counts. All values are CPU wall means in **ms**; query means
+baselines.** The current SF1 baseline is recorded [above](#current-release-sf1-run).
+Future baselines require regenerated paired fixtures and labels for the generator
+and match counts. All values are CPU wall means in **ms**; query means
 include reads. Filenames containing `rebuilt` refer to those historical builds.
 
 ### SF10 warm

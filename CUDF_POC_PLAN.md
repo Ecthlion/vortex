@@ -16,13 +16,14 @@ synthetic cases check correctness outside timing. See the README for the
 
 ## Next steps
 
-**The clean Release recipe and current-source runtime measurements remain unvalidated.**
-Earlier isolated-build and runtime evidence is recorded in
+**Release SF1 passes all 56 states at `91142e2c18`** with CUDA 13.0.88 / GCC 14.3.0.
+Vortex is faster in all 28 format pairs; 24 reach 2×. Q6/Q10 have empty results with
+the original generator. Timings and caveats are in
 [Validation](benchmarks/cudf-ndsh/VALIDATION.md).
 
-1. Build the tracked recipe, then validate adapter and query correctness.
-2. Collect fresh SF1, then SF10 warm/cold read/query baselines. Label the generator
-   choice and match counts; use nondegenerate results for full-query performance claims.
+1. Run current-source memcheck validation when requested.
+2. Collect SF10 warm/cold read/query baselines. Label the generator choice and match
+   counts; use nondegenerate results for full-query performance claims.
 3. Profile bottlenecks and optimize. Scale to SF100 once these matrices are stable,
    accounting for Vortex and RMM memory separately.
 4. Publish validated revisions and prerequisites, then prepare the upstream POC.
