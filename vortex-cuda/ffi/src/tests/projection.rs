@@ -116,10 +116,14 @@ fn table(rows: usize) -> VortexResult<ArrayRef> {
     .into_array())
 }
 
-fn file_bytes(session: &VortexSession, array: ArrayRef, cuda: bool) -> VortexResult<ByteBuffer> {
-    let strategy: Arc<dyn LayoutStrategy> = if cuda {
+fn file_bytes(
+    session: &VortexSession,
+    array: ArrayRef,
+    cuda_block_rows: Option<usize>,
+) -> VortexResult<ByteBuffer> {
+    let strategy: Arc<dyn LayoutStrategy> = if let Some(block_rows) = cuda_block_rows {
         register_cuda_layout(session);
-        cuda_write_strategy(session, 0)
+        cuda_write_strategy(session, block_rows)
     } else {
         let flat = Arc::new(FlatLayoutStrategy::default());
         Arc::new(TableStrategy::new(
@@ -127,23 +131,6 @@ fn file_bytes(session: &VortexSession, array: ArrayRef, cuda: bool) -> VortexRes
             flat,
         ))
     };
-    let mut bytes = ByteBufferMut::empty();
-    ffi_runtime().block_on(
-        session
-            .write_options()
-            .with_strategy(strategy)
-            .write(&mut bytes, array.to_array_stream()),
-    )?;
-    Ok(bytes.freeze())
-}
-
-fn blocked_cuda_file_bytes(
-    session: &VortexSession,
-    array: ArrayRef,
-    block_rows: usize,
-) -> VortexResult<ByteBuffer> {
-    register_cuda_layout(session);
-    let strategy = cuda_write_strategy(session, block_rows);
     let mut bytes = ByteBufferMut::empty();
     ffi_runtime().block_on(
         session
@@ -164,7 +151,7 @@ fn test_cuda_write_strategy_preserves_high_cardinality_row_blocks() -> VortexRes
         StructArray::try_new(["ids"].into(), vec![ids], rows, Validity::NonNullable)?.into_array();
     let file = session
         .open_options()
-        .open_buffer(blocked_cuda_file_bytes(&session, input, rows)?)?;
+        .open_buffer(file_bytes(&session, input, Some(rows))?)?;
     let batches: Vec<_> = ffi_runtime().block_on(
         projected_scan(&file, names(&["ids"])?, rows)?
             .into_array_stream()?
@@ -185,7 +172,7 @@ fn test_projection_cpu_scan_order_dtype_empty_and_defaults() -> VortexResult<()>
         let file =
             session
                 .open_options()
-                .open_buffer(file_bytes(&session, input.clone(), false)?)?;
+                .open_buffer(file_bytes(&session, input.clone(), None)?)?;
         for columns in [vec!["値.x", "ids"], vec!["ids"], vec![]] {
             let expected = if columns.is_empty() {
                 input.clone()
@@ -222,10 +209,9 @@ fn test_projection_cpu_scan_order_dtype_empty_and_defaults() -> VortexResult<()>
 #[test]
 fn test_projected_scan_batch_rows_preserve_cuda_layout_boundaries() -> VortexResult<()> {
     let session = session();
-    let file =
-        session
-            .open_options()
-            .open_buffer(blocked_cuda_file_bytes(&session, table(5)?, 2)?)?;
+    let file = session
+        .open_options()
+        .open_buffer(file_bytes(&session, table(5)?, Some(2))?)?;
 
     for columns in [vec!["値.x", "ids"], vec![]] {
         let batches: Vec<_> = ffi_runtime().block_on(
@@ -245,10 +231,9 @@ fn test_projected_scan_batch_rows_preserve_cuda_layout_boundaries() -> VortexRes
 fn test_projection_cpu_rejects_unknown_names_and_non_struct() -> VortexResult<()> {
     let session = session();
     for rows in [0, 5] {
-        let file =
-            session
-                .open_options()
-                .open_buffer(file_bytes(&session, table(rows)?, false)?)?;
+        let file = session
+            .open_options()
+            .open_buffer(file_bytes(&session, table(rows)?, None)?)?;
         for name in ["missing", "IDS", "値", "値.x.child"] {
             let error = projected_scan(&file, names(&[name])?, 0)
                 .err()
@@ -262,7 +247,7 @@ fn test_projection_cpu_rejects_unknown_names_and_non_struct() -> VortexResult<()
     let input = PrimitiveArray::from_iter([1i32, 2, 3]).into_array();
     let file = session
         .open_options()
-        .open_buffer(file_bytes(&session, input.clone(), false)?)?;
+        .open_buffer(file_bytes(&session, input.clone(), None)?)?;
     let error = projected_scan(&file, names(&["ids"])?, 0)
         .err()
         .ok_or_else(|| vortex_err!("expected non-struct projection error"))?;
@@ -312,7 +297,7 @@ fn test_projection_cpu_never_requests_unselected_column_segments() -> VortexResu
     let session = session();
     let file = session
         .open_options()
-        .open_buffer(file_bytes(&session, table(5)?, false)?)?;
+        .open_buffer(file_bytes(&session, table(5)?, None)?)?;
     // TableStrategy writes one flat child per column, so child 1 is exactly the unused column.
     let children = file.footer().layout().children()?;
     let forbidden = children[1].segment_ids();
@@ -436,11 +421,96 @@ fn stream_error(stream: &mut ArrowDeviceArrayStream) -> String {
     }
 }
 
+fn open_stream(
+    session: &VortexSession,
+    path: &str,
+    options: Option<&vx_cuda_scan_options>,
+    projected: bool,
+) -> ArrowDeviceArrayStream {
+    let options = options.map_or(ptr::null(), ptr::from_ref);
+    let mut output = MaybeUninit::<ArrowDeviceArrayStream>::uninit();
+    let mut error = ptr::null_mut();
+    let handle = test_session(session.clone());
+    let columns = [view("値.x"), view("ids")];
+    // SAFETY: All borrowed inputs and writable outputs are live for this call.
+    let status = unsafe {
+        if projected {
+            vx_cuda_scan_path_arrow_device_stream_projected(
+                handle,
+                view(path),
+                options,
+                columns.as_ptr(),
+                columns.len(),
+                output.as_mut_ptr(),
+                &raw mut error,
+            )
+        } else {
+            vx_cuda_scan_path_arrow_device_stream_with_options(
+                handle,
+                view(path),
+                options,
+                output.as_mut_ptr(),
+                &raw mut error,
+            )
+        }
+    };
+    // SAFETY: This is the sole release of the borrowed session handle.
+    unsafe { free_test_session(handle) };
+    assert_eq!(status, VX_CUDA_OK);
+    assert!(error.is_null());
+    // SAFETY: A successful call initialized the stream, which owns its session state.
+    unsafe { output.assume_init() }
+}
+
+fn stream_schema(stream: &mut ArrowDeviceArrayStream) -> VortexResult<FFI_ArrowSchema> {
+    let mut schema = FFI_ArrowSchema::empty();
+    let get_schema = stream
+        .get_schema
+        .ok_or_else(|| vortex_err!("missing get_schema"))?;
+    // SAFETY: This live stream owns the callback; schema is writable.
+    assert_eq!(
+        unsafe { get_schema(stream, (&raw mut schema).cast()) },
+        0,
+        "{}",
+        stream_error(stream)
+    );
+    Ok(schema)
+}
+
+fn batch_lengths(
+    stream: &mut ArrowDeviceArrayStream,
+    expected_columns: i64,
+) -> VortexResult<Vec<i64>> {
+    let get_next = stream
+        .get_next
+        .ok_or_else(|| vortex_err!("missing get_next"))?;
+    let mut lengths = Vec::new();
+    loop {
+        let mut array = empty_device_array();
+        // SAFETY: This live stream owns the callback; array is writable.
+        assert_eq!(
+            unsafe { get_next(stream, &raw mut array) },
+            0,
+            "{}",
+            stream_error(stream)
+        );
+        if array.array.release.is_none() {
+            break;
+        }
+        assert_eq!(array.device_type, ARROW_DEVICE_CUDA);
+        assert_eq!(array.array.n_children, expected_columns);
+        lengths.push(array.array.length);
+        // SAFETY: Each live batch is released exactly once, before requesting the next one.
+        unsafe { release_device_array(&mut array) };
+    }
+    Ok(lengths)
+}
+
 #[cuda_test]
 fn test_projection_gpu_local_file_schema_batches_empty_and_defaults() -> VortexResult<()> {
     let session = session().with_some(CudaSession::try_default()?);
     for rows in [0, 5] {
-        let file = LocalFile::new(&file_bytes(&session, table(rows)?, true)?)?;
+        let file = LocalFile::new(&file_bytes(&session, table(rows)?, Some(0))?)?;
         let path = file
             .0
             .to_str()
@@ -453,49 +523,8 @@ fn test_projection_gpu_local_file_schema_batches_empty_and_defaults() -> VortexR
                     batch_rows: 2,
                 }),
             ] {
-                let options = options.as_ref().map_or(ptr::null(), ptr::from_ref);
-                let mut output = MaybeUninit::<ArrowDeviceArrayStream>::uninit();
-                let mut error = ptr::null_mut();
-                let handle = test_session(session.clone());
-                let columns = [view("値.x"), view("ids")];
-                // SAFETY: All borrowed inputs and writable outputs are live for this call.
-                let status = unsafe {
-                    if projected {
-                        vx_cuda_scan_path_arrow_device_stream_projected(
-                            handle,
-                            view(path),
-                            options,
-                            columns.as_ptr(),
-                            columns.len(),
-                            output.as_mut_ptr(),
-                            &raw mut error,
-                        )
-                    } else {
-                        vx_cuda_scan_path_arrow_device_stream_with_options(
-                            handle,
-                            view(path),
-                            options,
-                            output.as_mut_ptr(),
-                            &raw mut error,
-                        )
-                    }
-                };
-                unsafe { free_test_session(handle) };
-                assert_eq!(status, VX_CUDA_OK);
-                assert!(error.is_null());
-                // SAFETY: A successful call initialized the stream, which owns its session state.
-                let mut stream = unsafe { output.assume_init() };
-                let mut schema = FFI_ArrowSchema::empty();
-                let get_schema = stream
-                    .get_schema
-                    .ok_or_else(|| vortex_err!("missing get_schema"))?;
-                // SAFETY: This live stream owns the callback; schema is writable.
-                assert_eq!(
-                    unsafe { get_schema(&raw mut stream, (&raw mut schema).cast()) },
-                    0,
-                    "{}",
-                    stream_error(&mut stream)
-                );
+                let mut stream = open_stream(&session, path, options.as_ref(), projected);
+                let mut schema = stream_schema(&mut stream)?;
                 let expected_fields = if projected {
                     vec![
                         Field::new("値.x", DataType::Int64, true),
@@ -509,29 +538,9 @@ fn test_projection_gpu_local_file_schema_batches_empty_and_defaults() -> VortexR
                     ]
                 };
                 assert_eq!(Schema::try_from(&schema)?, Schema::new(expected_fields));
-                let get_next = stream
-                    .get_next
-                    .ok_or_else(|| vortex_err!("missing get_next"))?;
-                let mut lengths = Vec::new();
-                loop {
-                    let mut array = empty_device_array();
-                    // SAFETY: This live stream owns the callback; array is writable.
-                    assert_eq!(
-                        unsafe { get_next(&raw mut stream, &raw mut array) },
-                        0,
-                        "{}",
-                        stream_error(&mut stream)
-                    );
-                    if array.array.release.is_none() {
-                        break;
-                    }
-                    assert_eq!(array.device_type, ARROW_DEVICE_CUDA);
-                    assert_eq!(array.array.n_children, if projected { 2 } else { 3 });
-                    lengths.push(array.array.length);
-                    unsafe { release_device_array(&mut array) };
-                }
+                let lengths = batch_lengths(&mut stream, if projected { 2 } else { 3 })?;
                 assert_eq!(lengths.iter().sum::<i64>(), rows as i64);
-                if rows > 0 && !options.is_null() {
+                if rows > 0 && options.is_some() {
                     assert_eq!(lengths, [2, 2, 1]);
                 }
                 let release = stream
@@ -551,7 +560,7 @@ fn test_projection_gpu_local_file_schema_batches_empty_and_defaults() -> VortexR
 #[cuda_test]
 fn test_projection_gpu_preserves_cuda_layout_boundaries() -> VortexResult<()> {
     let session = session().with_some(CudaSession::try_default()?);
-    let file = LocalFile::new(&blocked_cuda_file_bytes(&session, table(5)?, 2)?)?;
+    let file = LocalFile::new(&file_bytes(&session, table(5)?, Some(2))?)?;
     let path = file
         .0
         .to_str()
@@ -560,73 +569,15 @@ fn test_projection_gpu_preserves_cuda_layout_boundaries() -> VortexResult<()> {
         flags: VX_CUDA_SCAN_FLAG_DECODE_DICTIONARIES,
         batch_rows: 3,
     };
-    let columns = [view("値.x"), view("ids")];
 
-    for projected in [true, false] {
-        let mut output = MaybeUninit::<ArrowDeviceArrayStream>::uninit();
-        let mut error = ptr::null_mut();
-        let handle = test_session(session.clone());
-        // SAFETY: All borrowed inputs and writable outputs are live for this call.
-        let status = unsafe {
-            if projected {
-                vx_cuda_scan_path_arrow_device_stream_projected(
-                    handle,
-                    view(path),
-                    &raw const options,
-                    columns.as_ptr(),
-                    columns.len(),
-                    output.as_mut_ptr(),
-                    &raw mut error,
-                )
-            } else {
-                vx_cuda_scan_path_arrow_device_stream_with_options(
-                    handle,
-                    view(path),
-                    &raw const options,
-                    output.as_mut_ptr(),
-                    &raw mut error,
-                )
-            }
-        };
-        unsafe { free_test_session(handle) };
-        assert_eq!(status, VX_CUDA_OK);
-        assert!(error.is_null());
+    let streams =
+        [true, false].map(|projected| open_stream(&session, path, Some(&options), projected));
+    // Both streams must retain their session state after the caller releases its session.
+    drop(session);
+    for (mut stream, expected_columns) in streams.into_iter().zip([2, 3]) {
+        let mut schema = stream_schema(&mut stream)?;
 
-        // SAFETY: A successful call initialized the stream, which owns its session state.
-        let mut stream = unsafe { output.assume_init() };
-        let mut schema = FFI_ArrowSchema::empty();
-        let get_schema = stream
-            .get_schema
-            .ok_or_else(|| vortex_err!("missing get_schema"))?;
-        // SAFETY: This live stream owns the callback; schema is writable.
-        assert_eq!(
-            unsafe { get_schema(&raw mut stream, (&raw mut schema).cast()) },
-            0,
-            "{}",
-            stream_error(&mut stream)
-        );
-
-        let get_next = stream
-            .get_next
-            .ok_or_else(|| vortex_err!("missing get_next"))?;
-        let mut lengths = Vec::new();
-        loop {
-            let mut array = empty_device_array();
-            // SAFETY: This live stream owns the callback; array is writable.
-            assert_eq!(
-                unsafe { get_next(&raw mut stream, &raw mut array) },
-                0,
-                "{}",
-                stream_error(&mut stream)
-            );
-            if array.array.release.is_none() {
-                break;
-            }
-            assert_eq!(array.device_type, ARROW_DEVICE_CUDA);
-            assert_eq!(array.array.n_children, if projected { 2 } else { 3 });
-            lengths.push(array.array.length);
-            unsafe { release_device_array(&mut array) };
-        }
+        let lengths = batch_lengths(&mut stream, expected_columns)?;
         assert_eq!(lengths, [2, 2, 1]);
 
         let release = stream
