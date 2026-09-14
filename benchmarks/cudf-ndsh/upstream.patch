@@ -12,35 +12,29 @@ index 8fa9593..4f5127a 100644
  # * filter benchmark -------------------------------------------------------------------
 diff --git a/cpp/benchmarks/ndsh/VORTEX.md b/cpp/benchmarks/ndsh/VORTEX.md
 new file mode 100644
-index 0000000..d58b997
+index 0000000..1cf1af2
 --- /dev/null
 +++ b/cpp/benchmarks/ndsh/VORTEX.md
-@@ -0,0 +1,145 @@
+@@ -0,0 +1,126 @@
 +# Experimental Vortex adapter
 +
-+`CUDF_NDSH_WITH_VORTEX=ON` adds local-file Parquet/Vortex comparisons for
-+Q1/Q5/Q6/Q9/Q10 and projected reads. Default **OFF** adds no Vortex dependency.
++`CUDF_NDSH_WITH_VORTEX=ON` enables a local-file Parquet/Vortex read/query harness for
++Q1/Q5/Q6/Q9/Q10, including projected read-only comparisons. The option defaults to
++**OFF**. Build integration lives in `cpp/benchmarks/ndsh/` with one include hook in
++`cpp/benchmarks/CMakeLists.txt`.
 +
-+The main patch touches only `cpp/benchmarks/ndsh/` plus one include hook in
-+`cpp/benchmarks/CMakeLists.txt`; no generator changes or generator-test target.
-+
-+17 offline tests, five-query clang-format, Ruff lint/format, and patch checks passed.
-+Compile-only Q1/Q5/Q6/Q9/Q10 checks with Vortex ON/OFF passed **10/10 without warnings**;
-+the separate generator regression test also compiled, without runtime execution.
-+Artifacts are in the Vortex checkout's ignored `build/cudf-ndsh-minimal-compile/`.
-+
-+**Development binaries remain stale:** no CMake regeneration, full build, relinks, GPU,
-+or fresh minimal-source runtime/memcheck/performance runs. The previous full cuDF build
-+timed out at 1200 s / 223 of 635 steps. No broad automatic retry. Commands below are
-+setup instructions, not evidence of completed runtime validation.
++Current-source runtime validation and performance measurements are pending. Recorded
++checks are in `benchmarks/cudf-ndsh/VALIDATION.md` in the Vortex checkout.
 +
 +## Build
 +
-+Use a complete local Vortex checkout with CUDA-layout edition registration,
-+device decimal slicing, bitmap alignment/padding, dictionary export, and
-+`vx_cuda_scan_path_arrow_device_stream_projected`. The retained pin lacks these fixes;
-+publish a fixed revision before removing the local-only gate. The header-flag
-+check alone does not verify all runtime fixes.
++Use cuDF pin `5339497a1a17d799687cbf189fb113411fb015ca` and a complete local Vortex
++checkout with CUDA-layout edition registration, device decimal slicing, bitmap
++alignment/padding, dictionary export, and `vx_cuda_scan_path_arrow_device_stream_projected`.
++The retained Vortex base pin `bffdca1109e99e6957ea2fc18f4a7809c88e0a0c` predates these
++prerequisites; CMake requires `FETCHCONTENT_SOURCE_DIR_VORTEX` until a fixed immutable
++revision is published. Header checks establish API availability; the local checkout
++must also contain the runtime fixes.
 +
 +From the cuDF root in a RAPIDS development environment:
 +
@@ -61,13 +55,13 @@ index 0000000..d58b997
 +  cpp/build-vortex/benchmarks/NDSH_VORTEX_IO_TEST
 +```
 +
-+Requires Linux, Rust 1.95+, libclang, CUDA, and matching cuDF headers/libraries.
-+Choose your GPU architecture (`90` is Hopper). Use a consistent compiler/sysroot
++Requires Linux, Rust 1.95+, libclang, CUDA, and cuDF headers/libraries built from the
++same pinned revision. Choose your GPU architecture (`90` is Hopper). Use a consistent compiler/sysroot
 +and toolkit; set `CMAKE_CUDA_COMPILER`, `CUDAToolkit_ROOT`, and Cargo's `NVCC_CCBIN`
 +when needed. Check Conda's `NVCC_PREPEND_FLAGS` for conflicts.
 +
 +Uncached dependencies need network access. Vortex uses its own CUB/nvCOMP;
-+keep the Cargo build tree intact because runtime libraries are not packaged here.
++keep the Cargo build tree intact for runtime library discovery.
 +
 +## Query comparisons
 +
@@ -90,77 +84,64 @@ index 0000000..d58b997
 +```
 +
 +Each runs `format={parquet,vortex}` × `workload={read,qN}` × `cache={warm,cold}` on
-+identical logical full-table fixtures from the **original pinned cuDF generator**;
-+Q9 additionally covers binary-op, AST, and transform amount engines. The default scale
-+factors include SF10; select a scale explicitly. Q1/Q6 project lineitem, Q5/Q9 project
-+six tables, and Q10 projects four. Both formats use identical scan projections and
-+post-read predicates. Exact projection/value and independent bounded-batch CPU result
-+checks remain even for zero matches, as do synthetic nonempty and boundary/null/empty
-+cases. Checks/writing are untimed; read/query timing includes cleanup and GPU completion.
-+Compare CPU wall time; RMM peaks exclude Vortex. Original native Parquet-pushdown/output
-+benchmarks remain separate. References follow those benchmark semantics; Q9 keeps its
-+existing unrounded `SUM(amount)`. Q1 uses original `SUM`/native `MEAN`/`COUNT` and
-+Q5/Q9/Q10 table reads are sequential in both formats. Native Parquet benchmarks retain
-+input/intermediate lifetimes through output writing. No hand-fitted query kernels.
++the same logical full-table data from the **original pinned cuDF generator**. Q9 also
++covers `engine={binaryop,ast,transform}`. Default scale factors include SF10; select a
++scale explicitly. Q1/Q6 project lineitem, Q5/Q9 project six tables, and Q10 projects
++four. Both formats use identical scan projections and cuDF post-read filters.
 +
-+Original data may yield empty/degenerate Q6/Q10 and low-SF supplier joins. Explicit zero
-+match counts disclose these results without rejecting them or skipping correctness
-+checks. Degenerate queries are **not meaningful full-query performance evidence**.
-+Q6 checks zero-match `SUM` is NULL and reports revenue as the string `"NULL"`, not zero.
-+Its CPU reference boundary/sliced/float32 test moved to `q06.cpp` and gained no-match/empty
-+GPU cases; generator separation loses no main-query tests. Q9's reference preserves
-+`partsupp` duplicate-join multiplicity, with matching/unmatched duplicate cases. These
-+cases compiled but have not been run on the minimal source.
++Both formats use existing cuDF query operations after reading the projected columns.
++Native Parquet-pushdown/output benchmarks remain separate. CPU references follow the
++benchmark semantics, including Q9's unrounded `SUM(amount)`.
 +
-+Cold mode flushes and evicts each selected-format fixture from the Linux page cache,
-+then requires zero resident pages before every timed callback. Eviction is untimed.
-+Vortex uses direct I/O for cold data reads; metadata stays buffered. Parquet uses its
-+native reader. Lower-level storage caches are not flushed: this is OS-page-cache
-+coldness, not guaranteed cold media. Warm reads use the buffered path.
++### Dataset and correctness
 +
-+**Optional generator patch:** the main `upstream.patch` has no generator edits/tests
-+or `NDSH_DATA_GENERATOR_TEST` target. Vortex's optional
-+`benchmarks/cudf-ndsh/generator-fixes.patch` preserves four independent fixes and its
-+own regression test across seven files. It is separately reviewable and independently
-+applicable to cuDF pin `5339497a1a17d799687cbf189fb113411fb015ca`, not bundled or automatic.
-+Its forward application to pristine cuDF passed; both patch application orders produce
-+identical trees. Only it adds `NDSH_DATA_GENERATOR_TEST`. Applying it affects all NDS-H
-+consumers, including Vortex OFF: regenerate both formats' fixtures and label the dataset
-+as generator-fixed. Neither dataset establishes full TPC-H conformance.
++Exact projection/value and independent bounded-batch CPU result checks cover zero
++matches as well as synthetic nonempty, boundary, null, and empty cases. Original data
++may yield empty/degenerate Q6/Q10 results and low-SF supplier joins. Explicit match
++counts identify degenerate queries, which are **not meaningful full-query performance
++evidence**. Q6 checks zero-match `SUM` is NULL and reports revenue as the string
++`"NULL"`; its cases include boundary, sliced, float32, no-match, and empty inputs.
++Q9's reference preserves `partsupp` duplicate-join multiplicity, with matching/unmatched
++duplicate and empty-input cases.
 +
-+**Prior timings are HISTORICAL, not valid minimal-patch baselines:** they used altered
-+generator/performance code and event suppression. Restoring the original source/data
-+requires regenerating both formats' fixtures and collecting fresh labeled baselines;
-+optional generator-fixed data also needs separate baselines. Preserve old evidence
-+tables as historical, not current validation.
++Vortex's optional `benchmarks/cudf-ndsh/generator-fixes.patch` supplies four generator
++fixes and the `NDSH_DATA_GENERATOR_TEST` regression target. It applies independently to
++the cuDF pin and affects all NDS-H consumers, including Vortex OFF. When selecting this
++dataset, regenerate both formats' fixtures, label them as generator-fixed, and collect
++separately labeled baselines.
 +
-+## Contract and scope
++## I/O and timing contract
 +
 +- `write_vortex`: cuDF chunks → compact host Arrow → CPU-compressed local file.
 +  The benchmark uses 16,777,216-row physical CUDA-flat blocks. Explicit row blocks
-+  disable byte coalescing and layout dictionaries so high-cardinality `u16` dictionary
-+  runs cannot fragment the requested granularity.
-+- `read_vortex`: pooled cacheable pinned-host staging → HtoD → GPU decode → retained Arrow Device
-+  imports → one final owning cuDF copy/concatenation, using the same 16,777,216-row
-+  maximum. The adapter retains up to 8 GiB in CUDA's default memory pool between
-+  synchronized reads. Dictionary-compressed arrays export as plain values.
-+  These Vortex-internal improvements remain; no event optimization is retained.
-+  **No GPUDirect Storage.**
-+- Contexts use device 0. Caller stream/resource must outlive the
-+  context and returned tables. Reads finish consumer work before releasing temporary
-+  inputs; release cleanup may remain queued on Vortex producer streams. Results outlive
-+  the context/file. See `vortex_io.hpp` for argument constraints.
-+- Flat typed columns and ordered top-level projection only. No predicate pushdown,
-+  remote/device-buffer sources, GPU writing, or full RMM integration. Row chunking
-+  is not a byte budget; peak read memory includes retained Vortex batches plus the
-+  owning result.
-+- Time the complete read, including schema export, import, final copy/concatenation,
-+  release cleanup, and GPU completion; exclude writing. Query/read benchmarks finish
-+  with a device-wide synchronization that includes queued producer cleanup. The adapter
-+  emits `vortex.read`, `vortex.scan_open`, `vortex.get_next`,
-+  `vortex.arrow_device_import`, `vortex.materialize`, `vortex.consumer_sync`, and
-+  `vortex.release_batches` NVTX ranges. Tests establish correctness, not SF100 readiness.
-+  For profiling, use `RelWithDebInfo` and optionally `NVCC_APPEND_FLAGS=-lineinfo`.
++  disable byte coalescing and layout dictionaries to preserve the requested granularity.
++- `read_vortex`: pooled cacheable pinned-host staging → HtoD → GPU decode → retained
++  Arrow Device imports → one final owning cuDF copy/concatenation, using the same
++  16,777,216-row maximum. The adapter retains up to 8 GiB in CUDA's default memory pool
++  between synchronized reads. Dictionary-compressed arrays export as plain values.
++- Contexts use device 0, local files, flat typed columns, and ordered top-level
++  projections. Caller stream/resource must outlive the context and returned tables.
++  Reads finish consumer work before releasing temporary inputs; release cleanup may
++  remain queued on Vortex producer streams. Results outlive the context/file. See
++  `vortex_io.hpp` for argument constraints. Peak read memory includes retained Vortex
++  batches and the owning result; chunking is row-based. **RMM memory statistics cover
++  cuDF allocations only.**
++- `cache=warm` uses buffered reads with the existing OS page cache. `cache=cold`
++  measures **OS-page-cache coldness**: before every manual cold callback's timed
++  portion, each selected-format file receives `fdatasync` + `POSIX_FADV_DONTNEED`,
++  followed by required `mincore` residency == 0. Cold Vortex data uses `O_DIRECT`,
++  metadata stays buffered, and Parquet uses its native reader.
++- Compare CPU wall time for the complete read, including schema export, import,
++  final copy/concatenation, query work where selected, destruction, release cleanup,
++  and GPU completion. Query/read benchmarks finish with device-wide synchronization
++  covering queued producer cleanup. Writing, correctness checks, and eviction are
++  untimed.
++
++The adapter emits `vortex.read`, `vortex.scan_open`, `vortex.get_next`,
++`vortex.arrow_device_import`, `vortex.materialize`, `vortex.consumer_sync`, and
++`vortex.release_batches` NVTX ranges. For profiling, use `RelWithDebInfo` and optionally
++`NVCC_APPEND_FLAGS=-lineinfo`. Follow the profile-metadata safety guidance in the
++Vortex checkout's `benchmarks/cudf-ndsh/VALIDATION.md` before capturing or sharing profiles.
 diff --git a/cpp/benchmarks/ndsh/local_io.hpp b/cpp/benchmarks/ndsh/local_io.hpp
 new file mode 100644
 index 0000000..baaf7c0
@@ -2911,10 +2892,10 @@ index 915d93f..ba52c8a 100644
                                     std::vector<std::string> const& table_names,
                                     std::unordered_map<std::string, cuio_source_sink_pair>& sources)
 diff --git a/cpp/benchmarks/ndsh/utilities.hpp b/cpp/benchmarks/ndsh/utilities.hpp
-index 7864e54..63cfc0f 100644
+index 7864e54..52f20e5 100644
 --- a/cpp/benchmarks/ndsh/utilities.hpp
 +++ b/cpp/benchmarks/ndsh/utilities.hpp
-@@ -12,13 +12,15 @@
+@@ -12,6 +12,8 @@
  
  #include <rmm/device_uvector.hpp>
  
@@ -2923,14 +2904,6 @@ index 7864e54..63cfc0f 100644
  /**
   * @brief A class to represent a table with column names attached
   */
- class table_with_names {
-  public:
-   table_with_names(std::unique_ptr<cudf::table> tbl, std::vector<std::string> col_names)
--    : tbl(std::move(tbl)), col_names(col_names) {};
-+    : tbl(std::move(tbl)), col_names(col_names){};
-   /**
-    * @brief Return the table view
-    */
 @@ -198,6 +200,28 @@ void write_to_parquet_device_buffer(std::unique_ptr<cudf::table> const& table,
                                      std::vector<std::string> const& col_names,
                                      cuio_source_sink_pair& source);

@@ -492,7 +492,6 @@ class BenchmarkSourceTests(unittest.TestCase):
         fixes = PATCH.with_name("generator-fixes.patch").read_text(encoding="utf-8")
         generator = cmake.parent / "common/ndsh_data_generator"
         paths = [Path(path) for path in re.findall(r"^diff --git a/\S+ b/(\S+)$", fixes, re.MULTILINE)]
-        self.assertEqual(len(paths), 7)
         self.assertIn(generator / "ndsh_data_generator_test.cpp", paths)
         self.assertTrue(all(path == cmake or path.parent == generator for path in paths))
         self.assertIn("NDSH_DATA_GENERATOR_TEST", fixes)

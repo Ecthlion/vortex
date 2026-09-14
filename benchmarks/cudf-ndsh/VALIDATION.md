@@ -4,46 +4,56 @@ Checkpoint: 2026-09-14. Pinned cuDF:
 `5339497a1a17d799687cbf189fb113411fb015ca`, Release (`-O3 -DNDEBUG`).
 [Current state](PROGRESS.md) · [Setup and commands](README.md)
 
-## Validation status
+## Current build status
 
-The minimal implementation is complete; the commit breakdown is in [PROGRESS.md](PROGRESS.md).
-**Binaries remain stale: fresh minimal-source runtime, memcheck,
-and performance have not been run.** Current validation was offline/compile-only,
-with no CMake regeneration, full build, relinks, or GPU runs.
+The rebased Vortex Release archive and all six consumer executables built and linked
+against pinned Release cuDF. **Current-source runtime validation, memcheck, and
+performance measurements are pending.**
 
-### Current minimal-source checks
+| Check                                              | Result                           |
+| -------------------------------------------------- | -------------------------------- |
+| CUDA-enabled Vortex Release archive                | Built in 265 s                   |
+| Isolated consumer compilation                      | 75/75 passed, no warnings/errors |
+| Consumer static archives                           | 4/4 created                      |
+| Five query executables and adapter-test executable | 6/6 linked, clean diagnostics    |
+| ELF dependency inspection in a clean environment   | All six resolved                 |
 
-| Check                                                           | Result                       |
-| --------------------------------------------------------------- | ---------------------------- |
-| Offline integration tests                                       | 17 passed                    |
-| Offline Cargo-directory configure / CUDA architecture tests     | 10 / 2 passed                |
-| clang-format, all five query files                              | Passed                       |
-| Ruff lint / format                                              | Passed                       |
-| Main patch: forward/cached and reverse apply checks             | Passed                       |
-| Optional generator patch: forward apply to pristine pinned cuDF | Passed                       |
-| Both patch application orders                                   | Identical trees              |
-| Compile-only Q1/Q5/Q6/Q9/Q10, Vortex ON/OFF                     | 10/10 passed, no warnings    |
-| Separate generator regression test compile                      | Passed; no runtime execution |
+Source checkpoint: `03fd6013e2687a11e35033ec7307ac909ee88f9d`. The isolated consumer
+uses RMM `543cecf2cde1ba0fe4097920db8918079e8acea0`, matching the existing pinned
+Release `libcudf.so`. The Vortex build used FlatBuffers 25.12.19. Archive SHA256:
+`71cc02d96317acb32ca4d4730566e9e12a9f3b5b93cd7b47766cfe8db5371b2f`.
 
-The main patch touches only `cpp/benchmarks/ndsh/` and one include hook in
-`cpp/benchmarks/CMakeLists.txt`, with no generator changes or generator-test target.
-Patch checks cover the final export, including documentation and Q9 duplicate-join checks.
+Records under ignored `build/cudf-ndsh-sf1-rebased/`:
 
-Compile artifacts under ignored `build/cudf-ndsh-minimal-compile/`:
+- `vortex-build-command.json`, `vortex-build-result.json`, `vortex-build.log`.
+- `consumer/commands.json`, `consumer/results.json`, `consumer/provenance.json`.
+- `consumer/link-results.json`, `consumer/link-provenance.json`,
+  `consumer/link-summary.json`, `consumer/runtime-dependencies.json`.
+- Ready executables: `consumer/bin/NDSH_Q{01,05,06,09,10}_NVBENCH` and
+  `consumer/bin/NDSH_VORTEX_IO_TEST`.
 
-- `summary.md`, `results.json`: all ten query variants recompiled after the native-output
-  lifetime restoration and Q9 duplicate-join reference change; prior results are retained.
-- `ninja-compdb.json`, `commands.txt`, `commands.json`: original and executed commands.
-- `generator-test-summary.md`, `generator-test-command.json`: standalone test compile.
+## Recorded source checks
 
-Compiles reused the existing toolchain/flags, with scratch outputs and Vortex ON/OFF
-variants; source and Ninja input hashes stayed unchanged. Compilation does not validate
-runtime behavior. The earlier Rust pinned tests/fmt/Clippy below were not rerun because
-there were no Rust changes this turn.
+These checks preceded the rebase and this documentation update:
 
-### Historical checks
+| Check                                                           | Result                    |
+| --------------------------------------------------------------- | ------------------------- |
+| Offline integration tests                                       | 17 passed                 |
+| clang-format, all five query files                              | Passed                    |
+| Ruff lint / format                                              | Passed                    |
+| Main patch: forward/cached and reverse apply checks             | Passed                    |
+| Optional generator patch: forward apply to pristine pinned cuDF | Passed                    |
+| Both patch application orders                                   | Identical trees           |
+| Compile-only Q1/Q5/Q6/Q9/Q10, Vortex ON/OFF                     | 10/10 passed, no warnings |
+| Separate generator regression test                              | Compiled                  |
 
-Before the minimal-scope revision (not new-patch passes):
+Compile records are under ignored `build/cudf-ndsh-minimal-compile/`:
+`summary.md`, `results.json`, `ninja-compdb.json`, `commands.txt`, `commands.json`,
+`generator-test-summary.md`, and `generator-test-command.json`.
+
+### Earlier checks
+
+The following results describe historical source configurations:
 
 | Check                                                       | Result    |
 | ----------------------------------------------------------- | --------- |
@@ -54,24 +64,6 @@ Before the minimal-scope revision (not new-patch passes):
 | `python3 -B benchmarks/cudf-ndsh/test_build_integration.py` | 14 passed |
 | `.venv/bin/ruff check` / `format --check`, integration test | Passed    |
 | Refreshed patch: forward/cached and reverse apply checks    | Passed    |
-
-Previous full cuDF Release build attempted (historical command, not a retry instruction):
-
-```sh
-cmake --build build/cudf-ndsh-build \
-  --target NDSH_Q01_NVBENCH NDSH_Q05_NVBENCH NDSH_Q06_NVBENCH \
-    NDSH_Q09_NVBENCH NDSH_Q10_NVBENCH NDSH_VORTEX_IO_TEST -j4
-```
-
-**Timed out after 1200 s.** CMake regeneration expanded to 644, then 635 build steps;
-progress reached 223/635. The Vortex Release archive built successfully, but the cuDF
-benchmarks and adapter were **not relinked**. All five Release query targets had built
-before the event-suppression revert, not from the minimal source. No broad automatic
-retry; fresh runtime claims require relinked binaries and reported results.
-
-### Earlier runtime and integration checks
-
-Historical validation, not a fresh post-revert or minimal-patch run:
 
 | Check                                                       | Result                                 |
 | ----------------------------------------------------------- | -------------------------------------- |
@@ -85,41 +77,31 @@ Historical validation, not a fresh post-revert or minimal-patch run:
 | Original Q10 Parquet-pushdown/write benchmark, SF0.01       | Passed                                 |
 
 SF1 covered all Q9 amount engines; the earlier 20-state SF10 check used binary-op.
-SF1/SF10 benchmark memcheck was not rerun after performance changes. Earlier Python
-byte-compilation and offline CMake checks passed; Ruff/cmake-format were unavailable.
-The earlier integration counts above are separate from the prior 14-test offline run.
-Supplemental cuDF 26.08 Debug runs established execution, not pinned Release performance.
+Supplemental cuDF 26.08 Debug runs provided execution evidence; performance tables
+below use pinned Release cuDF.
 
 ## Timing contract
 
-The approved minimal scope uses the **original pinned cuDF generator** and identical
-logical fixtures across formats, matching scan projections/post-read predicates, and
-generic cuDF execution. Q1 uses original `SUM`/native `MEAN`/`COUNT`; Q5/Q9/Q10 table
-reads are sequential. No hand-fitted kernels. Original native Parquet-pushdown
-benchmarks remain separate and retain their input/intermediate lifetimes through output. The default-OFF adapter and Vortex-internal cacheable
-pinned staging, 16M-row blocks, and 8 GiB pool remain. Details: [README.md](README.md).
+Both formats use identical logical fixtures, scan projections, post-read predicates,
+and existing cuDF query operations. The default dataset uses the original pinned
+cuDF generator. Details: [README.md](README.md).
 
 - Compare CPU wall means. Timed work includes complete reads, import/copies/final
   materialization, query execution where selected, destruction, and device completion.
-  Fixture writing, validation, and cache eviction are outside timing.
-- Before the timed portion of **every** manual cold callback, each input file gets
-  `fdatasync` + `POSIX_FADV_DONTNEED`, followed by a required `mincore` residency == 0.
-  Cold Vortex data reads use `O_DIRECT`; metadata remains buffered. Parquet keeps its
-  native reader. Lower-level storage caches are **not** flushed: this is OS-page-cache
-  coldness, not guaranteed cold media.
-- Local files → pinned-host staging → HtoD → GPU decode; **no GPUDirect Storage**.
-  RMM peaks exclude Vortex allocations; separate accounting is required before SF100.
+  Fixture writing, validation, and cache eviction are untimed.
+- Before every timed cold callback, each input file gets `fdatasync` +
+  `POSIX_FADV_DONTNEED`, followed by required `mincore` residency == 0. Cold Vortex
+  data reads use `O_DIRECT`; metadata is buffered, and Parquet uses its native reader.
+  This defines coldness at the **OS page-cache level**.
+- Vortex reads local files through pinned-host staging → HtoD → GPU decode.
+  RMM statistics cover cuDF allocations; Vortex memory requires separate accounting.
 
-## Prior timings — HISTORICAL, not minimal-patch baselines
+## Historical timings
 
-**These measurements used altered generator/performance code and event suppression.**
-They are not valid baselines for the new minimal patch. Restoring original query/read
-code and the pinned generator requires regenerating both formats' fixtures and fresh
-baselines labeled by generator and match counts. The optional generator-fixed dataset
-also needs separately labeled fixtures and baselines. Evidence tables are preserved
-below, not revalidated. Filenames containing `rebuilt` do not imply current binaries.
-
-All values are CPU wall means in **ms**. Query means include reads, not query-only work.
+**These measurements describe earlier source/dataset configurations, not current
+baselines.** Fresh baselines require regenerated paired fixtures and labels for the
+generator and match counts. All values are CPU wall means in **ms**; query means
+include reads. Filenames containing `rebuilt` refer to those historical builds.
 
 ### SF10 warm
 
@@ -163,66 +145,44 @@ Artifact: `build/cudf-ndsh-build/sf1-q1-rebuilt-warm-cold-pinned-release.json` (
 | Warm  |       14.011 |       6.540 |        18.373 |       10.876 |
 | Cold  |       18.771 |       6.561 |        23.383 |       10.926 |
 
-Vortex cold read/query noise is high: 10.7% / 6.7%. This is not a stable final matrix.
-
-The goal of **≥2× for both end-to-end read and query at SF1/SF10, warm/cold, is not
-met**. In these historical runs, Q1 warm and SF10 cold query were below target; Q6 warm
-query was near but below 2×; Q10 was marginal/noisy. These observations do not describe
-minimal-patch performance. No SF100 scaling until fresh nondegenerate matrices are stable.
+Vortex cold read/query noise is high: 10.7% / 6.7%. These historical measurements
+fall short of the ≥2× target across all read/query and warm/cold combinations.
 
 ## Profile evidence and safety
 
 Historical full-read SQLite evidence records ~36.31 ms timed Vortex read: file reads
 extend to 22.6 ms, first decode starts at 22.9 ms, HtoD transfers 1.62 GiB in 7.89 ms,
-decode takes 7.25 ms, and final materialization 1.94 ms. This is historical read evidence,
-not a minimal-patch baseline or full Q1 query profile; that profile is **still absent**.
+decode takes 7.25 ms, and final materialization 1.94 ms. These figures describe the
+historical read configuration.
 
-**Prefix future profiler launches with `env -u ANTHROPIC_API_KEY`** (before `nsys`)
-and otherwise use a sanitized environment. Existing old profiles contain sensitive
-environment metadata: **do not inspect or publish that metadata**, or share raw profiles
-containing it. No old profile environment metadata was inspected for this checkpoint.
-
-## Rejected experiments
-
-Default kernel-event suppression, a fixed three-split cap, duplicate HtoD event removal,
-and earlier StringDict enablement were all rejected/reverted. The cap regressed warm
-read from 34.12 to 35.36 ms; no scheduling change from that experiment is retained.
-No event optimization from these experiments is current.
+**Prefix profiler launches with `env -u ANTHROPIC_API_KEY`** (before `nsys`) and
+otherwise use a sanitized environment. Existing old profiles contain sensitive
+environment metadata: **do not inspect or publish that metadata**, or share raw
+profiles containing it.
 
 ## Correctness scope
 
-Exact projected names/types/values and independent CPU result checks remain **even for
-zero matches**. The original pinned generator can yield empty/degenerate Q6/Q10 and
-low-SF supplier joins; generated results need not be nonempty. Explicit zero match
-counts disclose degenerate queries, which are not meaningful full-query performance
-evidence. Synthetic **nonempty** cases remain alongside boundary, join, null, and
-empty-result tests; generated CPU oracles target non-null schemas.
-Q6 checks zero-match `SUM` is NULL and reports revenue as the string `"NULL"`, not zero.
-Its CPU reference boundary/sliced/float32 test migrated to `q06.cpp` and was expanded
-with no-match/empty GPU cases, so generator separation loses no main-query test.
-These cases compiled but have not been run on the minimal source.
-Q1 counts/quantity sums are exact; floating checks use `1e-10` relative tolerance with
-an absolute floor of `1e-10`. Q9 follows the benchmark's unrounded `SUM(amount)`, not
-the separate streaming SQL's two-decimal rounding. Its CPU reference preserves duplicate
-`partsupp` join multiplicity instead of assuming composite-key uniqueness. Handwritten
-cases cover different costs for matching duplicates, unmatched duplicates, and empty
-inputs; the duplicate case expects seven matches and profits of 190/170/130 for
-ALPHA-1994/ALPHA-1996/ZULU-1995. These GPU cases compiled but have not run.
-Runtime correctness is not newly validated by the compile-only passes.
+Exact projected names/types/values and independent CPU references cover generated
+results, including zero matches. The original pinned generator can yield degenerate
+Q6/Q10 results and low-SF supplier joins. Match counts identify degenerate queries;
+use nondegenerate results for full-query performance claims. Synthetic cases cover
+nonempty results, boundaries, joins, nulls, and empty inputs. Generated CPU oracles
+target non-null schemas.
 
-Optional `benchmarks/cudf-ndsh/generator-fixes.patch` preserves four independent fixes
-and its own regression test across seven files: correlated discount/quantity RNG,
-correlated order year/month RNG, unordered price alignment, and truncated fractional
-supplier scale factors. The patch is separately reviewable and independently applicable
-to pinned cuDF, **not bundled or automatically applied** with `upstream.patch`.
-Both application orders were checked and produce identical trees.
-The main patch has no generator edits/tests or `NDSH_DATA_GENERATOR_TEST` target;
-only the optional patch adds that target. Applying it affects all NDS-H consumers,
-including Vortex OFF: regenerate both formats' fixtures, label the dataset, and collect
-separate baselines. Earlier generator-test results above are historical. Other
-correlations remain; neither dataset establishes full TPC-H conformance.
+- Q1 counts/quantity sums are exact; floating checks use `1e-10` relative tolerance
+  with an absolute floor of `1e-10`.
+- Q6 checks that zero-match `SUM` is NULL and reports revenue as the string `"NULL"`.
+  Cases cover boundary, sliced, float32, no-match, and empty inputs.
+- Q9 follows the benchmark's unrounded `SUM(amount)` and preserves duplicate
+  `partsupp` join multiplicity. Handwritten cases cover different costs for matching
+  duplicates, unmatched duplicates, and empty inputs. The duplicate case expects
+  seven matches and profits of 190/170/130 for ALPHA-1994/ALPHA-1996/ZULU-1995.
 
-All benchmark JSON, logs, Nsight reports, and SQLite exports remain ignored. Follow-up:
-explicitly bounded relinking/runtime/memcheck validation (no broad automatic build retry),
-then regenerated fixtures, fresh labeled SF1/SF10 warm/cold baselines, and a safely
-captured full Q1 query profile.
+The optional [generator-fixes.patch](generator-fixes.patch) supplies four independent
+fixes: discount/quantity RNG correlation, order year/month RNG correlation, price
+alignment, and fractional supplier scale factors. It applies independently to pinned
+cuDF and adds `NDSH_DATA_GENERATOR_TEST`. Its changes affect all NDS-H consumers,
+including Vortex OFF. Selecting this dataset requires regenerated paired fixtures
+and separately labeled baselines.
+
+All benchmark JSON, logs, Nsight reports, and SQLite exports are ignored.
