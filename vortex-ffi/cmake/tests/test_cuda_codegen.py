@@ -7,6 +7,7 @@ import json
 import os
 import unittest
 from pathlib import Path
+from typing import Any
 
 from support import CMakeTest, rust_toolchain_environment
 
@@ -76,6 +77,14 @@ class CudaCodegenTests(CMakeTest):
         self.harness = self.work / "harness"
         self.command("rustc", "--edition=2024", source, "-o", self.harness)
 
+    def nvcc_calls(self, env: dict[str, str]) -> list[dict[str, Any]]:
+        log = self.work / "nvcc.jsonl"
+        log.unlink(missing_ok=True)
+        self.command(self.harness, self.work, env=env)
+        calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(calls), 2)
+        return calls
+
     def test_architecture_flags_modes_and_reused_outputs(self) -> None:
         explicit = [
             "--generate-code=arch=compute_80,code=[compute_80,sm_80]",
@@ -93,12 +102,7 @@ class CudaCodegenTests(CMakeTest):
                 env = self.env.copy()
                 if flags is not None:
                     env["VORTEX_CUDA_ARCH_FLAGS"] = flags
-                log = self.work / "nvcc.jsonl"
-                log.unlink(missing_ok=True)
-                self.command(self.harness, self.work, env=env)
-                calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
-                self.assertEqual(len(calls), 2)
-                for call, (mode, name) in zip(calls, outputs, strict=True):
+                for call, (mode, name) in zip(self.nvcc_calls(env), outputs, strict=True):
                     args = call["args"]
                     self.assertEqual([arg for arg in args if arg.startswith(("-arch", "--generate-code"))], expected)
                     self.assertNotIn("", args)
@@ -123,18 +127,12 @@ class CudaCodegenTests(CMakeTest):
                 env = self.env | ambient
                 if compiler is not None:
                     env["VORTEX_CUDA_HOST_COMPILER"] = compiler
-                log = self.work / "nvcc.jsonl"
-                log.unlink(missing_ok=True)
-                self.command(self.harness, self.work, env=env)
-                calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
-                self.assertEqual(len(calls), 2)
-                for call in calls:
+                for call in self.nvcc_calls(env):
                     args = call["args"]
                     self.assertEqual(call["env"], ambient)
                     self.assertEqual(args.count("--compiler-bindir"), 1 if compiler else 0)
                     if compiler:
-                        index = args.index("--compiler-bindir")
-                        self.assertEqual(args[index : index + 2], ["--compiler-bindir", compiler])
+                        self.assertEqual(args[args.index("--compiler-bindir") + 1], compiler)
 
     def test_binary_embedding_and_empty_table_exclude_stale_fatbins(self) -> None:
         stale = self.output / "stale.fatbin"
