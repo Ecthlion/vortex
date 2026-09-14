@@ -288,11 +288,15 @@ block(SCOPE_FOR VARIABLES)
         -C relocation-model=pic
         -C "debuginfo=${VORTEX_DEBUG_INFO}")
 
-    # Cargo owns incremental invalidation inside this CMake-build-local cache.
-    # Registering the directory as additional clean state gives the standard
-    # CMake clean target the same effect as `cargo clean --target-dir ...`.
+        if(VORTEX_CARGO_TARGET_DIR)
+                _vortex_reject_semicolon("VORTEX_CARGO_TARGET_DIR" "${VORTEX_CARGO_TARGET_DIR}")
+                set(_cargo_target_dir "${VORTEX_CARGO_TARGET_DIR}")
+        else()
+                # Only the default cache belongs to this build tree. A custom directory
+                # may be shared with other builds and must survive CMake's clean target.
     set(_cargo_target_dir "${CMAKE_CURRENT_BINARY_DIR}/cargo-target")
     set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES "${_cargo_target_dir}")
+        endif()
     set(_cargo_ffi_archive
         "${_cargo_target_dir}/${VORTEX_RUST_TARGET}/${_cargo_artifact_directory}/${_cargo_archive_name}")
     set(_ffi_archive "${CMAKE_CURRENT_BINARY_DIR}/vortex-artifacts/libvortex_ffi.a")
