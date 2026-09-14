@@ -4,6 +4,9 @@
  */
 
 #include <cudf/utilities/default_stream.hpp>
+#include <cudf/utilities/error.hpp>
+
+#include <cuda_runtime_api.h>
 
 #include <vortex/session.hpp>
 #include <vortex_cuda.h>
@@ -16,6 +19,8 @@
 int main()
 {
   try {
+    // Driver-backed stream synchronization requires an initialized current context.
+    CUDF_CUDA_TRY(cudaSetDevice(0));
     auto const stream = cudf::get_default_stream();
     stream.sync();
     vortex::Session host_session;

@@ -173,7 +173,7 @@ if(CUDF_NDSH_WITH_VORTEX)
   assert_property(NDSH_VORTEX_IO_TEST SOURCES "${harness}/tests/vortex_io_test.cpp")
   assert_property(NDSH_VORTEX_IO INCLUDE_DIRECTORIES "${harness}/src")
   assert_property(NDSH_VORTEX_IO INTERFACE_INCLUDE_DIRECTORIES "${harness}/src")
-  assert_property(NDSH_VORTEX_BUILD_SMOKE LINK_LIBRARIES "cudf::cudf;Vortex::cpp_static")
+  assert_property(NDSH_VORTEX_BUILD_SMOKE LINK_LIBRARIES "cudf::cudf;Vortex::cpp_static;CUDA::cudart")
   assert_property(NDSH_VORTEX_BUILD_SMOKE INTERFACE_LINK_LIBRARIES "")
   assert_property(NDSH_VORTEX_BUILD_SMOKE COMPILE_FEATURES cxx_std_20)
   assert_property(NDSH_VORTEX_IO_TEST LINK_LIBRARIES
@@ -442,6 +442,17 @@ class BenchmarkSourceTests(unittest.TestCase):
         match = re.search(pattern, source)
         self.assertIsNotNone(match, f"Missing source pattern: {pattern}")
         return match
+
+    def test_smoke_initializes_device_before_stream_sync(self):
+        smoke = self.source(SMOKE)
+        self.assertIn("#include <cudf/utilities/error.hpp>", smoke)
+        self.assertIn("#include <cuda_runtime_api.h>", smoke)
+        self.assertIn(
+            "CUDF_CUDA_TRY(cudaSetDevice(0)); auto const stream = cudf::get_default_stream(); stream.sync();",
+            smoke,
+        )
+        self.assertLess(smoke.index("stream.sync();"), smoke.index("vortex::Session host_session;"))
+        self.assertLess(smoke.index("vortex::Session host_session;"), smoke.index("vx_cuda_session_new(&error)"))
 
     def test_bootstrap_uses_the_module_checkout(self):
         hook = patch_hook()

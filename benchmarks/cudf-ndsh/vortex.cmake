@@ -34,7 +34,7 @@ block()
   add_executable(NDSH_VORTEX_BUILD_SMOKE EXCLUDE_FROM_ALL
                  "${CMAKE_CURRENT_LIST_DIR}/tests/vortex_build_smoke.cpp")
   target_compile_features(NDSH_VORTEX_BUILD_SMOKE PRIVATE cxx_std_20)
-  target_link_libraries(NDSH_VORTEX_BUILD_SMOKE PRIVATE cudf::cudf Vortex::cpp_static)
+  target_link_libraries(NDSH_VORTEX_BUILD_SMOKE PRIVATE cudf::cudf Vortex::cpp_static CUDA::cudart)
 
   add_executable(NDSH_VORTEX_IO_TEST EXCLUDE_FROM_ALL
                  "${CMAKE_CURRENT_LIST_DIR}/tests/vortex_io_test.cpp")
