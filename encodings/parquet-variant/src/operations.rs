@@ -31,7 +31,7 @@ use crate::ParquetVariantArraySlotsExt;
 use crate::vtable::ParquetVariant;
 
 impl OperationsVTable<ParquetVariant> for ParquetVariant {
-    type ProbeState<'a> = ();
+    type ProbeState = ();
 
     /// Resolves one row according to the Parquet Variant shredding rules.
     ///

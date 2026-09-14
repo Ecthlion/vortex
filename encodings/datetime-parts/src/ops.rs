@@ -17,7 +17,7 @@ use crate::timestamp;
 use crate::timestamp::TimestampParts;
 
 impl OperationsVTable<DateTimeParts> for DateTimeParts {
-    type ProbeState<'a> = ();
+    type ProbeState = ();
 
     fn scalar_at(
         array: ArrayView<'_, DateTimeParts>,

@@ -11,7 +11,7 @@ use crate::arrays::bool::BoolArrayExt;
 use crate::scalar::Scalar;
 
 impl OperationsVTable<Bool> for Bool {
-    type ProbeState<'a> = ();
+    type ProbeState = ();
 
     fn scalar_at(
         array: ArrayView<'_, Bool>,

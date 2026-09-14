@@ -13,7 +13,7 @@ use crate::arrays::struct_::StructArrayExt;
 use crate::scalar::Scalar;
 
 impl OperationsVTable<Map> for Map {
-    type ProbeState<'a> = ();
+    type ProbeState = ();
 
     fn scalar_at(
         array: ArrayView<'_, Map>,

@@ -21,27 +21,29 @@ pub trait OperationsVTable<V: VTable> {
     /// Encoding-specific state retained by repeated scalar access.
     ///
     /// Default construction should be cheap and avoid allocation or execution. Preparation
-    /// belongs in [`Self::probe_scalar`]. `'a` is the borrow of the root array, so state may
-    /// retain views into its source tree. Request retained child probes through [`ProbeAccess`].
+    /// belongs in [`Self::probe_scalar`]. State owns its preparation and may retain shared
+    /// buffer or array handles. Request retained child probes through [`ProbeAccess`].
     /// Use `()` when no local state is needed.
-    type ProbeState<'a>: Default + 'a;
+    type ProbeState: Default + 'static;
 
-    /// Read a scalar, handling nullness and optionally retaining state for subsequent reads.
+    /// Read a non-null scalar, optionally retaining state for subsequent reads.
     ///
-    /// Bounds have been checked, but the row may be null. `ProbeAccess::Once` requests one-off access and
+    /// Bounds and validity have been checked; the row is non-null. `ProbeAccess::Once` requests one-off access and
     /// never initializes a context; `ProbeAccess::Repeated` reuses local state and child probes for this source.
     /// The scalar must retain the source's logical dtype, including nullability.
     ///
     /// The default preserves the existing scalar path without adding caching.
-    fn probe_scalar<'a>(
-        array: ArrayView<'a, V>,
+    fn probe_scalar(
+        array: ArrayView<'_, V>,
         index: usize,
-        _probe: ProbeAccess<'a, '_, Self::ProbeState<'a>>,
+        _probe: ProbeAccess<'_, Self::ProbeState>,
         ctx: &mut ExecutionCtx,
     ) -> VortexResult<Scalar> {
-        array.array().execute_scalar(index, ctx)
+        // FIXME: Remove this default once all encodings have migrated to probe_scalar.
+        Self::scalar_at(array, index, ctx)
     }
 
+    // FIXME: Deprecate scalar_at once encodings have migrated to probe_scalar.
     /// Fetch the scalar at the given index.
     ///
     /// ## Preconditions
@@ -60,7 +62,7 @@ pub trait OperationsVTable<V: VTable> {
 }
 
 impl<V: VTable> OperationsVTable<V> for NotSupported {
-    type ProbeState<'a> = ();
+    type ProbeState = ();
 
     fn scalar_at(
         array: ArrayView<'_, V>,

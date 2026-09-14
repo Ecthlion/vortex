@@ -14,7 +14,7 @@ use crate::FSST;
 use crate::FSSTArrayExt;
 
 impl OperationsVTable<FSST> for FSST {
-    type ProbeState<'a> = ();
+    type ProbeState = ();
 
     fn scalar_at(
         array: ArrayView<'_, FSST>,

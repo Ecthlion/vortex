@@ -11,7 +11,7 @@ use crate::arrays::fixed_size_list::FixedSizeListArrayExt;
 use crate::scalar::Scalar;
 
 impl OperationsVTable<FixedSizeList> for FixedSizeList {
-    type ProbeState<'a> = ();
+    type ProbeState = ();
 
     fn scalar_at(
         array: ArrayView<'_, FixedSizeList>,

@@ -15,7 +15,7 @@ use crate::scalar::Scalar;
 use crate::scalar_fn::VecExecutionArgs;
 
 impl OperationsVTable<ScalarFn> for ScalarFn {
-    type ProbeState<'a> = ();
+    type ProbeState = ();
 
     fn scalar_at(
         array: ArrayView<'_, ScalarFn>,

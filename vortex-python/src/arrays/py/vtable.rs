@@ -122,7 +122,7 @@ impl VTable for PythonVTable {
 }
 
 impl OperationsVTable<PythonVTable> for PythonVTable {
-    type ProbeState<'a> = ();
+    type ProbeState = ();
 
     fn scalar_at(
         _array: ArrayView<'_, PythonVTable>,

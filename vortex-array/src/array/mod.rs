@@ -35,10 +35,12 @@ mod probe;
 pub use probe::ArrayProbe;
 pub use probe::ProbeAccess;
 pub use probe::ProbeChildren;
+pub use probe::ProbeCtx;
 pub use probe::ProbeSlot;
 pub use probe::ProbeState;
 use probe::ProbeStorage;
 pub use probe::ProbeUsage;
+pub use probe::ValidityProbe;
 
 mod foreign;
 pub(crate) use foreign::*;
@@ -229,21 +231,19 @@ pub(crate) trait DynArrayData: 'static + private::Sealed + Send + Sync + Debug {
         ctx: &mut ExecutionCtx,
     ) -> VortexResult<ExecutionResult>;
 
-    /// Execute the scalar at the given index.
-    ///
-    /// This method panics if the index is out of bounds for the array.
-    fn execute_scalar(
+    fn probe_is_valid(
         &self,
         this: &ArrayRef,
         index: usize,
+        state: Option<&mut ProbeStorage>,
         ctx: &mut ExecutionCtx,
-    ) -> VortexResult<Scalar>;
+    ) -> VortexResult<bool>;
 
-    fn probe_scalar<'a>(
-        &'a self,
-        this: &'a ArrayRef,
+    fn probe_scalar(
+        &self,
+        this: &ArrayRef,
         index: usize,
-        state: Option<&mut ProbeStorage<'a>>,
+        state: Option<&mut ProbeStorage>,
         ctx: &mut ExecutionCtx,
     ) -> VortexResult<Scalar>;
 }
@@ -507,21 +507,30 @@ impl<V: VTable> DynArrayData for ArrayData<V> {
         V::execute(typed, ctx)
     }
 
-    fn execute_scalar(
+    fn probe_is_valid(
         &self,
         this: &ArrayRef,
         index: usize,
+        state: Option<&mut ProbeStorage>,
         ctx: &mut ExecutionCtx,
-    ) -> VortexResult<Scalar> {
-        let view = unsafe { ArrayView::new_unchecked(this, &self.data) };
-        <V::OperationsVTable as OperationsVTable<V>>::scalar_at(view, index, ctx)
+    ) -> VortexResult<bool> {
+        let mut validity = match state {
+            Some(storage) => storage
+                .validity::<<V::OperationsVTable as OperationsVTable<V>>::ProbeState>(this)?,
+            None => ValidityProbe::once(this)?,
+        };
+        validity
+            .execute_scalar(index, ctx)?
+            .as_bool()
+            .value()
+            .ok_or_else(|| vortex_err!("validity value at index {index} is null"))
     }
 
-    fn probe_scalar<'a>(
-        &'a self,
-        this: &'a ArrayRef,
+    fn probe_scalar(
+        &self,
+        this: &ArrayRef,
         index: usize,
-        state: Option<&mut ProbeStorage<'a>>,
+        state: Option<&mut ProbeStorage>,
         ctx: &mut ExecutionCtx,
     ) -> VortexResult<Scalar> {
         // SAFETY: this adapter belongs to the ArrayData<V> stored in `this`.

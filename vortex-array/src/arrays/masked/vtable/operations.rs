@@ -11,7 +11,7 @@ use crate::arrays::masked::MaskedArraySlotsExt;
 use crate::scalar::Scalar;
 
 impl OperationsVTable<Masked> for Masked {
-    type ProbeState<'a> = ();
+    type ProbeState = ();
 
     fn scalar_at(
         array: ArrayView<'_, Masked>,

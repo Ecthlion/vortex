@@ -200,7 +200,7 @@ impl VTable for Filter {
     }
 }
 impl OperationsVTable<Filter> for Filter {
-    type ProbeState<'a> = ();
+    type ProbeState = ();
 
     fn scalar_at(
         array: ArrayView<'_, Filter>,

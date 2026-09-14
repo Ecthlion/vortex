@@ -778,7 +778,7 @@ impl ValidityVTable<Pco> for Pco {
 }
 
 impl OperationsVTable<Pco> for Pco {
-    type ProbeState<'a> = ();
+    type ProbeState = ();
 
     fn scalar_at(
         array: ArrayView<'_, Pco>,

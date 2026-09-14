@@ -389,7 +389,7 @@ impl VTable for Interleave {
 }
 
 impl OperationsVTable<Interleave> for Interleave {
-    type ProbeState<'a> = ();
+    type ProbeState = ();
 
     fn scalar_at(
         array: ArrayView<'_, Interleave>,

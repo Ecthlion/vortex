@@ -169,7 +169,7 @@ impl VTable for Slice {
     }
 }
 impl OperationsVTable<Slice> for Slice {
-    type ProbeState<'a> = ();
+    type ProbeState = ();
 
     fn scalar_at(
         array: ArrayView<'_, Slice>,

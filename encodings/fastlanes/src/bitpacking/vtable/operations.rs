@@ -11,7 +11,7 @@ use crate::BitPacked;
 use crate::bitpack_decompress;
 use crate::bitpacking::array::BitPackedArrayExt;
 impl OperationsVTable<BitPacked> for BitPacked {
-    type ProbeState<'a> = ();
+    type ProbeState = ();
 
     fn scalar_at(
         array: ArrayView<'_, BitPacked>,

@@ -21,11 +21,13 @@ use crate::AnyCanonical;
 use crate::Array;
 use crate::ArrayEq;
 use crate::ArrayHash;
+use crate::ArrayProbe;
 use crate::ArrayView;
 use crate::Canonical;
 use crate::ExecutionCtx;
 use crate::ExecutionResult;
 use crate::IntoArray;
+use crate::ProbeUsage;
 use crate::VTable;
 use crate::VortexSessionExecute;
 use crate::aggregate_fn::fns::sum::sum;
@@ -273,28 +275,32 @@ impl ArrayRef {
     }
 
     /// Execute the array to extract a scalar at the given index.
+    // TODO(joe): deprecate this.
     pub fn execute_scalar(&self, index: usize, ctx: &mut ExecutionCtx) -> VortexResult<Scalar> {
-        vortex_ensure!(index < self.len(), OutOfBounds: index, 0, self.len());
-        if self.dtype().is_nullable() && self.is_invalid(index, ctx)? {
-            return Ok(Scalar::null(self.dtype().clone()));
-        }
-        let scalar = self.0.data.execute_scalar(self, index, ctx)?;
-        debug_assert_eq!(self.dtype(), scalar.dtype(), "Scalar dtype mismatch");
-        Ok(scalar)
+        self.probe(ProbeUsage::Once).execute_scalar(index, ctx)
+    }
+
+    /// Create an accessor with the requested policy for retaining state between scalar lookups.
+    ///
+    /// ```
+    /// use vortex_array::{IntoArray, ProbeUsage, VortexSessionExecute};
+    /// use vortex_array::arrays::PrimitiveArray;
+    ///
+    /// let array = PrimitiveArray::from_iter([10i32, 20, 30]).into_array();
+    /// let mut ctx = vortex_array::array_session().create_execution_ctx();
+    /// let mut probe = array.probe(ProbeUsage::Repeated);
+    /// assert_eq!(probe.execute_scalar(2, &mut ctx)?, 30i32.into());
+    /// assert_eq!(probe.execute_scalar(0, &mut ctx)?, 10i32.into());
+    /// # Ok::<(), vortex_error::VortexError>(())
+    /// ```
+    pub fn probe(&self, usage: ProbeUsage) -> ArrayProbe {
+        ArrayProbe::new(self.clone(), usage)
     }
 
     /// Returns whether the item at `index` is valid.
+    // TODO(joe): deprecate this.
     pub fn is_valid(&self, index: usize, ctx: &mut ExecutionCtx) -> VortexResult<bool> {
-        vortex_ensure!(index < self.len(), OutOfBounds: index, 0, self.len());
-        match self.validity()? {
-            Validity::NonNullable | Validity::AllValid => Ok(true),
-            Validity::AllInvalid => Ok(false),
-            Validity::Array(a) => a
-                .execute_scalar(index, ctx)?
-                .as_bool()
-                .value()
-                .ok_or_else(|| vortex_err!("validity value at index {} is null", index)),
-        }
+        self.probe(ProbeUsage::Once).execute_is_valid(index, ctx)
     }
 
     /// Returns whether the item at `index` is invalid.

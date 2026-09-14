@@ -11,7 +11,7 @@ use crate::match_each_native_ptype;
 use crate::scalar::Scalar;
 
 impl OperationsVTable<Primitive> for Primitive {
-    type ProbeState<'a> = ();
+    type ProbeState = ();
 
     fn scalar_at(
         array: ArrayView<'_, Primitive>,

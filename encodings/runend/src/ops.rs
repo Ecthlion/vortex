@@ -18,7 +18,7 @@ use crate::array::RunEndArrayExt;
 use crate::array::RunEndArraySlotsExt;
 
 impl OperationsVTable<RunEnd> for RunEnd {
-    type ProbeState<'a> = ();
+    type ProbeState = ();
 
     fn scalar_at(
         array: ArrayView<'_, RunEnd>,
