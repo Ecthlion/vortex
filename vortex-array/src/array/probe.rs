@@ -117,7 +117,7 @@ impl ProbeSlot<'_> {
 /// Local encoding state and lazy child probes retained for one source array.
 ///
 /// The framework initializes this context once for repeated access and passes it to
-/// [`OperationsVTable::probe_scalar`](crate::vtable::OperationsVTable::probe_scalar).
+/// [`OperationsVTable::probe_scalar`].
 /// One-off access uses [`ProbeAccess::Once`] instead. `S` is the encoding's associated state type;
 /// it owns its prepared resources, including shared buffer or array handles.
 pub struct ProbeState<S> {
