@@ -125,6 +125,7 @@ fn render_layout_header(app: &AppState, area: Rect, buf: &mut Buffer) {
 }
 
 /// Render the inner Array for a FlatLayout.
+#[expect(deprecated)]
 fn render_array(app: &AppState, area: Rect, buf: &mut Buffer, is_stats_table: bool) {
     // Array data is loaded eagerly when navigating to a FlatLayout (synchronously on
     // native, asynchronously on WASM) and cached in AppState. The render loop never

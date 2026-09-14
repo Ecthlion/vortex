@@ -38,6 +38,7 @@ fn take(array: &UnionArray, indices: ArrayRef) -> VortexResult<UnionArray> {
 
 /// Assert that `array` holds exactly `expected`, row for row.
 #[track_caller]
+#[expect(deprecated)]
 fn assert_rows(array: &UnionArray, expected: Vec<Scalar>) -> VortexResult<()> {
     let mut ctx = array_session().create_execution_ctx();
 

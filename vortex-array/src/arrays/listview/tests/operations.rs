@@ -36,6 +36,7 @@ use crate::validity::Validity;
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #[test]
+#[expect(deprecated)]
 fn test_slice_comprehensive() {
     // Comprehensive test for basic slicing, full array, and single element cases.
     // Logical lists: [[1,2,3], [4,5], [6,7,8], [9,10]]
@@ -139,6 +140,7 @@ fn test_slice_out_of_order() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_slice_with_nulls() {
     // Test slicing with nullable ListView.
     // Logical lists: [[1,2], null, [5,6], null]
@@ -274,6 +276,7 @@ fn test_cast_numeric_types(#[case] from_ptype: PType, #[case] to_ptype: PType) {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_cast_with_nulls() {
     // Logical lists: [[10,20], null]
     let elements = buffer![10i32, 20, 30, 40].into_array();
@@ -632,6 +635,7 @@ fn test_mask_listview_conformance(#[case] listview: ListViewArray) {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_mask_preserves_structure() {
     // ListView-specific: Verify mask preserves offsets and sizes.
     // Logical lists: [[1,2], [3,4], [5,6], [7,8]]
@@ -688,6 +692,7 @@ fn test_mask_preserves_structure() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_mask_with_existing_nulls() {
     // ListView-specific: Test interaction between existing nulls and mask.
     // Logical lists: [[10,20], null, [50,60]]
@@ -728,6 +733,7 @@ fn test_mask_with_existing_nulls() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_mask_with_gaps() {
     // ListView-specific: Mask with gaps in elements.
     // Logical lists: [[1,2], [5,6], [9,10]] (999 values are gaps)
@@ -766,6 +772,7 @@ fn test_mask_with_gaps() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_mask_constant_arrays() {
     // ListView-specific: Test mask with ConstantArray offsets/sizes.
     // Logical lists: [[200,300], [200,300], [200,300]]

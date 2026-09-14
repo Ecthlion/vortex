@@ -17,6 +17,7 @@ use crate::match_each_alp_float_ptype;
 impl OperationsVTable<ALP> for ALP {
     type ProbeState = ();
 
+    #[expect(deprecated)]
     fn scalar_at(
         array: ArrayView<'_, ALP>,
         index: usize,

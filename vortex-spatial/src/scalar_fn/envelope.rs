@@ -188,6 +188,7 @@ fn envelope_array(
 }
 
 /// Execute `envelope` after shared constant/column and null dispatch.
+#[expect(deprecated)]
 fn execute_envelope(
     execution: Execution<1, Validity>,
     output_dtype: &ExtDType<Rect>,
@@ -548,6 +549,7 @@ mod tests {
 
     /// A non-null constant is boxed once and retained as a constant output.
     #[test]
+    #[expect(deprecated)]
     fn constant_point_remains_constant() -> VortexResult<()> {
         let session = crate::test_harness::spatial_session();
         let mut ctx = session.create_execution_ctx();

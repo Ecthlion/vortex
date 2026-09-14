@@ -79,6 +79,7 @@ impl ScalarFnVTable for ListSum {
             .ok_or_else(|| vortex_err!("list_sum() cannot sum elements of type {elem_dtype}"))
     }
 
+    #[expect(deprecated)]
     fn execute(
         &self,
         options: &Self::Options,
@@ -322,6 +323,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_nan_poisons_with_include_nans() -> VortexResult<()> {
         let elements = PrimitiveArray::from_iter([1.0f64, f64::NAN, 2.0]);
         let list = ListArray::try_new(
@@ -448,6 +450,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_constant_list_sum() -> VortexResult<()> {
         let elements = create_list_elements();
         let list = ListArray::try_new(
@@ -467,6 +470,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_null_scalar_list_sum() -> VortexResult<()> {
         let null_scalar = Scalar::null(DType::List(
             Arc::new(DType::Primitive(PType::I32, Nullability::NonNullable)),

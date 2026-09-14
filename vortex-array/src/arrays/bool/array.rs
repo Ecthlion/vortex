@@ -388,6 +388,7 @@ mod tests {
     use crate::validity::Validity;
 
     #[test]
+    #[expect(deprecated)]
     fn bool_array() {
         let mut ctx = array_session().create_execution_ctx();
 
@@ -397,6 +398,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_all_some_iter() {
         let mut ctx = array_session().create_execution_ctx();
 
@@ -411,6 +413,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_bool_from_iter() {
         let mut ctx = array_session().create_execution_ctx();
         let arr = BoolArray::from_iter([Some(true), Some(true), None, Some(false), None]);

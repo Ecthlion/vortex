@@ -22,6 +22,7 @@ use vortex_error::VortexResult;
 
 use crate::array::take_canonical_array_non_nullable_indices;
 
+#[expect(deprecated)]
 pub fn filter_canonical_array(
     array: &ArrayRef,
     filter: &[bool],

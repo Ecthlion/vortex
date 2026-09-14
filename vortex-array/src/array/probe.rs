@@ -257,6 +257,7 @@ impl ValidityProbe<'_> {
     }
 
     /// Read a non-null boolean scalar indicating whether the requested row is valid.
+    #[expect(deprecated)]
     pub fn execute_scalar(&mut self, index: usize, ctx: &mut ExecutionCtx) -> VortexResult<Scalar> {
         vortex_ensure!(index < self.len, OutOfBounds: index, 0, self.len);
         match &mut self.inner {

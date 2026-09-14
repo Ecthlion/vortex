@@ -323,6 +323,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn listview_float_nan_and_inf() -> VortexResult<()> {
         let elements = PrimitiveArray::new(
             buffer![1.0f64, f64::NAN, 2.0, f64::INFINITY, f64::NEG_INFINITY, 4.0],
@@ -363,6 +364,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn listview_float_nan_not_skipping() -> VortexResult<()> {
         let elements = PrimitiveArray::new(
             buffer![1.0f64, f64::NAN, 2.0, 3.0, 4.0],

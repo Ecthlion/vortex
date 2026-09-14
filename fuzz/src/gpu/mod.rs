@@ -96,6 +96,7 @@ fn arbitrary_gpu_primitive_dtype(u: &mut Unstructured) -> Result<vortex_array::d
 /// - `Ok(false)` - test skipped (e.g., no CUDA), reject from corpus
 /// - `Err(_)` - a bug was found
 #[allow(clippy::result_large_err)]
+#[expect(deprecated)]
 pub async fn run_compress_gpu(fuzz: FuzzCompressGpu) -> VortexFuzzResult<bool> {
     use vortex_cuda::CanonicalCudaExt;
     use vortex_cuda::CudaSession;

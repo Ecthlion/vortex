@@ -60,6 +60,7 @@ mod tests {
     });
 
     #[test]
+    #[expect(deprecated)]
     fn test_cast_runend_i32_to_i64() {
         let mut ctx = SESSION.create_execution_ctx();
         let runend = RunEnd::try_new(

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+#![expect(deprecated)]
+
 use std::sync::Arc;
 
 use rstest::rstest;

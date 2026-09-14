@@ -220,6 +220,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_nullable_string_byte_length() -> VortexResult<()> {
         let array = VarBinArray::from_nullable_strs(vec![Some("hello"), None, Some("Пуховички")])
             .into_array();
@@ -241,6 +242,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_null_scalar_byte_length() -> VortexResult<()> {
         let null_scalar = Scalar::null(DType::Utf8(Nullability::Nullable));
         let array = ConstantArray::new(null_scalar, 2).into_array();

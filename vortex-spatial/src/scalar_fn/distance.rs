@@ -95,6 +95,7 @@ mod tests {
     use crate::test_harness::polygon_column;
 
     /// A constant `Point` column of length `len`, every row at `(x, y)`.
+    #[expect(deprecated)]
     fn point_constant(
         x: f64,
         y: f64,
@@ -146,6 +147,7 @@ mod tests {
     /// Distance passes no bounding-rect rejection: a point far outside a constant polygon's
     /// bounding rect still gets its true distance, alongside an inside point at distance zero.
     #[test]
+    #[expect(deprecated)]
     fn distance_to_constant_polygon_is_exact() -> VortexResult<()> {
         let session = vortex_array::array_session();
         let mut ctx = session.create_execution_ctx();

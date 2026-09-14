@@ -771,6 +771,7 @@ mod test {
     }
 
     #[test]
+    #[expect(deprecated)]
     pub fn test_scalar_at() {
         let array = sparse_array(nullable_fill());
 
@@ -796,6 +797,7 @@ mod test {
 
     #[test]
     #[should_panic(expected = "out of bounds")]
+    #[expect(deprecated)]
     fn test_scalar_at_oob() {
         let array = sparse_array(nullable_fill());
         array
@@ -804,6 +806,7 @@ mod test {
     }
 
     #[test]
+    #[expect(deprecated)]
     pub fn test_scalar_at_again() {
         let arr = Sparse::try_new(
             ConstantArray::new(10u32, 1).into_array(),
@@ -833,6 +836,7 @@ mod test {
     }
 
     #[test]
+    #[expect(deprecated)]
     pub fn scalar_at_sliced() {
         let sliced = sparse_array(nullable_fill()).slice(2..7).unwrap();
         assert_eq!(
@@ -886,6 +890,7 @@ mod test {
     }
 
     #[test]
+    #[expect(deprecated)]
     pub fn scalar_at_sliced_twice() {
         let sliced_once = sparse_array(nullable_fill()).slice(1..8).unwrap();
         assert_eq!(

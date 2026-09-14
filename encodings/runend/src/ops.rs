@@ -20,6 +20,7 @@ use crate::array::RunEndArraySlotsExt;
 impl OperationsVTable<RunEnd> for RunEnd {
     type ProbeState = ();
 
+    #[expect(deprecated)]
     fn scalar_at(
         array: ArrayView<'_, RunEnd>,
         index: usize,
@@ -186,6 +187,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn ree_scalar_at_end() {
         let mut ctx = SESSION.create_execution_ctx();
         let scalar = RunEnd::encode(

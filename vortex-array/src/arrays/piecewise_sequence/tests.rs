@@ -103,6 +103,7 @@ fn supports_constant_lengths() -> VortexResult<()> {
 }
 
 #[test]
+#[expect(deprecated)]
 fn scalar_at_maps_into_piece() -> VortexResult<()> {
     let starts = buffer![3u64, 15, 21].into_array();
     let lengths = buffer![3u64, 3, 3].into_array();

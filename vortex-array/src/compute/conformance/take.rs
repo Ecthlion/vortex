@@ -52,6 +52,7 @@ pub fn test_take_conformance(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     }
 }
 
+#[expect(deprecated)]
 fn test_take_all(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     let indices = PrimitiveArray::from_iter(0..len as u64);
@@ -105,6 +106,7 @@ fn test_take_none(array: &ArrayRef) {
 }
 
 #[expect(clippy::cast_possible_truncation)]
+#[expect(deprecated)]
 fn test_take_selective(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
 
@@ -131,6 +133,7 @@ fn test_take_selective(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     }
 }
 
+#[expect(deprecated)]
 fn test_take_first_and_last(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     let indices = PrimitiveArray::from_iter([0u64, (len - 1) as u64]);
@@ -158,6 +161,7 @@ fn test_take_first_and_last(array: &ArrayRef, ctx: &mut ExecutionCtx) {
 }
 
 #[expect(clippy::cast_possible_truncation)]
+#[expect(deprecated)]
 fn test_take_with_nullable_indices(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
 
@@ -205,6 +209,7 @@ fn test_take_with_nullable_indices(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     }
 }
 
+#[expect(deprecated)]
 fn test_take_repeated_indices(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     if array.is_empty() {
         return;
@@ -240,6 +245,7 @@ fn test_empty_indices(array: &ArrayRef) {
     assert_eq!(result.dtype(), array.dtype());
 }
 
+#[expect(deprecated)]
 fn test_take_reverse(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     // Take elements in reverse order
@@ -263,6 +269,7 @@ fn test_take_reverse(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     }
 }
 
+#[expect(deprecated)]
 fn test_take_single_middle(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     let middle_idx = len / 2;
@@ -284,6 +291,7 @@ fn test_take_single_middle(array: &ArrayRef, ctx: &mut ExecutionCtx) {
 }
 
 #[expect(clippy::cast_possible_truncation)]
+#[expect(deprecated)]
 fn test_take_random_unsorted(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
 
@@ -315,6 +323,7 @@ fn test_take_random_unsorted(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     }
 }
 
+#[expect(deprecated)]
 fn test_take_contiguous_range(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     let start = len / 4;
@@ -342,6 +351,7 @@ fn test_take_contiguous_range(array: &ArrayRef, ctx: &mut ExecutionCtx) {
 }
 
 #[expect(clippy::cast_possible_truncation)]
+#[expect(deprecated)]
 fn test_take_mixed_repeated(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
 
@@ -378,6 +388,7 @@ fn test_take_mixed_repeated(array: &ArrayRef, ctx: &mut ExecutionCtx) {
 }
 
 #[expect(clippy::cast_possible_truncation)]
+#[expect(deprecated)]
 fn test_take_large_indices(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     // Test with a large number of indices to stress test performance
     let len = array.len();

@@ -258,6 +258,7 @@ impl VTable for TransposedBool {
 impl OperationsVTable<TransposedBool> for TransposedBool {
     type ProbeState = ();
 
+    #[expect(deprecated)]
     fn scalar_at(
         array: ArrayView<'_, TransposedBool>,
         index: usize,
@@ -327,6 +328,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn slice_stays_lazy_and_translates_scalars() -> VortexResult<()> {
         let expected = test_bits();
         let array = TransposedBool::try_new(transposed_bool_array(expected.clone()))?;

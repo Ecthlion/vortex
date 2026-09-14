@@ -869,6 +869,7 @@ mod test {
     use crate::validity::Validity;
 
     #[test]
+    #[expect(deprecated)]
     fn nullable_take() {
         let mut ctx = array_session().create_execution_ctx();
         let list = ListArray::try_new(
@@ -1020,6 +1021,7 @@ mod test {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn non_nullable_take() {
         let mut ctx = array_session().create_execution_ctx();
         let list = ListArray::try_new(
@@ -1094,6 +1096,7 @@ mod test {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn piecewise_sequence_take() {
         let mut ctx = array_session().create_execution_ctx();
         let list = ListArray::try_new(
@@ -1142,6 +1145,7 @@ mod test {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn piecewise_sequence_take_nullable_list_constant_lengths() -> VortexResult<()> {
         let mut ctx = array_session().create_execution_ctx();
         let list = ListArray::try_new(
@@ -1194,6 +1198,7 @@ mod test {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn piecewise_sequence_take_nullable_list_array_lengths() -> VortexResult<()> {
         let mut ctx = array_session().create_execution_ctx();
         let list = ListArray::try_new(
@@ -1308,6 +1313,7 @@ mod test {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_u64_offset_accumulation_non_nullable() {
         let mut ctx = array_session().create_execution_ctx();
         let elements = buffer![0i32; 200].into_array();
@@ -1337,6 +1343,7 @@ mod test {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_u64_offset_accumulation_nullable() {
         let mut ctx = array_session().create_execution_ctx();
         let elements = buffer![0i32; 150].into_array();

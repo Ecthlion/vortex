@@ -308,6 +308,7 @@ impl RunEnd {
 }
 
 impl RunEndData {
+    #[expect(deprecated)]
     fn logical_len_from_ends(ends: &ArrayRef, ctx: &mut ExecutionCtx) -> VortexResult<usize> {
         if ends.is_empty() {
             Ok(0)
@@ -318,6 +319,7 @@ impl RunEndData {
 
     /// Validate that `ends` and `values` form a well-formed run-end array covering
     /// `offset..offset + length`.
+    #[expect(deprecated)]
     pub fn validate_parts(
         ends: &ArrayRef,
         values: &ArrayRef,

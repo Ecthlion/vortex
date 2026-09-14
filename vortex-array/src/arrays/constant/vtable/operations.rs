@@ -35,6 +35,7 @@ mod tests {
     use crate::scalar::Scalar;
 
     #[test]
+    #[expect(deprecated)]
     fn scalar_at_preserves_union_scalar() -> VortexResult<()> {
         let variants = UnionVariants::try_new(
             ["int", "string"].into(),

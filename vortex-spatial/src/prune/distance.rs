@@ -154,6 +154,7 @@ mod tests {
     /// Run the rule against `SpatialDistance(root, origin) <operator> radius`, operands swapped when
     /// `geom_first` is false. The radius is any literal scalar, matching the uncoerced filter
     /// expressions the rule sees in production.
+    #[expect(deprecated)]
     fn falsify_distance(
         operator: Operator,
         geom_first: bool,
@@ -253,6 +254,7 @@ mod tests {
     /// An extension-typed radius passes `Binary`'s typecheck (extension operands are exempt) but
     /// has no numeric value - the rule declines rather than erroring, and the chunk is scanned.
     #[test]
+    #[expect(deprecated)]
     fn extension_radius_never_prunes() -> VortexResult<()> {
         let session = spatial_session();
         let mut ctx = session.create_execution_ctx();
@@ -264,6 +266,7 @@ mod tests {
 
     /// A non-geometry scope is rejected while binding, before stats rewriting.
     #[test]
+    #[expect(deprecated)]
     fn unsupported_scope_is_not_pruned() -> VortexResult<()> {
         let session = spatial_session();
         let mut ctx = session.create_execution_ctx();
@@ -290,6 +293,7 @@ mod tests {
 
     /// End-to-end over a hand-built zone map: the far chunk is skipped, the near one kept.
     #[test]
+    #[expect(deprecated)]
     fn prunes_far_chunk_keeps_near() -> VortexResult<()> {
         let session = spatial_session();
         let mut ctx = session.create_execution_ctx();
@@ -318,6 +322,7 @@ mod tests {
     /// The true-distance prune skips a chunk that is *diagonally* farther than `r`, even though
     /// neither axis alone exceeds `r`, the case a per-axis box-overlap test would wrongly keep.
     #[test]
+    #[expect(deprecated)]
     fn prunes_diagonally_distant_chunk() -> VortexResult<()> {
         let session = spatial_session();
         let mut ctx = session.create_execution_ctx();
@@ -348,6 +353,7 @@ mod tests {
     /// A `>= r` filter prunes a chunk lying wholly *within* `r` (every row nearer than `r`, so none
     /// satisfy `>= r`) via the box max-distance, while a chunk beyond `r` is kept.
     #[test]
+    #[expect(deprecated)]
     fn prunes_within_chunk_for_far_filter() -> VortexResult<()> {
         let session = spatial_session();
         let mut ctx = session.create_execution_ctx();
@@ -376,6 +382,7 @@ mod tests {
     /// Backward compat: a zone map written without the `GeometryAabb` stat (an older file) keeps
     /// every zone, the missing stat binds to null and `null_as_false` retains the zone.
     #[test]
+    #[expect(deprecated)]
     fn missing_aabb_stat_keeps_all_zones() -> VortexResult<()> {
         let session = spatial_session();
         let mut ctx = session.create_execution_ctx();

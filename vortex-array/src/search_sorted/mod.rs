@@ -274,6 +274,7 @@ fn search_sorted_side_idx<F: FnMut(usize) -> VortexResult<Ordering>>(
 
 impl IndexOrd<Scalar> for ArrayRef {
     #[allow(clippy::disallowed_methods)]
+    #[expect(deprecated)]
     fn index_cmp(&self, idx: usize, elem: &Scalar) -> VortexResult<Option<Ordering>> {
         let scalar_a = self.execute_scalar(idx, &mut legacy_session().create_execution_ctx())?;
         Ok(scalar_a.partial_cmp(elem))

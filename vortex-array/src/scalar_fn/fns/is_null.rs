@@ -150,6 +150,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn evaluate_mask() {
         let test_array =
             PrimitiveArray::from_option_iter(vec![Some(1), None, Some(2), None, Some(3)])
@@ -172,6 +173,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn evaluate_all_false() {
         let test_array = buffer![1, 2, 3, 4, 5].into_array();
 
@@ -190,6 +192,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn evaluate_all_true() {
         let test_array =
             PrimitiveArray::from_option_iter(vec![None::<i32>, None, None, None, None])
@@ -210,6 +213,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn evaluate_struct() {
         let test_array = StructArray::from_fields(&[(
             "a",

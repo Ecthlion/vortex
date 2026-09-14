@@ -335,6 +335,7 @@ pub trait VarBinArrayExt: VarBinArraySlotsExt {
     }
 
     #[allow(clippy::disallowed_methods)]
+    #[expect(deprecated)]
     fn offset_at(&self, index: usize) -> usize {
         assert!(
             index <= self.as_ref().len(),

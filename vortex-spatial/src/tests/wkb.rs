@@ -103,6 +103,7 @@ fn assert_imported_wkb_dtype(dtype: &DType, expected_crs: Option<&str>, nullable
 
 /// WKB scalars unpack back to the geometry they encode.
 #[test]
+#[expect(deprecated)]
 fn scalar_unpacks_to_geometry() -> VortexResult<()> {
     let mut ctx = SESSION.create_execution_ctx();
     let (_, array) = wkb_extension_array()?;
@@ -182,6 +183,7 @@ fn import_field_without_crs() -> VortexResult<()> {
 
 /// Import wraps the binary-family Arrow array's WKB values unchanged.
 #[test]
+#[expect(deprecated)]
 fn imports_from_binary() -> VortexResult<()> {
     let mut ctx = SESSION.create_execution_ctx();
     let (wkb_bytes, _) = wkb_extension_array()?;
@@ -238,6 +240,7 @@ fn imports_from_binary_view() -> VortexResult<()> {
 
 /// A WKB column exported to Arrow and imported back is unchanged, byte for byte.
 #[test]
+#[expect(deprecated)]
 fn roundtrips_through_arrow() -> VortexResult<()> {
     let mut ctx = SESSION.create_execution_ctx();
     let (wkb_bytes, original) = wkb_extension_array()?;

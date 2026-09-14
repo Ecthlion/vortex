@@ -73,6 +73,7 @@ fn import_field_recovers_extension() -> VortexResult<()> {
 /// A `Rect` column exported to Arrow and imported back is unchanged, including the CRS and the
 /// box corners.
 #[test]
+#[expect(deprecated)]
 fn roundtrips_through_arrow() -> VortexResult<()> {
     let mut ctx = SESSION.create_execution_ctx();
     let original = rect_column(vec![(0.0, 1.0, 2.0, 3.0), (-5.0, -5.0, 5.0, 5.0)])?;

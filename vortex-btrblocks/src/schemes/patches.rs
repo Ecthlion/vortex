@@ -12,6 +12,7 @@ use vortex_error::VortexError;
 use vortex_error::VortexResult;
 
 /// Compresses the given patches by downscaling integers and checking for constant values.
+#[expect(deprecated)]
 pub fn compress_patches(patches: Patches, ctx: &mut ExecutionCtx) -> VortexResult<Patches> {
     // Downscale the patch indices.
     let indices = patches

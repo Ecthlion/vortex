@@ -43,6 +43,7 @@ pub(crate) fn varbin_to_canonical(
 
 #[cfg(test)]
 mod tests {
+    #![expect(deprecated)]
     use rstest::rstest;
     use vortex_error::VortexResult;
 

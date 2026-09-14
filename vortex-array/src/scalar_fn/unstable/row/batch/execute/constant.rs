@@ -13,6 +13,7 @@ use crate::arrays::ConstantArray;
 
 impl RowFnExecutionArgs {
     /// Execute all-constant inputs by evaluating one row and broadcasting the validated result.
+    #[expect(deprecated)]
     pub(super) fn execute_all_constant(
         &self,
         kernel: impl Fn(BorrowedRowFnArgs<'_>, &mut ExecutionCtx) -> VortexResult<ArrayRef>,

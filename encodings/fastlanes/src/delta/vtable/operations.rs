@@ -13,6 +13,7 @@ use super::Delta;
 impl OperationsVTable<Delta> for Delta {
     type ProbeState = ();
 
+    #[expect(deprecated)]
     fn scalar_at(
         array: ArrayView<'_, Delta>,
         index: usize,
@@ -221,6 +222,7 @@ mod tests {
 
     #[test]
     #[should_panic]
+    #[expect(deprecated)]
     fn test_scalar_at_non_jagged_array_oob() {
         let delta = da(&(0u32..2048).collect()).into_array();
         delta
@@ -237,6 +239,7 @@ mod tests {
 
     #[test]
     #[should_panic]
+    #[expect(deprecated)]
     fn test_scalar_at_jagged_array_oob() {
         let delta = da(&(0u32..2000).collect()).into_array();
         delta

@@ -131,6 +131,7 @@ impl ScalarFnVTable for VariantGet {
             .map_or(DType::Variant(Nullability::Nullable), DType::as_nullable))
     }
 
+    #[expect(deprecated)]
     fn execute(
         &self,
         options: &Self::Options,
@@ -772,6 +773,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn variant_get_generic_fallback_preserves_variant_null() -> VortexResult<()> {
         let array = variant_rows([
             Scalar::variant(variant_object([(
@@ -810,6 +812,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn variant_get_fallback_variant_output_canonicalizes() -> VortexResult<()> {
         let array = variant_rows([
             Scalar::variant(variant_object([(

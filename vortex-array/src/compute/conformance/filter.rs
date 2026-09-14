@@ -81,6 +81,7 @@ fn test_none_filter(array: &ArrayRef) {
     assert_eq!(filtered.dtype(), array.dtype());
 }
 
+#[expect(deprecated)]
 fn test_selective_filter(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     if len < 2 {
@@ -137,6 +138,7 @@ fn test_selective_filter(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     }
 }
 
+#[expect(deprecated)]
 fn test_single_element_filter(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     if len == 0 {
@@ -218,6 +220,7 @@ fn test_mismatched_lengths(array: &ArrayRef) {
 }
 
 /// Tests filtering with alternating true/false pattern
+#[expect(deprecated)]
 fn test_alternating_pattern_filter(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     let pattern = create_alternating_pattern(len);

@@ -36,6 +36,7 @@ pub fn test_mask_conformance(array: &ArrayRef, ctx: &mut ExecutionCtx) {
 }
 
 /// Tests masking with a heterogeneous pattern
+#[expect(deprecated)]
 fn test_heterogenous_mask(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
 
@@ -72,6 +73,7 @@ fn test_heterogenous_mask(array: &ArrayRef, ctx: &mut ExecutionCtx) {
 }
 
 /// Tests that an empty mask (all false) preserves all elements
+#[expect(deprecated)]
 fn test_empty_mask(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     let all_unmasked = vec![false; len];
@@ -98,6 +100,7 @@ fn test_empty_mask(array: &ArrayRef, ctx: &mut ExecutionCtx) {
 }
 
 /// Tests that a full mask (all true) makes all elements null
+#[expect(deprecated)]
 fn test_full_mask(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     let all_masked = vec![true; len];
@@ -120,6 +123,7 @@ fn test_full_mask(array: &ArrayRef, ctx: &mut ExecutionCtx) {
 }
 
 /// Tests alternating mask pattern
+#[expect(deprecated)]
 fn test_alternating_mask(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     let pattern: Vec<bool> = (0..len).map(|i| i % 2 == 0).collect();
@@ -153,6 +157,7 @@ fn test_alternating_mask(array: &ArrayRef, ctx: &mut ExecutionCtx) {
 }
 
 /// Tests sparse mask (only a few elements masked)
+#[expect(deprecated)]
 fn test_sparse_mask(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     if len < 10 {
@@ -194,6 +199,7 @@ fn test_sparse_mask(array: &ArrayRef, ctx: &mut ExecutionCtx) {
 }
 
 /// Tests masking a single element
+#[expect(deprecated)]
 fn test_single_element_mask(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
 
@@ -226,6 +232,7 @@ fn test_single_element_mask(array: &ArrayRef, ctx: &mut ExecutionCtx) {
 }
 
 /// Tests double masking operations
+#[expect(deprecated)]
 fn test_double_mask(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
 
@@ -267,6 +274,7 @@ fn test_double_mask(array: &ArrayRef, ctx: &mut ExecutionCtx) {
 }
 
 /// Tests masking with nullable mask (nulls treated as false)
+#[expect(deprecated)]
 fn test_nullable_mask_input(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     if len < 3 {

@@ -233,6 +233,7 @@ impl Default for ZigZagData {
 impl OperationsVTable<ZigZag> for ZigZag {
     type ProbeState = ();
 
+    #[expect(deprecated)]
     fn scalar_at(
         array: ArrayView<'_, ZigZag>,
         index: usize,
@@ -276,6 +277,7 @@ mod test {
     use crate::zigzag_encode;
 
     #[test]
+    #[expect(deprecated)]
     fn test_compute_statistics() -> VortexResult<()> {
         let mut ctx = array_session().create_execution_ctx();
         let array = buffer![1i32, -5i32, 2, 3, 4, 5, 6, 7, 8, 9, 10]

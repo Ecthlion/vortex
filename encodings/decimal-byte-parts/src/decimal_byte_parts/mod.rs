@@ -291,6 +291,7 @@ fn to_canonical_decimal(
 impl OperationsVTable<DecimalByteParts> for DecimalByteParts {
     type ProbeState = ();
 
+    #[expect(deprecated)]
     fn scalar_at(
         array: ArrayView<'_, DecimalByteParts>,
         index: usize,
@@ -336,6 +337,7 @@ mod tests {
     use crate::DecimalByteParts;
 
     #[test]
+    #[expect(deprecated)]
     fn test_scalar_at_decimal_parts() {
         let decimal_dtype = DecimalDType::new(8, 2);
         let dtype = DType::Decimal(decimal_dtype, Nullability::Nullable);

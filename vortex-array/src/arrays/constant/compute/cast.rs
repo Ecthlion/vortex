@@ -49,6 +49,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::disallowed_methods)]
+    #[expect(deprecated)]
     fn test_cast_constant_i64_to_decimal() {
         let target_dtype = DType::Decimal(DecimalDType::new(21, 2), Nullability::NonNullable);
         let casted = ConstantArray::new(Scalar::from(42i64), 5)

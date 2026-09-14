@@ -753,6 +753,7 @@ mod tests {
     use crate::scalar::Scalar;
 
     #[test]
+    #[expect(deprecated)]
     fn test_builder() {
         let mut builder = VarBinBuilder::<i32>::with_capacity_in(
             DType::Utf8(Nullable),

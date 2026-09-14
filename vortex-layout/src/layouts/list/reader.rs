@@ -543,6 +543,7 @@ fn fetch_validity(
 }
 
 /// Read `offsets[0]` and `offsets[-1]` and return the elements range they bound.
+#[expect(deprecated)]
 fn elements_range_from_offsets(
     offsets: &ArrayRef,
     session: &VortexSession,

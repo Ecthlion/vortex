@@ -14,6 +14,7 @@ use crate::scalar::Scalar;
 impl OperationsVTable<Variant> for Variant {
     type ProbeState = ();
 
+    #[expect(deprecated)]
     fn scalar_at(
         array: ArrayView<'_, Variant>,
         index: usize,

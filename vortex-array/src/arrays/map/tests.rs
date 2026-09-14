@@ -142,6 +142,7 @@ fn constructs_map_with_listview_entries() -> VortexResult<()> {
 }
 
 #[test]
+#[expect(deprecated)]
 fn accepts_duplicate_and_unsorted_keys() -> VortexResult<()> {
     let array = sample_array()?;
     let mut ctx = array_session().create_execution_ctx();
@@ -205,6 +206,7 @@ fn rejects_malformed_entry_storage() -> VortexResult<()> {
 }
 
 #[test]
+#[expect(deprecated)]
 fn scalar_access_preserves_null_and_empty_maps() -> VortexResult<()> {
     let array = sample_array()?;
     let mut ctx = array_session().create_execution_ctx();
@@ -220,6 +222,7 @@ fn scalar_access_preserves_null_and_empty_maps() -> VortexResult<()> {
 }
 
 #[test]
+#[expect(deprecated)]
 fn scalar_access_preserves_variable_entry_counts_and_utf8_pairs() -> VortexResult<()> {
     let map_dtype = MapDType::try_new(
         DType::Utf8(Nullability::NonNullable),
@@ -652,6 +655,7 @@ fn filter_preserves_duplicate_map_keys() -> VortexResult<()> {
 }
 
 #[test]
+#[expect(deprecated)]
 fn builder_appends_existing_map_arrays() -> VortexResult<()> {
     let source = sample_array()?;
     let mut builder = MapBuilder::<u64, u64>::with_capacity_in(
@@ -702,6 +706,7 @@ fn canonicalizes_empty_constant_and_chunked_maps() -> VortexResult<()> {
 }
 
 #[test]
+#[expect(deprecated)]
 fn serde_roundtrip_uses_registered_map_vtable() -> VortexResult<()> {
     let session = array_session();
     assert!(session.arrays().registry().contains_key(&Map.id()));

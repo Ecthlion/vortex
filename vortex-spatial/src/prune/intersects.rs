@@ -75,6 +75,7 @@ mod tests {
 
     /// Run the intersects rule against `SpatialIntersects(root, point(1.0, 0.5))`, operands swapped
     /// when `geom_first` is false.
+    #[expect(deprecated)]
     fn falsify_intersects(geom_first: bool) -> VortexResult<Option<BoundExpression>> {
         let session = spatial_session();
         let mut ctx = session.create_execution_ctx();
@@ -103,6 +104,7 @@ mod tests {
 
     /// A non-geometry scope is rejected while binding, before stats rewriting.
     #[test]
+    #[expect(deprecated)]
     fn unsupported_scope_is_not_pruned() -> VortexResult<()> {
         let session = spatial_session();
         let mut ctx = session.create_execution_ctx();
@@ -134,6 +136,7 @@ mod tests {
     /// End-to-end: a zone strictly separated from the query is skipped; zones containing or merely
     /// touching the query must scan, touching geometries intersect under OGC semantics.
     #[test]
+    #[expect(deprecated)]
     fn prunes_disjoint_keeps_touching_and_containing() -> VortexResult<()> {
         let session = spatial_session();
         let mut ctx = session.create_execution_ctx();
@@ -164,6 +167,7 @@ mod tests {
 
     /// Backward compat: a zone map written without the `GeometryAabb` stat keeps every zone.
     #[test]
+    #[expect(deprecated)]
     fn missing_aabb_stat_keeps_all_zones() -> VortexResult<()> {
         let session = spatial_session();
         let mut ctx = session.create_execution_ctx();

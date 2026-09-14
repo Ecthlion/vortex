@@ -353,6 +353,7 @@ mod tests {
         }
     }
 
+    #[expect(deprecated)]
     fn assert_variant_scalars_eq(
         actual: &vortex_array::ArrayRef,
         expected: &vortex_array::ArrayRef,

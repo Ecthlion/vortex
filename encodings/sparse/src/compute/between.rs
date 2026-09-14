@@ -23,6 +23,7 @@ use crate::SparseExt as _;
 ///
 /// Declines (falls back to canonical) unless both bounds are constants.
 impl BetweenKernel for Sparse {
+    #[expect(deprecated)]
     fn between(
         array: ArrayView<'_, Self>,
         lower: &ArrayRef,

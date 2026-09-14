@@ -97,6 +97,7 @@ pub(crate) fn is_constant_for_compression(
 /// # Errors
 ///
 /// Returns an error if computing validity or extracting the constant scalar fails.
+#[expect(deprecated)]
 pub(crate) fn compress_constant(
     source: &ArrayRef,
     ctx: &mut ExecutionCtx,

@@ -135,6 +135,7 @@ fn import_interleaved_field_fails() {
 
 /// Import wraps the Arrow struct's coordinate buffers into a Point column.
 #[test]
+#[expect(deprecated)]
 fn imports_from_struct() -> VortexResult<()> {
     let mut ctx = SESSION.create_execution_ctx();
     let arrow: ArrowArrayRef =
@@ -163,6 +164,7 @@ fn imports_from_struct() -> VortexResult<()> {
 
 /// A point column exported to Arrow and imported back is unchanged, including the CRS.
 #[test]
+#[expect(deprecated)]
 fn roundtrips_through_arrow() -> VortexResult<()> {
     let mut ctx = SESSION.create_execution_ctx();
     let original = point_column(vec![0.0, 3.0], vec![4.0, 0.0])?;

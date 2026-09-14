@@ -29,6 +29,7 @@ use crate::validity::Validity;
 
 /// Baseline oracle: compare two arrays element-wise using `execute_scalar`.
 /// Returns true iff every position has the same scalar (null == null is true).
+#[expect(deprecated)]
 fn scalar_baseline(a: &ArrayRef, b: &ArrayRef, ctx: &mut ExecutionCtx) -> VortexResult<bool> {
     assert_eq!(a.len(), b.len());
     for i in 0..a.len() {

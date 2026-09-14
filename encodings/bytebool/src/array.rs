@@ -349,6 +349,7 @@ mod tests {
     });
 
     #[test]
+    #[expect(deprecated)]
     fn test_validity_construction() {
         let v = vec![true, false];
         let v_len = v.len();

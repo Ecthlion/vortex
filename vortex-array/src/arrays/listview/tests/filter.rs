@@ -170,6 +170,7 @@ fn test_filter_constant_arrays() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_filter_extreme_offsets() {
     // ListView-specific: Test with very large offsets.
     let elements = PrimitiveArray::from_iter(0i32..10000).into_array();

@@ -43,6 +43,7 @@ fn test_empty_list_array() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_simple_list_array() {
     let mut ctx = SESSION.create_execution_ctx();
     let elements = buffer![1i32, 2, 3, 4, 5].into_array();
@@ -74,6 +75,7 @@ fn test_simple_list_array() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_simple_list_array_from_iter() {
     let mut ctx = SESSION.create_execution_ctx();
     let elements = buffer![1i32, 2, 3].into_array();
@@ -208,6 +210,7 @@ fn test_list_filter_empty_lists() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_list_filter_with_nulls() {
     let mut ctx = SESSION.create_execution_ctx();
     // Test filtering lists with null validity.
@@ -586,6 +589,7 @@ fn create_list_of_lists_nullable(data: OptVec<OptVec<OptVec<i32>>>) -> ListArray
 
 #[test]
 #[expect(clippy::cognitive_complexity)]
+#[expect(deprecated)]
 fn test_list_of_lists() {
     let mut ctx = SESSION.create_execution_ctx();
     let data = vec![
@@ -670,6 +674,7 @@ fn test_list_of_lists() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_list_of_lists_nullable_outer() {
     let mut ctx = SESSION.create_execution_ctx();
     // Create list of lists with nullable outer, non-nullable inner.
@@ -715,6 +720,7 @@ fn test_list_of_lists_nullable_outer() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_list_of_lists_nullable_inner() {
     // Create list of lists with non-nullable outer, nullable inner.
     // Structure: [[[1, 2], null, [3]], [[4, 5, 6]], [], [[null, 7]]]
@@ -759,6 +765,7 @@ fn test_list_of_lists_nullable_inner() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_list_of_lists_both_nullable() {
     let mut ctx = SESSION.create_execution_ctx();
     // Create list of lists with both nullable.
@@ -904,6 +911,7 @@ fn test_offsets_constant() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_recursive_compact_list_of_lists() {
     let mut ctx = SESSION.create_execution_ctx();
     // Create a nested list structure: [[[1,2,3], [4,5]], [[6,7,8,9]], [[10], [11,12]]]

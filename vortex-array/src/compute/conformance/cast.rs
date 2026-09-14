@@ -67,6 +67,7 @@ pub fn test_cast_conformance(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     }
 }
 
+#[expect(deprecated)]
 fn test_cast_identity(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     // Casting to the same type should be a no-op
     let result = cast_and_execute(&array.clone(), array.dtype().clone(), ctx)
@@ -87,6 +88,7 @@ fn test_cast_identity(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     }
 }
 
+#[expect(deprecated)]
 fn test_cast_from_null(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     // Null can be cast to itself
     let result = cast_and_execute(&array.clone(), DType::Null, ctx)
@@ -131,6 +133,7 @@ fn test_cast_from_null(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     }
 }
 
+#[expect(deprecated)]
 fn test_cast_to_non_nullable(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     // DType::Null has no non-nullable form
     if &DType::Null == array.dtype() {
@@ -190,6 +193,7 @@ fn test_cast_to_non_nullable(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     }
 }
 
+#[expect(deprecated)]
 fn test_cast_to_nullable(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let nullable = cast_and_execute(&array.clone(), array.dtype().as_nullable(), ctx)
         .vortex_expect("arrays without nulls can cast to nullable");
@@ -260,6 +264,7 @@ fn fits(value: &Scalar, ptype: PType) -> bool {
     value.cast(&dtype).is_ok()
 }
 
+#[expect(deprecated)]
 fn test_cast_to_primitive(
     array: &ArrayRef,
     target_ptype: PType,

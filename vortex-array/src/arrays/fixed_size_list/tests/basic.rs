@@ -18,6 +18,7 @@ use crate::scalar::Scalar;
 use crate::validity::Validity;
 
 #[test]
+#[expect(deprecated)]
 fn test_basic_fixed_size_list() {
     let len = 4;
     let list_size = 3;
@@ -120,6 +121,7 @@ fn test_basic_fixed_size_list() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_scalar_at() {
     let len = 2;
     let list_size = 3;
@@ -197,6 +199,7 @@ fn test_scalar_at() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_fixed_size_list_at() {
     let len = 3;
     let list_size = 2;

@@ -583,6 +583,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_rebuild_trim_elements_basic() -> VortexResult<()> {
         // Test trimming both leading and trailing unused elements while preserving gaps in the
         // middle.
@@ -662,6 +663,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_rebuild_with_trailing_nulls_regression() -> VortexResult<()> {
         // Regression test for issue #5412
         // Tests that zero-copy-to-list arrays with trailing NULLs correctly calculate

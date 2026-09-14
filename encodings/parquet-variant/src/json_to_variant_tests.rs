@@ -65,6 +65,7 @@ fn execute_json_to_variant(input: ArrayRef, shredding: ShreddingSpec) -> VortexR
         .execute::<ArrayRef>(&mut SESSION.create_execution_ctx())
 }
 
+#[expect(deprecated)]
 fn assert_variant_i64_rows(array: &ArrayRef, expected: &[Option<i64>]) -> VortexResult<()> {
     assert_eq!(array.len(), expected.len());
     let mut ctx = SESSION.create_execution_ctx();
@@ -97,6 +98,7 @@ fn rejects_bare_utf8_input() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn converts_json_extension_rows() -> VortexResult<()> {
     let input = json_input(
         VarBinViewArray::from_iter_str([r#"{"a": 1}"#, "2", r#"{"a": 3}"#]).into_array(),
@@ -158,6 +160,7 @@ fn dict_encoded_input_converts_each_row() -> VortexResult<()> {
 }
 
 #[test]
+#[expect(deprecated)]
 fn null_rows_stay_null_and_json_null_becomes_variant_null() -> VortexResult<()> {
     let input = json_input(
         VarBinViewArray::from_iter_nullable_str([Some("1"), None, Some("null")]).into_array(),
@@ -186,6 +189,7 @@ fn invalid_json_errors() -> VortexResult<()> {
 }
 
 #[test]
+#[expect(deprecated)]
 fn shredding_produces_typed_value_child() -> VortexResult<()> {
     let input = json_input(
         VarBinViewArray::from_iter_str([
@@ -275,6 +279,7 @@ fn shredding_preserves_null_rows() -> VortexResult<()> {
 }
 
 #[test]
+#[expect(deprecated)]
 fn shredding_root_path_shreds_top_level_values() -> VortexResult<()> {
     let input =
         json_input(VarBinViewArray::from_iter_str(["1", "2", r#""not-a-number""#]).into_array())?;

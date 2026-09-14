@@ -83,6 +83,7 @@ fn query_ring(cx: f64, cy: f64) -> Vec<(f64, f64)> {
 
 /// The query polygon as a batch-constant operand: a top-level `ConstantArray` over the geometry
 /// extension scalar, the shape that reaches the row loop's stride-0 path.
+#[expect(deprecated)]
 fn query_constant(ctx: &mut ExecutionCtx, rows: usize) -> ArrayRef {
     let scalar = polygon_column(vec![vec![query_ring(0.0, 0.0)]])
         .unwrap()
@@ -92,6 +93,7 @@ fn query_constant(ctx: &mut ExecutionCtx, rows: usize) -> ArrayRef {
 }
 
 /// A batch-constant point operand with the requested row count.
+#[expect(deprecated)]
 fn point_constant(ctx: &mut ExecutionCtx, rows: usize) -> ArrayRef {
     let scalar = point_column(vec![0.0], vec![0.0])
         .unwrap()

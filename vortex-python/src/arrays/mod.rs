@@ -799,6 +799,7 @@ impl PyArray {
     /// OverflowError: can't convert negative int to unsigned
     /// ```
     // TODO(ngates): return a vortex.Scalar
+    #[expect(deprecated)]
     fn scalar_at(slf: Bound<Self>, index: usize) -> PyVortexResult<Bound<PyScalar>> {
         // PyArray/PyArrayRef do not currently carry a VortexSession; threading one
         // through would change the FromPyObject contract. Use the crate session

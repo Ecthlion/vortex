@@ -104,6 +104,7 @@ mod test {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_zeros() {
         let mut ctx = SESSION.create_execution_ctx();
         let array = PrimitiveArray::new(buffer![0i32; 100], Validity::NonNullable);
@@ -153,6 +154,7 @@ mod test {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_overflow() -> VortexResult<()> {
         let mut ctx = SESSION.create_execution_ctx();
         let array = PrimitiveArray::from_iter(i8::MIN..=i8::MAX);

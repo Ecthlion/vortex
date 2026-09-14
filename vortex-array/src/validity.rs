@@ -164,6 +164,7 @@ impl Validity {
 
     /// Returns whether the `index` item is valid, using `ctx` to execute the validity array.
     #[inline]
+    #[expect(deprecated)]
     pub fn execute_is_valid(&self, index: usize, ctx: &mut ExecutionCtx) -> VortexResult<bool> {
         Ok(match self {
             Self::NonNullable | Self::AllValid => true,

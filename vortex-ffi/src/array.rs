@@ -263,6 +263,7 @@ pub unsafe extern "C-unwind" fn vx_array_slice(
 /// array is corrupted.
 #[unsafe(no_mangle)]
 #[allow(clippy::disallowed_methods)]
+#[expect(deprecated)]
 pub unsafe extern "C-unwind" fn vx_array_element_is_invalid(
     session: *const vx_session,
     array: *const vx_array,
@@ -516,6 +517,7 @@ pub unsafe extern "C-unwind" fn vx_array_get_bool(array: *const vx_array, index:
 ///
 /// Errors if "index" is out of bounds.
 #[unsafe(no_mangle)]
+#[expect(deprecated)]
 pub unsafe extern "C-unwind" fn vx_array_get_scalar(
     session: *const vx_session,
     array: *const vx_array,

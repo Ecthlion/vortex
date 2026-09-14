@@ -589,6 +589,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_sequence_scalar_at() {
         let scalar = Sequence::try_new_typed(2i64, 3, Nullability::NonNullable, 4)
             .unwrap()
@@ -729,6 +730,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn descending_step_unsigned_output() -> VortexResult<()> {
         let mut ctx = SESSION.create_execution_ctx();
         let array = Sequence::try_new(
@@ -777,6 +779,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn values_past_i64_max() -> VortexResult<()> {
         let mut ctx = SESSION.create_execution_ctx();
         let step = 1u64 << 62;

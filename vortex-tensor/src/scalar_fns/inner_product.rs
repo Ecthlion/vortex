@@ -290,6 +290,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn null_input_row() -> VortexResult<()> {
         // 3 rows of dim-2 vectors. Row 1 of lhs is masked as null.
         let lhs = tensor_array(&[2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])?;

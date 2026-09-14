@@ -876,6 +876,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn cast_decimal_f64_null() {
         let values = [Some(100i32), None, Some(-200)];
         let array = DecimalArray::from_option_iter(values, DecimalDType::new(6, 2));
@@ -904,6 +905,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn cast_decimal_f64_all_null() {
         let dtype = DecimalDType::new(6, 2);
         let buf = buffer![i32::MAX, i32::MIN, 12345];

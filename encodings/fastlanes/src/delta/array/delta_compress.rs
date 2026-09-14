@@ -127,6 +127,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    #![expect(deprecated)]
     use std::iter;
     use std::sync::LazyLock;
 

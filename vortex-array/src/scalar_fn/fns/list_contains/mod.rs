@@ -225,6 +225,7 @@ fn constant_list_scalar_contains(
 }
 
 /// Returns a [`BoolArray`] where each bit represents if a list contains the scalar.
+#[expect(deprecated)]
 fn list_contains_scalar(
     array: &ArrayRef,
     value: &Scalar,
@@ -459,6 +460,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     pub fn test_one() {
         let arr = test_array();
 
@@ -478,6 +480,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     pub fn test_all() {
         let arr = test_array();
 
@@ -497,6 +500,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     pub fn test_none() {
         let arr = test_array();
 
@@ -516,6 +520,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     pub fn test_empty() {
         let arr = ListArray::try_new(
             PrimitiveArray::from_iter(vec![1, 1, 2, 2, 2]).into_array(),
@@ -541,6 +546,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     pub fn test_nullable() {
         let arr = ListArray::try_new(
             PrimitiveArray::from_iter(vec![1, 1, 2, 2, 2]).into_array(),
@@ -640,6 +646,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     pub fn test_constant_scalars() {
         let arr = test_array();
 

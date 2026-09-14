@@ -57,6 +57,7 @@ impl ExecuteParentKernel<RunEnd> for RunEndSliceKernel {
     }
 }
 
+#[expect(deprecated)]
 fn slice(
     array: ArrayView<'_, RunEnd>,
     range: Range<usize>,

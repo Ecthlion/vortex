@@ -122,6 +122,7 @@ fn constant(value: i128, ptype: PType, len: usize) -> VortexResult<ArrayRef> {
 }
 
 #[test]
+#[expect(deprecated)]
 fn sequence_kernels_match_exact_model() -> VortexResult<()> {
     let session = vortex_array::array_session();
     crate::initialize(&session);

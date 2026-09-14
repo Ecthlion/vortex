@@ -136,6 +136,7 @@ fn build_make_lines(
 }
 
 /// Execute `ST_MakeLine` after shared constant/column and null dispatch.
+#[expect(deprecated)]
 fn execute_make_line(
     execution: Execution<2>,
     output_dtype: &ExtDType<LineString>,
@@ -299,6 +300,7 @@ mod tests {
         Ok(ExtensionArray::try_new(dtype.erased(), storage)?.into_array())
     }
 
+    #[expect(deprecated)]
     fn point_constant(
         x: f64,
         y: f64,

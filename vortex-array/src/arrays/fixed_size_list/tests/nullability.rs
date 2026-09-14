@@ -19,6 +19,7 @@ use crate::scalar::Scalar;
 use crate::validity::Validity;
 
 #[test]
+#[expect(deprecated)]
 fn test_nullable_fsl_with_nulls() {
     let len = 4;
     let list_size = 2;
@@ -103,6 +104,7 @@ fn test_nullable_fsl_with_nulls() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_nullable_elements_non_nullable_lists() {
     let len = 2;
     let list_size = 3;
@@ -151,6 +153,7 @@ fn test_nullable_elements_non_nullable_lists() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_nullable_elements_and_nullable_lists() {
     let len = 3;
     let list_size = 2;
@@ -229,6 +232,7 @@ fn test_nullable_elements_and_nullable_lists() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_alternating_nulls() {
     let len = 6;
     let list_size = 1;
@@ -263,6 +267,7 @@ fn test_alternating_nulls() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_validity_types() {
     let len = 4;
     let list_size = 2;
@@ -316,6 +321,7 @@ fn test_validity_types() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_mixed_nullability_patterns() {
     let len = 5;
     let list_size = 2;

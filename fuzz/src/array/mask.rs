@@ -63,6 +63,7 @@ pub fn mask_validity(validity: &Validity, mask: &Mask, ctx: &mut ExecutionCtx) -
 /// Apply mask on the canonical form of the array to get a consistent baseline.
 /// This implementation manually applies the mask to each canonical type
 /// without using the mask_fn method, to serve as an independent baseline for testing.
+#[expect(deprecated)]
 pub fn mask_canonical_array(
     canonical: Canonical,
     mask: &Mask,
@@ -198,6 +199,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_mask_null_array() {
         let mut ctx = array_session().create_execution_ctx();
         let array = NullArray::new(5);
@@ -279,6 +281,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_mask_list_array() {
         let mut ctx = array_session().create_execution_ctx();
         let elements = PrimitiveArray::from_iter([1i32, 2, 3, 4, 5, 6]).into_array();
@@ -300,6 +303,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_mask_fixed_size_list_array() {
         let mut ctx = array_session().create_execution_ctx();
         let elements = PrimitiveArray::from_iter([1i32, 2, 3, 4, 5, 6]).into_array();
@@ -317,6 +321,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_mask_struct_array() {
         let mut ctx = array_session().create_execution_ctx();
         let field1 = PrimitiveArray::from_iter([1i32, 2, 3]).into_array();

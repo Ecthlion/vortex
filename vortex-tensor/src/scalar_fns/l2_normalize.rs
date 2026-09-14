@@ -373,6 +373,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_input_nulls_produce_null_struct_rows() -> VortexResult<()> {
         let input = vector_array(
             2,

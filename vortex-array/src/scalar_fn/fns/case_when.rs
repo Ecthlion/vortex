@@ -380,6 +380,7 @@ fn merge_case_branches(
 
 /// Iterates spans directly, emitting one `scalar_at` per row.
 /// Zero per-run allocations; preferred for fragmented masks (avg run < [`SLICE_CROSSOVER_RUN_LEN`]).
+#[expect(deprecated)]
 fn merge_row_by_row(
     branch_arrays: &[&ArrayRef],
     else_value: &ArrayRef,
@@ -1219,6 +1220,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_evaluate_nary_string_output() -> VortexResult<()> {
         // Exercises merge_case_branches with a non-primitive (Utf8) builder.
         let test_array =

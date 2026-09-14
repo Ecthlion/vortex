@@ -2044,6 +2044,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_large_value_allocation() {
         use super::BufferGrowthStrategy;
         use super::VarBinViewBuilder;

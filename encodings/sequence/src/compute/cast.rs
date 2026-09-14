@@ -156,6 +156,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_cast_sequence_narrows_to_output_dtype() -> VortexResult<()> {
         let casted = Sequence::try_new_typed(100i32, -10i32, Nullability::NonNullable, 5)?
             .into_array()

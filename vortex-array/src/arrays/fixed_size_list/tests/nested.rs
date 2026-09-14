@@ -27,6 +27,7 @@ use crate::validity::Validity;
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #[test]
+#[expect(deprecated)]
 fn test_fsl_of_fsl_basic() {
     let outer_len = 2;
     let outer_list_size = 3;
@@ -205,6 +206,7 @@ fn test_fsl_of_fsl_basic() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_fsl_of_fsl_with_nulls() {
     let outer_len = 3;
     let outer_list_size = 2;
@@ -271,6 +273,7 @@ fn test_fsl_of_fsl_with_nulls() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_deeply_nested_fsl() {
     let list_size = 2;
 

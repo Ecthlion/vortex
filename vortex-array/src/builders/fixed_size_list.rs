@@ -1114,6 +1114,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_append_scalar() {
         let mut ctx = array_session().create_execution_ctx();
         let dtype: Arc<DType> = Arc::new(I32.into());

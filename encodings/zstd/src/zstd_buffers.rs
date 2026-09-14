@@ -522,6 +522,7 @@ impl VTable for ZstdBuffers {
 impl OperationsVTable<ZstdBuffers> for ZstdBuffers {
     type ProbeState = ();
 
+    #[expect(deprecated)]
     fn scalar_at(
         array: ArrayView<'_, ZstdBuffers>,
         index: usize,
@@ -688,6 +689,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_validity_delegates_for_nullable_input() -> VortexResult<()> {
         let input = make_nullable_primitive_array();
         let compressed = ZstdBuffers::compress(&input, 3, &array_session())?.into_array();

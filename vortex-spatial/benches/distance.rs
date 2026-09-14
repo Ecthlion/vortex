@@ -77,6 +77,7 @@ fn polygons(rows: usize) -> ArrayRef {
     polygon_column(rows).unwrap()
 }
 
+#[expect(deprecated)]
 fn point_constant(x: f64, y: f64, rows: usize, ctx: &mut ExecutionCtx) -> ArrayRef {
     let scalar = point_column(vec![x], vec![y])
         .unwrap()
@@ -85,6 +86,7 @@ fn point_constant(x: f64, y: f64, rows: usize, ctx: &mut ExecutionCtx) -> ArrayR
     ConstantArray::new(scalar, rows).into_array()
 }
 
+#[expect(deprecated)]
 fn polygon_constant(rows: usize, ctx: &mut ExecutionCtx) -> ArrayRef {
     let scalar = polygon_column(vec![square(0.0, 0.0)])
         .unwrap()

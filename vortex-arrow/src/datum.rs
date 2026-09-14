@@ -150,6 +150,7 @@ where
 /// # Error
 ///
 /// The provided array must have length `len` or `1`.
+#[expect(deprecated)]
 pub fn from_arrow_columnar(
     array: ArrowArrayRef,
     len: usize,

@@ -40,6 +40,7 @@ pub fn take_canonical_array_non_nullable_indices(
     )
 }
 
+#[expect(deprecated)]
 pub fn take_canonical_array(
     array: &ArrayRef,
     indices: &[Option<usize>],

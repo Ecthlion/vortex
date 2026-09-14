@@ -187,6 +187,7 @@ impl IsConstant {
     /// Kernels that compute `is_constant` by delegating to child arrays can call this
     /// to package the boolean result into the partial struct format expected by the
     /// accumulator, avoiding duplicated boilerplate.
+    #[expect(deprecated)]
     pub fn make_partial(
         batch: &ArrayRef,
         is_constant: bool,
@@ -354,6 +355,7 @@ impl AggregateFnVTable for IsConstant {
         !partial.is_constant
     }
 
+    #[expect(deprecated)]
     fn accumulate(
         &self,
         partial: &mut Self::Partial,

@@ -33,6 +33,7 @@ pub trait OperationsVTable<V: VTable> {
     /// The scalar must retain the source's logical dtype, including nullability.
     ///
     /// The default preserves the existing scalar path without adding caching.
+    #[expect(deprecated)]
     fn probe_scalar(
         array: ArrayView<'_, V>,
         index: usize,

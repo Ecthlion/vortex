@@ -16,6 +16,7 @@ use crate::scalar::Scalar;
 impl OperationsVTable<Patched> for Patched {
     type ProbeState = ();
 
+    #[expect(deprecated)]
     fn scalar_at(
         array: ArrayView<'_, Patched>,
         index: usize,
@@ -72,6 +73,7 @@ mod tests {
     use crate::scalar::Scalar;
 
     #[test]
+    #[expect(deprecated)]
     fn test_simple() {
         let values = buffer![0u16; 1024].into_array();
         let patches = Patches::new(
@@ -117,6 +119,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_multi_chunk() {
         let values = buffer![0u16; 4096].into_array();
         let patches = Patches::new(
@@ -149,6 +152,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_multi_chunk_sliced() {
         let values = buffer![0u16; 4096].into_array();
         let patches = Patches::new(

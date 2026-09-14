@@ -159,6 +159,7 @@ fn test_take_constant_arrays() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_take_extreme_offsets() {
     // ListView-specific: Test with very large offsets to demonstrate
     // that we keep unreferenced elements.

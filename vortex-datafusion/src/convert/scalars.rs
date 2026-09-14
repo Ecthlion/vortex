@@ -365,6 +365,7 @@ fn struct_to_df(scalar: &Scalar) -> VortexResult<ScalarValue> {
 /// same fields. Going through `ScalarValue` instead would drop each field's `ARROW:extension:name`
 /// (and its declared nullability), yielding storage-typed children that
 /// [`Scalar::struct_`] rejects against an extension-typed struct dtype.
+#[expect(deprecated)]
 fn struct_from_df(array: &StructArray, session: &VortexSession) -> Scalar {
     let arrow = session.arrow();
     let dtype = arrow

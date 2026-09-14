@@ -877,6 +877,7 @@ mod tests {
     }
 
     #[rstest]
+    #[expect(deprecated)]
     fn test_struct_layout_nulls(
         #[from(null_struct_layout)] (segments, layout): (Arc<dyn SegmentSource>, LayoutRef),
     ) {
@@ -909,6 +910,7 @@ mod tests {
     }
 
     #[rstest]
+    #[expect(deprecated)]
     fn test_struct_layout_nested(
         #[from(nested_struct_layout)] (segments, layout): (Arc<dyn SegmentSource>, LayoutRef),
     ) {

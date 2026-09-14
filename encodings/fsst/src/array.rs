@@ -791,6 +791,7 @@ impl FSSTData {
 
     /// Validate using the decomposed components (codes bytes + offsets + nullability).
     #[expect(clippy::too_many_arguments)]
+    #[expect(deprecated)]
     fn validate_parts(
         symbols: &[Symbol],
         symbol_lengths: &[u8],

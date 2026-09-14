@@ -50,6 +50,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_cast_null_to_nullable_succeeds() {
         let null_array = NullArray::new(5);
         let result = null_array

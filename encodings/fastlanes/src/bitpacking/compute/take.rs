@@ -238,6 +238,7 @@ mod test {
 
     #[test]
     #[cfg_attr(miri, ignore)] // This test is too slow on miri
+    #[expect(deprecated)]
     fn take_random_indices() {
         let mut ctx = SESSION.create_execution_ctx();
         let num_patches: usize = 128;

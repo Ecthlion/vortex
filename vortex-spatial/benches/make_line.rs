@@ -74,6 +74,7 @@ fn nullable_points(offset: usize, null_every: usize) -> ArrayRef {
     .unwrap()
 }
 
+#[expect(deprecated)]
 fn point_constant(ctx: &mut ExecutionCtx) -> ArrayRef {
     let scalar = point_column(vec![0.0], vec![0.0])
         .unwrap()

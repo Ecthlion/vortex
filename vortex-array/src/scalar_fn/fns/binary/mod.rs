@@ -466,6 +466,7 @@ mod tests {
     /// Regression test for GitHub issue #5947: struct comparison in filter expressions should work
     /// using `make_comparator` instead of Arrow's `cmp` functions which don't support nested types.
     #[test]
+    #[expect(deprecated)]
     fn test_struct_comparison() {
         use crate::IntoArray;
         use crate::arrays::StructArray;

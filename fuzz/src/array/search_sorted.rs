@@ -59,6 +59,7 @@ impl<T: NativePType> IndexOrd<Option<T>> for SearchPrimitiveSlice<T> {
     }
 }
 
+#[expect(deprecated)]
 pub fn search_sorted_canonical_array(
     array: &ArrayRef,
     scalar: &Scalar,

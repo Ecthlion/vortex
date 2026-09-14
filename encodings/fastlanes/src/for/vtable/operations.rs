@@ -15,6 +15,7 @@ use crate::r#for::array::FoRArraySlotsExt;
 impl OperationsVTable<FoR> for FoR {
     type ProbeState = ();
 
+    #[expect(deprecated)]
     fn scalar_at(
         array: ArrayView<'_, FoR>,
         index: usize,

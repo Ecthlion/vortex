@@ -485,6 +485,7 @@ mod tests {
 
     /// This test ensures that the mask is properly appended to the range, not the builder.
     #[test]
+    #[expect(deprecated)]
     fn test_unpack_into_with_validity_mask() -> VortexResult<()> {
         // Create an array with some null values.
         let values = Buffer::from_iter([1u32, 0, 3, 4, 0]);
@@ -596,6 +597,7 @@ mod tests {
 
     /// Test unpacking with nullability and validity masks.
     #[test]
+    #[expect(deprecated)]
     fn test_unpack_to_primitive_nullability() {
         // Test with null values at various positions.
         let values = Buffer::from_iter([100u32, 0, 200, 0, 300, 0, 400]);

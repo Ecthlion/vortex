@@ -292,6 +292,7 @@ pub trait ListArrayExt: ListArraySlotsExt {
     }
 
     #[allow(clippy::disallowed_methods)]
+    #[expect(deprecated)]
     fn offset_at(&self, index: usize) -> VortexResult<usize> {
         vortex_ensure!(
             index <= self.as_ref().len(),
@@ -328,6 +329,7 @@ pub trait ListArrayExt: ListArraySlotsExt {
         self.elements().dtype()
     }
 
+    #[expect(deprecated)]
     fn reset_offsets(&self, recurse: bool, ctx: &mut ExecutionCtx) -> VortexResult<Array<List>> {
         let mut elements = self.sliced_elements()?;
         if recurse && elements.is_canonical() {

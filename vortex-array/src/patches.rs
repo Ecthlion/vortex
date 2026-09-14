@@ -238,6 +238,7 @@ pub struct Patches {
 
 impl Patches {
     #[allow(clippy::disallowed_methods)]
+    #[expect(deprecated)]
     pub fn new(
         array_len: usize,
         offset: usize,
@@ -381,6 +382,7 @@ impl Patches {
 
     #[inline]
     #[allow(clippy::disallowed_methods)]
+    #[expect(deprecated)]
     pub fn chunk_offset_at(&self, idx: usize) -> VortexResult<usize> {
         let Some(chunk_offsets) = &self.chunk_offsets else {
             vortex_bail!("chunk_offsets must be set to retrieve offset at index")
@@ -442,6 +444,7 @@ impl Patches {
 
     /// Get the patched value at a given index if it exists.
     #[allow(clippy::disallowed_methods)]
+    #[expect(deprecated)]
     pub fn get_patched(&self, index: usize) -> VortexResult<Option<Scalar>> {
         self.search_index(index)?
             .to_found()
@@ -602,6 +605,7 @@ impl Patches {
 
     /// Returns the minimum patch index
     #[allow(clippy::disallowed_methods)]
+    #[expect(deprecated)]
     pub fn min_index(&self) -> VortexResult<usize> {
         let first = self
             .indices
@@ -614,6 +618,7 @@ impl Patches {
 
     /// Returns the maximum patch index
     #[allow(clippy::disallowed_methods)]
+    #[expect(deprecated)]
     pub fn max_index(&self) -> VortexResult<usize> {
         let last = self
             .indices
@@ -722,6 +727,7 @@ impl Patches {
 
     /// Slice the patches by a range of the patched array.
     #[allow(clippy::disallowed_methods)]
+    #[expect(deprecated)]
     pub fn slice(&self, range: Range<usize>) -> VortexResult<Option<Self>> {
         let slice_start_idx = self.search_index(range.start)?.to_index();
         let slice_end_idx = self.search_index(range.end)?.to_index();
@@ -1530,6 +1536,7 @@ mod test {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_mask_all_false() {
         let mut ctx = array_session().create_execution_ctx();
         let patches = Patches::new(
@@ -1630,6 +1637,7 @@ mod test {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_mask_nullable_values() {
         let mut ctx = array_session().create_execution_ctx();
         let patches = Patches::new(
@@ -1843,6 +1851,7 @@ mod test {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_patch_values() {
         let mut ctx = array_session().create_execution_ctx();
         let patches = Patches::new(

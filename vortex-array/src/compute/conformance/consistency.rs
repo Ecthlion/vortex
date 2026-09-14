@@ -50,6 +50,7 @@ use crate::scalar_fn::fns::operators::Operator;
 /// - Creates indices array containing positions where mask is true
 /// - Applies take with these indices
 /// - Verifies both results are identical
+#[expect(deprecated)]
 fn test_filter_take_consistency(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     if len == 0 {
@@ -118,6 +119,7 @@ fn test_filter_take_consistency(array: &ArrayRef, ctx: &mut ExecutionCtx) {
 /// # Why This Matters
 /// This test ensures that mask operations compose correctly, which is critical for
 /// complex query operations that may apply multiple filters.
+#[expect(deprecated)]
 fn test_double_mask_consistency(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     if len == 0 {
@@ -191,6 +193,7 @@ fn test_double_mask_consistency(array: &ArrayRef, ctx: &mut ExecutionCtx) {
 /// # Why This Matters
 /// This is an identity operation that should be optimized in implementations
 /// to avoid unnecessary copying.
+#[expect(deprecated)]
 fn test_filter_identity(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     if len == 0 {
@@ -240,6 +243,7 @@ fn test_filter_identity(array: &ArrayRef, ctx: &mut ExecutionCtx) {
 /// # Why This Matters
 /// Masking always produces a nullable array, even when no values are actually masked.
 /// This test ensures the type system handles this correctly.
+#[expect(deprecated)]
 fn test_mask_identity(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     if len == 0 {
@@ -298,6 +302,7 @@ fn test_mask_identity(array: &ArrayRef, ctx: &mut ExecutionCtx) {
 /// # Why This Matters
 /// When a filter mask represents a contiguous range, it should be equivalent to
 /// a slice operation. Some implementations may optimize this case.
+#[expect(deprecated)]
 fn test_slice_filter_consistency(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     if len < 4 {
@@ -355,6 +360,7 @@ fn test_slice_filter_consistency(array: &ArrayRef, ctx: &mut ExecutionCtx) {
 ///
 /// # Why This Matters
 /// Sequential takes are a common pattern that can be optimized to slice operations.
+#[expect(deprecated)]
 fn test_take_slice_consistency(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     if len < 3 {
@@ -398,6 +404,7 @@ fn test_take_slice_consistency(array: &ArrayRef, ctx: &mut ExecutionCtx) {
 }
 
 /// Tests that filter preserves relative ordering
+#[expect(deprecated)]
 fn test_filter_preserves_order(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     if len < 4 {
@@ -443,6 +450,7 @@ fn test_filter_preserves_order(array: &ArrayRef, ctx: &mut ExecutionCtx) {
 }
 
 /// Tests that take with repeated indices works correctly
+#[expect(deprecated)]
 fn test_take_repeated_indices(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     if len == 0 {
@@ -469,6 +477,7 @@ fn test_take_repeated_indices(array: &ArrayRef, ctx: &mut ExecutionCtx) {
 }
 
 /// Tests mask and filter interaction with nulls
+#[expect(deprecated)]
 fn test_mask_filter_null_consistency(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     if len < 3 {
@@ -538,6 +547,7 @@ fn test_empty_operations_consistency(array: &ArrayRef) {
 }
 
 /// Tests that take preserves array properties
+#[expect(deprecated)]
 fn test_take_preserves_properties(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     if len == 0 {
@@ -582,6 +592,7 @@ fn test_take_preserves_properties(array: &ArrayRef, ctx: &mut ExecutionCtx) {
 /// # Why This Matters
 /// Nullable indices are a powerful feature that allows introducing nulls during
 /// a take operation, which is useful for outer joins and similar operations.
+#[expect(deprecated)]
 fn test_nullable_indices_consistency(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     if len < 3 {
@@ -648,6 +659,7 @@ fn test_nullable_indices_consistency(array: &ArrayRef, ctx: &mut ExecutionCtx) {
 }
 
 /// Tests large array consistency
+#[expect(deprecated)]
 fn test_large_array_consistency(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     if len < 1000 {
@@ -698,6 +710,7 @@ fn test_large_array_consistency(array: &ArrayRef, ctx: &mut ExecutionCtx) {
 /// Comparison operations must maintain logical consistency across encodings.
 /// This test catches bugs where an encoding might implement one comparison
 /// correctly but fail on its logical inverse.
+#[expect(deprecated)]
 fn test_comparison_inverse_consistency(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     if len == 0 {
@@ -818,6 +831,7 @@ fn test_comparison_inverse_consistency(array: &ArrayRef, ctx: &mut ExecutionCtx)
 /// # Why This Matters
 /// Ensures that comparison operations maintain mathematical ordering properties
 /// regardless of operand order.
+#[expect(deprecated)]
 fn test_comparison_symmetry_consistency(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     if len == 0 {
@@ -909,6 +923,7 @@ fn test_comparison_symmetry_consistency(array: &ArrayRef, ctx: &mut ExecutionCtx
 /// Boolean operations must maintain logical consistency across encodings.
 /// This test catches bugs where encodings might optimize boolean operations
 /// incorrectly, breaking fundamental logical properties.
+#[expect(deprecated)]
 fn test_boolean_demorgan_consistency(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     if !matches!(array.dtype(), DType::Bool(_)) {
         return;
@@ -1127,6 +1142,7 @@ fn widened_primitive_dtype(dtype: &DType) -> Option<DType> {
 /// This test specifically catches bugs where encodings (like RunEndArray) fail to preserve
 /// offset information during cast operations. Such bugs can lead to incorrect data being
 /// returned after casting a sliced array.
+#[expect(deprecated)]
 fn test_cast_slice_consistency(array: &ArrayRef, ctx: &mut ExecutionCtx) {
     let len = array.len();
     if len < 5 {

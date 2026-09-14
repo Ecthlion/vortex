@@ -715,6 +715,7 @@ fn is_boolean_operator(operator: Operator) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![expect(deprecated)]
     use rstest::rstest;
     use vortex_error::VortexResult;
 

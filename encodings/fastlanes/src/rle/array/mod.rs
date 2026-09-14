@@ -93,6 +93,7 @@ pub trait RLEArrayExt: RLEArraySlotsExt {
         clippy::expect_used,
         reason = "expect is safe here as scalar_at returns a valid primitive"
     )]
+    #[expect(deprecated)]
     fn values_idx_offset(&self, chunk_idx: usize, ctx: &mut ExecutionCtx) -> usize {
         self.values_idx_offsets()
             .execute_scalar(chunk_idx, ctx)
@@ -164,6 +165,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_try_new_with_validity() {
         let values = PrimitiveArray::from_iter([10u32, 20]).into_array();
         let values_idx_offsets = PrimitiveArray::from_iter([0u64]).into_array();

@@ -544,9 +544,13 @@ mod tests {
 
             let mut ctx = SESSION.create_execution_ctx();
             for (actual_idx, expected_idx) in expected_rows.into_iter().enumerate() {
+                #[expect(deprecated)]
+                let actual_scalar = actual.execute_scalar(actual_idx, &mut ctx)?;
+                #[expect(deprecated)]
+                let expected_scalar = expected.execute_scalar(expected_idx, &mut ctx)?;
                 assert_eq!(
-                    actual.execute_scalar(actual_idx, &mut ctx)?,
-                    expected.execute_scalar(expected_idx, &mut ctx)?,
+                    actual_scalar,
+                    expected_scalar,
                     "row {actual_idx} should match source row {expected_idx}",
                 );
             }
@@ -561,8 +565,10 @@ mod tests {
 
             let mut ctx = SESSION.create_execution_ctx();
             for (idx, is_null) in expected.into_iter().enumerate() {
+                #[expect(deprecated)]
+                let scalar = array.execute_scalar(idx, &mut ctx)?;
                 assert_eq!(
-                    array.execute_scalar(idx, &mut ctx)?.is_null(),
+                    scalar.is_null(),
                     is_null,
                     "row {idx} nullness mismatch",
                 );
@@ -673,6 +679,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_variant_get_unshredded_field_as_variant() -> VortexResult<()> {
         let arr = make_unshredded_json_array(vec![
             Some(r#"{"a": "ok"}"#),
@@ -900,6 +907,7 @@ mod tests {
         Ok(VariantArray::try_new(raw_core, Some(shredded))?.into_array())
     }
 
+    #[expect(deprecated)]
     fn assert_variant_i32_scalars(array: &ArrayRef, expected: &[Option<i32>]) -> VortexResult<()> {
         assert_eq!(array.len(), expected.len());
         let mut ctx = SESSION.create_execution_ctx();
@@ -921,6 +929,7 @@ mod tests {
         Ok(())
     }
 
+    #[expect(deprecated)]
     fn assert_variant_object_a_b(
         array: &ArrayRef,
         expected_a: &[Option<i32>],

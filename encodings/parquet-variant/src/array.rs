@@ -809,6 +809,7 @@ mod tests {
     /// canonicalization performs: an object-shredded Parquet variant, once canonicalized and then
     /// rebuilt, must produce the same per-row values as the original.
     #[test]
+    #[expect(deprecated)]
     fn parquet_typed_value_inverse_roundtrips_object_shredding() -> VortexResult<()> {
         // Shred `$.a` as Int32 over conforming, non-conforming, and missing-field rows.
         let json: ArrowArrayRef = Arc::new(StringArray::from(vec![

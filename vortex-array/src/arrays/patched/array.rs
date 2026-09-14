@@ -115,6 +115,7 @@ pub trait PatchedArrayExt: PatchedArraySlotsExt {
 
     #[inline]
     #[allow(clippy::disallowed_methods)]
+    #[expect(deprecated)]
     fn lane_range(&self, chunk: usize, lane: usize) -> VortexResult<Range<usize>> {
         assert!(chunk * 1024 <= self.as_ref().len() + self.offset());
         assert!(lane < self.n_lanes());

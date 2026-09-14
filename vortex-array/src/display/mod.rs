@@ -523,6 +523,7 @@ impl ArrayRef {
     }
 
     #[allow(clippy::disallowed_methods)]
+    #[expect(deprecated)]
     fn fmt_as(&self, f: &mut std::fmt::Formatter, options: &DisplayOptions) -> std::fmt::Result {
         match options {
             DisplayOptions::MetadataOnly => EncodingSummaryExtractor::write(self, f),

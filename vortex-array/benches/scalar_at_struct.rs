@@ -32,6 +32,7 @@ const NUM_ACCESSES: usize = 100;
 static SESSION: LazyLock<VortexSession> = LazyLock::new(array_session);
 
 #[divan::bench]
+#[expect(deprecated)]
 fn execute_scalar_struct_simple(bencher: Bencher) {
     let mut rng = StdRng::seed_from_u64(0);
     let range = Uniform::new(0i64, 100_000_000).unwrap();
@@ -65,6 +66,7 @@ fn execute_scalar_struct_simple(bencher: Bencher) {
 }
 
 #[divan::bench]
+#[expect(deprecated)]
 fn execute_scalar_struct_wide(bencher: Bencher) {
     let mut rng = StdRng::seed_from_u64(0);
     let range = Uniform::new(0i64, 100_000_000).unwrap();

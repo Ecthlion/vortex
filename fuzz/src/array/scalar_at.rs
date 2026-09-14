@@ -25,6 +25,7 @@ use vortex_error::VortexResult;
 /// Baseline implementation of scalar_at that works on canonical arrays.
 /// This implementation manually extracts the scalar value from each canonical type
 /// without using the scalar_at method, to serve as an independent baseline for testing.
+#[expect(deprecated)]
 pub fn scalar_at_canonical_array(
     canonical: Canonical,
     index: usize,

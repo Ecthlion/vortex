@@ -78,6 +78,7 @@ fn nullable_union_array() -> VortexResult<UnionArray> {
 }
 
 #[test]
+#[expect(deprecated)]
 fn scalar_at_uses_type_id_indirection() -> VortexResult<()> {
     let array = union_array()?;
     let mut ctx = array_session().create_execution_ctx();
@@ -140,6 +141,7 @@ fn validates_sparse_components() -> VortexResult<()> {
 
 #[test]
 #[should_panic(expected = "Unknown UnionArray type ID 7")]
+#[expect(deprecated)]
 fn invalid_type_id_panics_when_accessed() {
     let array = UnionArray::try_new(
         PrimitiveArray::from_iter([5u8, 7, 5]).into_array(),
@@ -158,6 +160,7 @@ fn invalid_type_id_panics_when_accessed() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn outer_nulls_are_independent_from_inner_nulls() -> VortexResult<()> {
     let variants = nullable_variants()?;
     let array = nullable_union_array()?;
@@ -193,6 +196,7 @@ fn outer_nulls_are_independent_from_inner_nulls() -> VortexResult<()> {
 }
 
 #[test]
+#[expect(deprecated)]
 fn masking_adds_outer_nulls_only() -> VortexResult<()> {
     let masked = union_array()?
         .into_array()
@@ -221,6 +225,7 @@ fn masking_adds_outer_nulls_only() -> VortexResult<()> {
 }
 
 #[test]
+#[expect(deprecated)]
 fn slice_and_filter_preserve_sparse_alignment() -> VortexResult<()> {
     let array = union_array()?.into_array();
     let mut ctx = array_session().create_execution_ctx();
@@ -243,6 +248,7 @@ fn slice_and_filter_preserve_sparse_alignment() -> VortexResult<()> {
 /// A constant union canonicalizes into a sparse union whose selected child repeats the scalar's
 /// value and whose unselected children hold placeholders.
 #[test]
+#[expect(deprecated)]
 fn constant_union_canonicalizes_to_sparse_union() -> VortexResult<()> {
     let mut ctx = array_session().create_execution_ctx();
     let i32_variant = DType::Primitive(PType::I32, Nullability::NonNullable);
@@ -303,6 +309,7 @@ fn constant_union_reports_uncompressed_size() -> VortexResult<()> {
 }
 
 #[test]
+#[expect(deprecated)]
 fn serde_roundtrip() -> VortexResult<()> {
     let session = array_session();
     let mut execution_ctx = session.create_execution_ctx();

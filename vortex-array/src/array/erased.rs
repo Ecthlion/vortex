@@ -270,6 +270,7 @@ impl ArrayRef {
         encoding state across lookups: `array.probe(ProbeUsage::Once).execute_scalar(index, ctx)`."
     )]
     #[allow(clippy::disallowed_methods)]
+    #[expect(deprecated)]
     pub fn scalar_at(&self, index: usize) -> VortexResult<Scalar> {
         self.execute_scalar(index, &mut legacy_session().create_execution_ctx())
     }
@@ -312,10 +313,9 @@ impl ArrayRef {
     }
 
     /// Returns whether the item at `index` is invalid.
-    #[deprecated(
-        note = "Use `ArrayRef::probe` instead: \
-        `!array.probe(ProbeUsage::Once).execute_is_valid(index, ctx)?`."
-    )]
+    #[deprecated(note = "Use `ArrayRef::probe` instead: \
+        `!array.probe(ProbeUsage::Once).execute_is_valid(index, ctx)?`.")]
+    #[expect(deprecated)]
     pub fn is_invalid(&self, index: usize, ctx: &mut ExecutionCtx) -> VortexResult<bool> {
         Ok(!self.is_valid(index, ctx)?)
     }

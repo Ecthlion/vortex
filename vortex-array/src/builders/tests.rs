@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+#![expect(deprecated)]
+
 use std::alloc::Layout;
 use std::ptr::NonNull;
 use std::sync::Arc;

@@ -39,6 +39,7 @@ impl FlatLayoutFixture for ConstantFixture {
         vec![Constant.id()]
     }
 
+    #[expect(deprecated)]
     fn build(&self, ctx: &mut ExecutionCtx) -> VortexResult<ArrayRef> {
         let const_i32 = ConstantArray::new(42i32, N);
         let const_f64 = ConstantArray::new(99.99f64, N);

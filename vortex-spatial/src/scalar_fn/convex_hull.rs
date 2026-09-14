@@ -199,6 +199,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn constant_remains_constant() -> VortexResult<()> {
         let mut ctx = vortex_array::array_session().create_execution_ctx();
         let scalar = multipoint_column(vec![vec![(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)]])?

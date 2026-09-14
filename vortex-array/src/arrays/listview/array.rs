@@ -369,6 +369,7 @@ pub trait ListViewArrayExt: ListViewArraySlotsExt {
     }
 
     #[allow(clippy::disallowed_methods)]
+    #[expect(deprecated)]
     fn offset_at(&self, index: usize) -> usize {
         assert!(
             index < self.as_ref().len(),
@@ -389,6 +390,7 @@ pub trait ListViewArrayExt: ListViewArraySlotsExt {
     }
 
     #[allow(clippy::disallowed_methods)]
+    #[expect(deprecated)]
     fn size_at(&self, index: usize) -> usize {
         assert!(
             index < self.as_ref().len(),

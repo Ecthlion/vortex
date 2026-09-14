@@ -387,6 +387,7 @@ impl<V: VTable> Array<V> {
         encoding state across lookups: `array.probe(ProbeUsage::Once).execute_scalar(index, ctx)`."
     )]
     #[allow(clippy::disallowed_methods)]
+    #[expect(deprecated)]
     pub fn scalar_at(&self, index: usize) -> VortexResult<crate::scalar::Scalar> {
         self.inner
             .execute_scalar(index, &mut legacy_session().create_execution_ctx())
@@ -398,6 +399,7 @@ impl<V: VTable> Array<V> {
         `array.probe(ProbeUsage::Once).execute_scalar(index, ctx)`, or `ProbeUsage::Repeated` \
         when reading more than one index from the same array."
     )]
+    #[expect(deprecated)]
     pub fn execute_scalar(
         &self,
         index: usize,
@@ -432,15 +434,15 @@ impl<V: VTable> Array<V> {
         `array.probe(ProbeUsage::Once).execute_is_valid(index, ctx)`, or `ProbeUsage::Repeated` \
         when reading more than one index from the same array."
     )]
+    #[expect(deprecated)]
     pub fn is_valid(&self, index: usize, ctx: &mut ExecutionCtx) -> VortexResult<bool> {
         self.inner.is_valid(index, ctx)
     }
 
     /// Returns whether `index` is null using the provided execution context.
-    #[deprecated(
-        note = "Use `Array::<V>::probe` instead: \
-        `!array.probe(ProbeUsage::Once).execute_is_valid(index, ctx)?`."
-    )]
+    #[deprecated(note = "Use `Array::<V>::probe` instead: \
+        `!array.probe(ProbeUsage::Once).execute_is_valid(index, ctx)?`.")]
+    #[expect(deprecated)]
     pub fn is_invalid(&self, index: usize, ctx: &mut ExecutionCtx) -> VortexResult<bool> {
         self.inner.is_invalid(index, ctx)
     }

@@ -108,6 +108,7 @@ fn test_onpair_rejects_100k_token_dictionary() -> vortex_error::VortexResult<()>
 /// decodes or searches through it, including on derived (sliced) arrays.
 #[cfg_attr(miri, ignore)]
 #[test]
+#[expect(deprecated)]
 fn test_corrupt_dictionary_rejected_on_first_use() -> vortex_error::VortexResult<()> {
     let mut ctx = SESSION.create_execution_ctx();
     let arr = compress_onpair(&sample_input().into_array(), &mut ctx)?;
@@ -267,6 +268,7 @@ fn test_onpair_nullable_canonicalize() -> vortex_error::VortexResult<()> {
 
 #[cfg_attr(miri, ignore)]
 #[test]
+#[expect(deprecated)]
 fn test_onpair_scalar_at() -> vortex_error::VortexResult<()> {
     let input = sample_input();
     let mut ctx = SESSION.create_execution_ctx();
@@ -285,6 +287,7 @@ fn test_onpair_scalar_at() -> vortex_error::VortexResult<()> {
 /// relative to the slice.
 #[cfg_attr(miri, ignore)]
 #[test]
+#[expect(deprecated)]
 fn test_onpair_scalar_at_window() -> vortex_error::VortexResult<()> {
     let n = 2_000usize;
     let strings: Vec<String> = (0..n)

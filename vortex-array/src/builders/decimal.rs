@@ -341,6 +341,7 @@ mod tests {
     use crate::dtype::DecimalDType;
 
     #[test]
+    #[expect(deprecated)]
     fn test_mixed_extend() {
         let values = 42i8;
 
@@ -375,6 +376,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_append_scalar() {
         let mut ctx = array_session().create_execution_ctx();
         use crate::scalar::Scalar;

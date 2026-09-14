@@ -27,6 +27,7 @@ fn execute_to_canonical(array: ArrayRef, ctx: &mut ExecutionCtx) -> ArrayRef {
 
 /// Finds indices where two arrays differ based on `scalar_at` comparison.
 #[expect(clippy::unwrap_used)]
+#[expect(deprecated)]
 fn find_mismatched_indices(
     left: &ArrayRef,
     right: &ArrayRef,
@@ -54,7 +55,9 @@ macro_rules! assert_nth_scalar {
         use $crate::IntoArray as _;
         let arr_ref: $crate::ArrayRef = $crate::IntoArray::into_array($arr.clone());
         let expected = $expected.try_into().unwrap();
-        assert_eq!(arr_ref.execute_scalar($n, $ctx).unwrap(), expected);
+        #[expect(deprecated)]
+        let actual = arr_ref.execute_scalar($n, $ctx).unwrap();
+        assert_eq!(actual, expected);
     }};
 }
 
@@ -70,6 +73,7 @@ macro_rules! assert_nth_scalar {
 macro_rules! assert_nth_scalar_is_null {
     ($arr:expr, $n:expr, $ctx:expr) => {{
         let arr_ref: $crate::ArrayRef = $crate::IntoArray::into_array($arr.clone());
+        #[expect(deprecated)]
         let scalar = arr_ref.execute_scalar($n, $ctx).unwrap();
         assert!(
             scalar.is_null(),

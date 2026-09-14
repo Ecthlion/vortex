@@ -25,6 +25,7 @@ use vortex_session::VortexSession;
 
 use crate::FileStatistics;
 
+#[expect(deprecated)]
 pub(crate) fn can_prune_file_stats(
     expr: &BoundExpression,
     row_count: u64,

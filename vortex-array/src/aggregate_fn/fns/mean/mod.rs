@@ -435,6 +435,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn mean_grouped_finalize() -> VortexResult<()> {
         let cases = mean_nan_null();
         let elements = PrimitiveArray::from_option_iter(

@@ -842,6 +842,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     pub fn test_array_with_gap() {
         let one_trailing_unused_element = ListArray::try_new(
             buffer![1, 2, 3, 4].into_array(),
@@ -892,6 +893,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_append_scalar() {
         let dtype: Arc<DType> = Arc::new(I32.into());
         let mut builder = ListBuilder::<u64>::with_capacity_in(

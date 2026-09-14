@@ -44,6 +44,7 @@ fn test_fsl_size_0_length_0_non_nullable() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_fsl_size_0_length_1_non_nullable() {
     let len = 1;
     let list_size = 0;
@@ -72,6 +73,7 @@ fn test_fsl_size_0_length_1_non_nullable() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_fsl_size_0_huge_length_non_nullable() {
     let len = 1_000_000_000_000;
     let list_size = 0;
@@ -149,6 +151,7 @@ fn test_fsl_size_0_length_0_nullable() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_fsl_size_0_length_1_nullable_valid() {
     let len = 1;
     let list_size = 0;
@@ -174,6 +177,7 @@ fn test_fsl_size_0_length_1_nullable_valid() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_fsl_size_0_length_1_nullable_null() {
     let len = 1;
     let list_size = 0;
@@ -195,6 +199,7 @@ fn test_fsl_size_0_length_1_nullable_null() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_fsl_size_0_length_10_nullable_mixed() {
     let len = 10;
     let list_size = 0;
@@ -235,6 +240,7 @@ fn test_fsl_size_0_length_10_nullable_mixed() {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #[test]
+#[expect(deprecated)]
 fn test_fsl_size_0_nullable_elements() {
     let len = 5;
     let list_size = 0;

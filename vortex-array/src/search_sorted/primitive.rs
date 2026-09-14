@@ -37,6 +37,7 @@ impl<'a, T: NativePType> SearchSortedPrimitiveArray<'a, T> {
     }
 
     /// Returns the value at `idx`, with nulls mapped to `T::zero()`.
+    #[expect(deprecated)]
     fn value(&self, idx: usize) -> VortexResult<T> {
         Ok(self
             .0
@@ -59,6 +60,7 @@ impl<T: NativePType> IndexOrd<T> for SearchSortedPrimitiveArray<'_, T> {
 }
 
 impl<T: NativePType> IndexOrd<Option<T>> for SearchSortedPrimitiveArray<'_, T> {
+    #[expect(deprecated)]
     fn index_cmp(&self, idx: usize, elem: &Option<T>) -> VortexResult<Option<Ordering>> {
         // The borrow must end before `self.value` re-borrows the ctx.
         let valid = self.0.is_valid(idx, &mut self.1.borrow_mut())?;

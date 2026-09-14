@@ -92,6 +92,7 @@ mod tests {
     });
 
     #[test]
+    #[expect(deprecated)]
     pub fn nullable_scalar_at() -> VortexResult<()> {
         let zigzag = zigzag_encode(
             PrimitiveArray::new(buffer![-189, -160, 1], Validity::AllValid).as_view(),

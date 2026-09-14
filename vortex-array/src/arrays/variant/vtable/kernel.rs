@@ -169,6 +169,7 @@ fn typed_shredded_path(
     Ok(Some(current))
 }
 
+#[expect(deprecated)]
 fn merge_typed_as_variant(
     typed: ArrayRef,
     fallback: Option<ArrayRef>,

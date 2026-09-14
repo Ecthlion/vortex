@@ -13,6 +13,7 @@ use crate::scalar::Scalar;
 impl OperationsVTable<Chunked> for Chunked {
     type ProbeState = ();
 
+    #[expect(deprecated)]
     fn scalar_at(
         array: ArrayView<'_, Chunked>,
         index: usize,

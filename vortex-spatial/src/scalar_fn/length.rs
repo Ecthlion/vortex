@@ -130,6 +130,7 @@ fn length_array(
 }
 
 /// Execute length after shared constant/column and null dispatch.
+#[expect(deprecated)]
 fn execute_length(
     execution: Execution<1, Validity>,
     ctx: &mut ExecutionCtx,
@@ -248,6 +249,7 @@ mod tests {
     use crate::test_harness::multilinestring_column;
     use crate::test_harness::point_column;
 
+    #[expect(deprecated)]
     fn line_constant(
         line: Vec<(f64, f64)>,
         len: usize,

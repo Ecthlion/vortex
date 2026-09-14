@@ -59,6 +59,7 @@ impl PyRepeatedScan {
         })
     }
 
+    #[expect(deprecated)]
     fn scalar_at(slf: Bound<Self>, index: u64) -> PyVortexResult<Bound<PyScalar>> {
         let row_count = slf.get().row_count;
         if index >= row_count {

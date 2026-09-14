@@ -168,6 +168,7 @@ mod tests {
         Ok(())
     }
 
+    #[expect(deprecated)]
     fn assert_variant_core_rows(
         array: &VariantArray,
         expected_core: &[Option<i32>],
@@ -247,6 +248,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn scalar_at_merges_shredded_with_core_storage() -> VortexResult<()> {
         let dtype = DType::Variant(Nullability::Nullable);
         let core_chunks = [Some(1i32), None, Some(3)]

@@ -394,6 +394,7 @@ mod tests {
     static SESSION: LazyLock<VortexSession> = LazyLock::new(crate::array_session);
 
     #[test]
+    #[expect(deprecated)]
     fn test_canonicalize_null() {
         let mut ctx = SESSION.create_execution_ctx();
         let const_null = ConstantArray::new(Scalar::null(DType::Null), 42);
@@ -445,6 +446,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_canonicalize_scalar_values() {
         let mut ctx = SESSION.create_execution_ctx();
         let f16_value = f16::from_f32(5.722046e-6);
@@ -718,6 +720,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_canonicalize_fixed_size_list_nested() {
         let mut ctx = SESSION.create_execution_ctx();
         // Test with nested data types (list of strings).
@@ -782,6 +785,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_canonicalize_fixed_size_list_with_null_elements() {
         let mut ctx = SESSION.create_execution_ctx();
         // Test FSL with nullable element type where some elements are null.
@@ -836,6 +840,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_canonicalize_fixed_size_list_large() {
         let mut ctx = SESSION.create_execution_ctx();
         // Test with a large constant array.

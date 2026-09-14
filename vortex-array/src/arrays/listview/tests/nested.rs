@@ -23,6 +23,7 @@ use crate::validity::Validity;
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #[test]
+#[expect(deprecated)]
 fn test_listview_of_listview_with_overlapping() {
     // Create elements that will be shared between inner lists.
     // Elements: [1, 2, 3, 4, 5, 6, 7, 8]
@@ -239,6 +240,7 @@ fn test_mixed_offset_size_types() {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #[test]
+#[expect(deprecated)]
 fn test_listview_zero_and_overlapping() {
     // Mix of empty lists, overlapping lists, and normal lists.
     let elements = buffer![1i32, 2, 3, 4, 5].into_array();
@@ -324,6 +326,7 @@ fn test_listview_zero_and_overlapping() {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #[test]
+#[expect(deprecated)]
 fn test_listview_of_struct_with_nulls() {
     // Create structs with fields that could be null.
     let struct_fields = StructFields::new(

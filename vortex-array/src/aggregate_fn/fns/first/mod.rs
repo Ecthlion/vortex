@@ -92,6 +92,7 @@ impl AggregateFnVTable for First {
         partial.value.is_some()
     }
 
+    #[expect(deprecated)]
     fn try_accumulate(
         &self,
         partial: &mut Self::Partial,

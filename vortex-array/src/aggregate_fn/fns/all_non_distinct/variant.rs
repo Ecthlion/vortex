@@ -15,6 +15,7 @@ use crate::arrays::VariantArray;
 /// aggregate kernel that intercepts the comparison before it reaches this fallback.
 ///
 /// [`all_non_distinct`]: super::all_non_distinct
+#[expect(deprecated)]
 pub(super) fn check_variant_identical(
     lhs: &VariantArray,
     rhs: &VariantArray,

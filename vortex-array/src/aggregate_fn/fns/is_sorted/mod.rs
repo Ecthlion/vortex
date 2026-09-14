@@ -70,6 +70,7 @@ pub fn is_strict_sorted(array: &ArrayRef, ctx: &mut ExecutionCtx) -> VortexResul
     is_sorted_impl(array, true, ctx)
 }
 
+#[expect(deprecated)]
 fn is_sorted_impl(array: &ArrayRef, strict: bool, ctx: &mut ExecutionCtx) -> VortexResult<bool> {
     let stat = if strict {
         Stat::IsStrictSorted
@@ -172,6 +173,7 @@ impl IsSorted {
     /// Kernels that compute `is_sorted` by delegating to child arrays can call this
     /// to package the boolean result into the partial struct format expected by the
     /// accumulator, avoiding duplicated boilerplate.
+    #[expect(deprecated)]
     pub fn make_partial(
         batch: &ArrayRef,
         is_sorted: bool,
@@ -401,6 +403,7 @@ impl AggregateFnVTable for IsSorted {
         !partial.is_sorted
     }
 
+    #[expect(deprecated)]
     fn accumulate(
         &self,
         partial: &mut Self::Partial,

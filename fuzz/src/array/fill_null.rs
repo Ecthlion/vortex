@@ -198,6 +198,7 @@ fn fill_decimal_array(
     })
 }
 
+#[expect(deprecated)]
 fn fill_varbinview_array(
     array: VarBinViewArray,
     fill_value: &Scalar,

@@ -267,6 +267,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_null_scalar_list_length() -> VortexResult<()> {
         let null_scalar = Scalar::null(DType::List(
             Arc::new(DType::Primitive(PType::I32, Nullability::NonNullable)),

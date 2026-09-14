@@ -74,6 +74,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_scalar_at() {
         let array = DecimalArray::new(
             buffer![100i128],

@@ -48,6 +48,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_canonical_with_nulls() -> VortexResult<()> {
         let array = MaskedArray::try_new(
             PrimitiveArray::from_iter([1i32, 2, 3, 4, 5]).into_array(),

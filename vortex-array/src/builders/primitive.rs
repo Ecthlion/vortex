@@ -437,6 +437,7 @@ mod tests {
     /// The old API had `append_mask` on the builder, which was confusing when used with ranges.
     /// This test ensures the new API works correctly.
     #[test]
+    #[expect(deprecated)]
     fn test_append_mask_on_uninit_range() {
         let mut builder = PrimitiveBuilder::<i32>::with_capacity_in(
             Nullability::Nullable,
@@ -545,6 +546,7 @@ mod tests {
     /// use `append_mask` to set up the buffer, then demonstrate that `set_bit` can
     /// modify individual bits with relative indexing.
     #[test]
+    #[expect(deprecated)]
     fn test_set_bit_relative_indexing() {
         let mut builder = PrimitiveBuilder::<i32>::with_capacity_in(
             Nullability::Nullable,

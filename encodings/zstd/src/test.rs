@@ -79,6 +79,7 @@ fn test_zstd_empty() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_zstd_with_validity_and_multi_frame() {
     let mut ctx = array_session().create_execution_ctx();
     let data: Vec<i32> = (0..200).collect();

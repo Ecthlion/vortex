@@ -397,6 +397,7 @@ pub fn pack_nested_structs() -> VortexResult<()> {
 }
 
 #[test]
+#[expect(deprecated)]
 pub fn pack_nested_lists() {
     let mut ctx = SESSION.create_execution_ctx();
     let l1 = ListArray::try_new(

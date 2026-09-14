@@ -32,6 +32,7 @@ pub(crate) fn collect_widened<T: NativePType>(
         .into_buffer::<T>())
 }
 
+#[expect(deprecated)]
 pub(crate) fn code_boundary_at(
     codes_offsets: &ArrayRef,
     index: usize,

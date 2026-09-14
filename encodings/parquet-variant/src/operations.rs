@@ -38,6 +38,7 @@ impl OperationsVTable<ParquetVariant> for ParquetVariant {
     /// For valid data, a row with both `value` and struct `typed_value` is a partially
     /// shredded object: recursively reconstruct shredded fields and merge them with the
     /// raw-only fields from `value`.
+    #[expect(deprecated)]
     fn scalar_at(
         array: ArrayView<'_, ParquetVariant>,
         index: usize,
@@ -69,6 +70,7 @@ impl OperationsVTable<ParquetVariant> for ParquetVariant {
     }
 }
 
+#[expect(deprecated)]
 fn scalar_from_variant_storage(
     metadata: &[u8],
     value: Option<&ArrayRef>,
@@ -94,6 +96,7 @@ fn scalar_from_variant_storage(
     Ok(Scalar::null(DType::Null))
 }
 
+#[expect(deprecated)]
 fn scalar_from_typed_value_array(
     metadata: &[u8],
     value: Option<&ArrayRef>,
@@ -418,6 +421,7 @@ mod tests {
         Arc::new(builder.finish())
     }
 
+    #[expect(deprecated)]
     fn assert_scalar_at_matches_arrow_try_value(
         arrow_variant: &ArrowVariantArray,
         rows: impl IntoIterator<Item = usize>,
@@ -440,6 +444,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_from_arrow_variant_nullable_validity() -> VortexResult<()> {
         let mut builder = VariantArrayBuilder::new(3);
         builder.append_variant(PqVariant::from(42i32));
@@ -481,6 +486,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_outer_null_and_variant_null_are_distinct() -> VortexResult<()> {
         let mut builder = VariantArrayBuilder::new(3);
         builder.append_variant(PqVariant::Null);
@@ -519,6 +525,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_from_arrow_variant_all_nulls() -> VortexResult<()> {
         let mut builder = VariantArrayBuilder::new(2);
         builder.append_variant(PqVariant::from(1i32));
@@ -555,6 +562,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_from_arrow_variant_non_nullable() -> VortexResult<()> {
         let mut builder = VariantArrayBuilder::new(2);
         builder.append_variant(PqVariant::from(1i32));
@@ -646,6 +654,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_scalar_at_recursive_shredded_list() -> VortexResult<()> {
         // Spec basis: for arrays, "value must be null" when the value is an array, and array
         // elements cannot be missing.
@@ -726,6 +735,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_scalar_at_partially_shredded_object_merges_fields() -> VortexResult<()> {
         // Spec basis: non-null `value` + non-null `typed_value` means a "partially shredded
         // object", so reconstruction must merge the shredded object with the fallback object.

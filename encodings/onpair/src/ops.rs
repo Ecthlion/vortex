@@ -20,6 +20,7 @@ use crate::decode::collect_widened;
 impl OperationsVTable<OnPair> for OnPair {
     type ProbeState = ();
 
+    #[expect(deprecated)]
     fn scalar_at(
         array: ArrayView<'_, OnPair>,
         index: usize,

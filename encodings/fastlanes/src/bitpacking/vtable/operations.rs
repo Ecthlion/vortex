@@ -237,6 +237,7 @@ mod test {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn scalar_at_invalid_patches() {
         let packed_array = BitPacked::try_new(
             BufferHandle::new_host(ByteBuffer::copy_from_aligned(
@@ -270,6 +271,7 @@ mod test {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn scalar_at() {
         let mut ctx = SESSION.create_execution_ctx();
         let values = (0u32..257).collect::<Buffer<_>>();

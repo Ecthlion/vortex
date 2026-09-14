@@ -202,6 +202,7 @@ impl VTable for Filter {
 impl OperationsVTable<Filter> for Filter {
     type ProbeState = ();
 
+    #[expect(deprecated)]
     fn scalar_at(
         array: ArrayView<'_, Filter>,
         index: usize,

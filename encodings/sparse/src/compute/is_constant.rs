@@ -26,6 +26,7 @@ use crate::SparseExt as _;
 pub(crate) struct SparseIsConstantKernel;
 
 impl DynAggregateKernel for SparseIsConstantKernel {
+    #[expect(deprecated)]
     fn aggregate(
         &self,
         aggregate_fn: &AggregateFnRef,

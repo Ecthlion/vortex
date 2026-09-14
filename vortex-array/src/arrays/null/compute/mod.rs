@@ -70,6 +70,7 @@ mod test {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_scalar_at_nulls() {
         let nulls = NullArray::new(10);
 

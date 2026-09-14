@@ -371,6 +371,7 @@ mod tests {
         }
     }
 
+    #[expect(deprecated)]
     fn assert_variant_values(array: &VariantArray, expected: &[i32]) -> VortexResult<()> {
         assert_eq!(array.len(), expected.len());
         let mut ctx = SESSION.create_execution_ctx();
@@ -575,6 +576,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     pub fn pack_nested_lists() {
         let mut ctx = SESSION.create_execution_ctx();
         let l1 = ListArray::try_new(
@@ -614,6 +616,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn pack_fixed_size_lists() -> VortexResult<()> {
         let mut ctx = SESSION.create_execution_ctx();
         let f1 = FixedSizeListArray::try_new(

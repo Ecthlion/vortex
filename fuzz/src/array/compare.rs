@@ -23,6 +23,7 @@ use vortex_buffer::ByteBuffer;
 use vortex_error::VortexExpect;
 use vortex_error::vortex_panic;
 
+#[expect(deprecated)]
 pub fn compare_canonical_array(
     array: &ArrayRef,
     value: &Scalar,

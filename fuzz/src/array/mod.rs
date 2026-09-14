@@ -175,6 +175,7 @@ impl ExpectedValue {
 }
 
 impl<'a> Arbitrary<'a> for FuzzArrayAction {
+    #[expect(deprecated)]
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         let array = ArbitraryArray::arbitrary_with_config(
             u,
@@ -591,6 +592,7 @@ pub fn compress_array(
 /// - `Ok(false)` - reject from corpus
 /// - `Err(_)` - a bug was found
 #[expect(clippy::result_large_err)]
+#[expect(deprecated)]
 pub fn run_fuzz_action(fuzz_action: FuzzArrayAction) -> VortexFuzzResult<bool> {
     let FuzzArrayAction { array, actions } = fuzz_action;
     let mut current_array = array;
@@ -739,6 +741,7 @@ fn assert_search_sorted(
 /// Uses `all_non_distinct` for an efficient buffer-level comparison on the happy path.
 /// Falls back to element-wise scalar comparison only on mismatch to produce a detailed error.
 #[expect(clippy::result_large_err)]
+#[expect(deprecated)]
 pub fn assert_array_eq(
     lhs: &ArrayRef,
     rhs: &ArrayRef,

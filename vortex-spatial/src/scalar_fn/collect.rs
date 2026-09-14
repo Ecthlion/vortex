@@ -210,6 +210,7 @@ fn collect_list_rows(
 }
 
 /// Apply [`collect_list_rows`] to a constant or column, after shared unary null dispatch.
+#[expect(deprecated)]
 fn execute_collect(
     execution: Execution<1, Validity>,
     output_dtype: &ExtDTypeRef,
@@ -504,6 +505,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn constant_list_remains_constant() -> VortexResult<()> {
         let input = list(
             nullable_point_column(vec![Some((0.0, 2.0)), None, Some((1.0, 3.0))])?,

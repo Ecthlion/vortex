@@ -16,6 +16,7 @@ use crate::rle::RLEArraySlotsExt;
 impl OperationsVTable<RLE> for RLE {
     type ProbeState = ();
 
+    #[expect(deprecated)]
     fn scalar_at(
         array: ArrayView<'_, RLE>,
         index: usize,
@@ -187,6 +188,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated)]
     fn test_scalar_at_multiple_chunks() {
         let mut ctx = SESSION.create_execution_ctx();
         // Test accessing elements around chunk boundaries
@@ -214,6 +216,7 @@ mod tests {
 
     #[test]
     #[should_panic]
+    #[expect(deprecated)]
     fn test_scalar_at_out_of_bounds() {
         let array = fixture::rle_array();
         array
@@ -223,6 +226,7 @@ mod tests {
 
     #[test]
     #[should_panic]
+    #[expect(deprecated)]
     fn test_scalar_at_slice_out_of_bounds() {
         let array = fixture::rle_array().slice(0..1).unwrap();
         array

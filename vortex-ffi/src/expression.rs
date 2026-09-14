@@ -419,6 +419,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
+    #[expect(deprecated)]
     fn test_literal() {
         let mut ctx = array_session().create_execution_ctx();
         let array =

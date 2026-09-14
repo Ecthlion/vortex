@@ -114,6 +114,7 @@ fn test_bool_basic_comparisons() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn constant_compare() {
     let left = ConstantArray::new(Scalar::from(2u32), 10);
     let right = ConstantArray::new(Scalar::from(10u32), 10);
@@ -336,6 +337,7 @@ fn scalar_cmp_incompatible_extension_types_errors() {
 }
 
 #[test]
+#[expect(deprecated)]
 fn test_empty_list() {
     let ctx = &mut array_session().create_execution_ctx();
     let list = ListViewArray::new(

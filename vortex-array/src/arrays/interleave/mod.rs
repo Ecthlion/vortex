@@ -391,6 +391,7 @@ impl VTable for Interleave {
 impl OperationsVTable<Interleave> for Interleave {
     type ProbeState = ();
 
+    #[expect(deprecated)]
     fn scalar_at(
         array: ArrayView<'_, Interleave>,
         index: usize,
@@ -473,6 +474,7 @@ mod tests {
     ///
     /// This is deliberately *not* wired into the array execution path — it exists purely as a
     /// trustworthy comparison point in tests.
+    #[expect(deprecated)]
     fn interleave_reference(
         values: &[ArrayRef],
         array_indices: &ArrayRef,

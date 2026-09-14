@@ -93,6 +93,7 @@ impl AggregateFnVTable for Last {
         false
     }
 
+    #[expect(deprecated)]
     fn try_accumulate(
         &self,
         partial: &mut Self::Partial,
