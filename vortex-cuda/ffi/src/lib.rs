@@ -65,10 +65,9 @@ const VX_CUDA_ERR: c_int = 1;
 
 /// Enable direct I/O for pooled CUDA file reads.
 pub const VX_CUDA_SCAN_FLAG_DIRECT_IO: u32 = 1 << 0;
-/// Decode dictionaries on CUDA and export their logical plain Arrow types across scan batches.
+/// Decode dictionaries on CUDA and export plain Arrow values, including nested children.
+/// Keeps batch schemas stable; applies only to this scan. See [`DictionaryExport::Decode`].
 pub const VX_CUDA_SCAN_FLAG_DECODE_DICTIONARIES: u32 = 1 << 1;
-const VX_CUDA_SCAN_KNOWN_FLAGS: u32 =
-    VX_CUDA_SCAN_FLAG_DIRECT_IO | VX_CUDA_SCAN_FLAG_DECODE_DICTIONARIES;
 
 /// Options for scanning a CUDA-compatible Vortex file.
 ///
@@ -77,7 +76,7 @@ const VX_CUDA_SCAN_KNOWN_FLAGS: u32 =
 #[repr(C)]
 #[derive(Default)]
 pub struct vx_cuda_scan_options {
-    /// A bitwise combination of `VX_CUDA_SCAN_FLAG_*` values.
+    /// A bitwise combination of `VX_CUDA_SCAN_FLAG_*` values. Unknown bits are ignored.
     pub flags: u32,
     /// Maximum rows in each output batch. Zero uses layout-derived splitting.
     /// Physical layout boundaries may produce shorter batches.
@@ -107,7 +106,7 @@ fn cuda_write_strategy(session: &VortexSession, block_rows: usize) -> Arc<dyn La
         )
         .with_flat_strategy(Arc::new(CudaFlatLayoutStrategy::default()));
     if block_rows > 0 {
-        // Preserve explicit row blocks: layout dictionaries can otherwise split a high-cardinality
+        // Preserve explicit row blocks: outer layout dictionaries can split a high-cardinality
         // block into u16-sized dictionary runs, while a byte target can coalesce adjacent blocks.
         strategy = strategy
             .with_probe_compressor(BtrBlocksCompressorBuilder::empty().build())
@@ -164,10 +163,10 @@ pub unsafe extern "C-unwind" fn vx_cuda_array_sink_open_file(
 ///
 /// `block_rows` controls the row granularity of CUDA-flat data blocks. Passing zero preserves the
 /// default writer strategy used by [`vx_cuda_array_sink_open_file`]. Any nonzero value disables
-/// byte-size coalescing and layout dictionaries so data blocks retain the requested row granularity.
+/// byte-size coalescing and outer layout dictionaries so data blocks retain the requested row
+/// granularity.
 ///
-/// Write and scan sizing are independent. To align on-disk row blocks with scan batches, pass the
-/// same nonzero value to this function and [`vx_cuda_scan_path_arrow_device_stream_batch_rows`].
+/// Write and scan sizing are independent; scan batches preserve on-disk layout boundaries.
 ///
 /// # Safety
 ///
@@ -449,12 +448,6 @@ unsafe fn scan_options(options: *const vx_cuda_scan_options) -> VortexResult<Cud
         let options = unsafe { &*options };
         (options.flags, options.batch_rows)
     };
-    vortex_ensure!(
-        flags & !VX_CUDA_SCAN_KNOWN_FLAGS == 0,
-        "unsupported CUDA scan option flags: {:#x}",
-        flags & !VX_CUDA_SCAN_KNOWN_FLAGS
-    );
-
     let read_at_options = PooledFileReadAtOptions::default();
     let read_at_options = if flags & VX_CUDA_SCAN_FLAG_DIRECT_IO == 0 {
         read_at_options
@@ -637,12 +630,16 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_scan_option_flags() {
+    fn ignores_unknown_scan_option_flags() -> VortexResult<()> {
         let options = vx_cuda_scan_options {
             flags: VX_CUDA_SCAN_FLAG_DECODE_DICTIONARIES | (1 << 2),
             ..Default::default()
         };
-        assert!(unsafe { scan_options(&raw const options) }.is_err());
+        // SAFETY: options lives for the duration of parsing.
+        let parsed = unsafe { scan_options(&raw const options) }?;
+        assert_eq!(parsed.dictionary_export, DictionaryExport::Decode);
+        assert_eq!(parsed.read_at_options, PooledFileReadAtOptions::default());
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]

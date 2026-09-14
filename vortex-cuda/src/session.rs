@@ -40,17 +40,15 @@ pub enum VarBinExportLayout {
     VarBinView,
 }
 
-/// Arrow Device export policy for dictionary-encoded arrays, including nested children.
+/// Controls whether Arrow Device exports preserve dictionaries or expand them to plain values,
+/// including nested children.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DictionaryExport {
     /// Preserve dictionary values and indices in the Arrow schema and device array.
     #[default]
     Preserve,
-    /// Decode dictionaries on CUDA and export their logical plain type.
-    ///
-    /// This allows chunks with different dictionary index widths or plain encodings to share
-    /// one Arrow Device stream schema. Dictionary decoding must be supported by CUDA for
-    /// device-resident inputs; it does not enable CPU fallback for those inputs.
+    /// Decode dictionaries on CUDA to keep one plain Arrow schema across batches.
+    /// May increase device memory use. Device-resident inputs require CUDA decoding support.
     Decode,
 }
 

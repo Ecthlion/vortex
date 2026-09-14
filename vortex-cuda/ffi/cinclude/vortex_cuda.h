@@ -81,8 +81,8 @@ vx_array_sink *vx_cuda_array_sink_open_file(const vx_session *session,
  *
  * `block_rows` controls the row granularity of CUDA-flat data blocks. Passing zero uses the default
  * writer strategy: 8,192-row blocks may be coalesced into data blocks targeting 1 MiB. Passing any
- * nonzero value disables this byte-size coalescing and layout dictionaries, so passing 8,192 is not
- * equivalent to passing zero.
+ * nonzero value disables this byte-size coalescing and outer layout dictionaries, so passing 8,192
+ * is not equivalent to passing zero.
  *
  * Write and scan sizing are independent. Scan batches preserve these on-disk row-block
  * boundaries.
@@ -102,13 +102,13 @@ vx_array_sink *vx_cuda_array_sink_open_file_block_rows(const vx_session *session
 /** Bypass the operating system page cache for pooled data-plane reads.
  * Footer and zone-map reads remain buffered. Supported only on Linux. */
 #define VX_CUDA_SCAN_FLAG_DIRECT_IO (UINT32_C(1) << 0)
-/** Decode dictionaries on CUDA, including nested children, and export their logical plain Arrow
- * types. Allows batches to vary between dictionary/plain encodings or dictionary index widths.
- * Applies only to this scan; other scans and array exports keep their session's policy. */
+/** Decode dictionaries on CUDA to export plain Arrow values with a stable batch schema.
+ * Includes nested children and applies only to this scan. May increase device memory use;
+ * device-resident dictionaries require CUDA decoding support. */
 #define VX_CUDA_SCAN_FLAG_DECODE_DICTIONARIES (UINT32_C(1) << 1)
 
 typedef struct vx_cuda_scan_options {
-    /** Bitwise combination of `VX_CUDA_SCAN_FLAG_*` values. */
+    /** Bitwise combination of `VX_CUDA_SCAN_FLAG_*` values. Unknown bits are ignored. */
     uint32_t flags;
     /** Maximum rows in each output ArrowDeviceArray. Zero uses layout-derived splitting.
      * Physical layout boundaries may produce shorter batches. */
