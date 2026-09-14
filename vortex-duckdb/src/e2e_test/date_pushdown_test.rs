@@ -10,13 +10,13 @@
 //! These tests pin the *semantics* of that rewrite: every bound is evaluated against both a
 //! Vortex file and a native DuckDB table built from the same rows, so DuckDB is the oracle.
 //! They cover each operator at midnight, strictly inside a day, reversed operand order, and
-//! `TIMESTAMP WITH TIME ZONE`.
+//! `TIMESTAMP WITH TIME ZONE` across four session timezones.
 //!
-//! They do not pin *where* the bound runs. On a small single-table scan DuckDB converts these
-//! bounds into table filters itself, without reaching the fold, so a plan assertion here would
-//! pass whether or not the fold exists. The proof that the fold reaches the scan lives in the
-//! checked-in TPC-H plans instead — `slt/tpch/duckdb/plans/q4.slt.no` and its q15 and q20
-//! siblings assert `($.o_orderdate < 1993-10-01)` in the scan's own filter list.
+//! Where the bound runs is asserted elsewhere, against plans rather than results:
+//! `slt/duckdb/cast_pushdown.slt` checks that the `date + interval` bound leaves no `FILTER`
+//! above the scan while the timezone-dependent one still does, and the TPC-H plans
+//! (`slt/tpch/duckdb/plans/q4.slt.no` and its q15 and q20 siblings) show the folded
+//! `($.o_orderdate < 1993-10-01)` in the scan's own filter list.
 
 use num_traits::AsPrimitive;
 use rstest::rstest;
