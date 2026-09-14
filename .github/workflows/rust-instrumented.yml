@@ -292,9 +292,11 @@ jobs:
     # anything about Miri: `DynArrayData::execute_unchecked` (vortex-array/src/array/mod.rs) holds
     # `&self` into the `Arc` allocation while handing the last strong reference to the encoding's
     # `execute`, which drops it, freeing the memory the protected receiver points at. Every
-    # encoding reaches it through its own `execute`, as does `ScalarFn` and `Constant`. Measured
-    # 2026-09-14 over vortex-zigzag, vortex-bytebool, vortex-decimal-byte-parts and
-    # vortex-sequence: 172 tests, 86 passed, 76 failed on that one violation, 10 over a 45s cap.
+    # encoding reaches it through its own `execute`, as does `ScalarFn` and `Constant`. Tree
+    # Borrows rejects the same call ("deallocation through <tag> is forbidden"), so this is not
+    # an artefact of one aliasing model. Measured 2026-09-14 over vortex-zigzag, vortex-bytebool,
+    # vortex-decimal-byte-parts and vortex-sequence: 172 tests, 86 passed, 76 failed on that one
+    # violation, 10 over a 45s cap.
     # Once it is fixed, the twelve encoding crates that do not call into C go in as one group:
     #   -p vortex-alp -p vortex-bytebool -p vortex-datetime-parts -p vortex-decimal-byte-parts
     #   -p vortex-fastlanes -p vortex-fsst -p vortex-onpair -p vortex-pco -p vortex-runend
