@@ -213,11 +213,10 @@ fn export_array(
 ) -> BoxFuture<'_, VortexResult<(ArrowArray, SyncEvent)>> {
     Box::pin(async {
         let array = match array.try_downcast::<Dict>() {
-            Ok(dict) if ctx.cuda_session().dictionary_export() == DictionaryExport::Decode => {
-                let decoded = dict.into_array().execute_cuda(ctx).await?;
-                return export_canonical(decoded, ctx).await;
+            Ok(dict) if ctx.cuda_session().dictionary_export() == DictionaryExport::Preserve => {
+                return export_dict(dict, ctx).await;
             }
-            Ok(dict) => return export_dict(dict, ctx).await,
+            Ok(dict) => dict.into_array(),
             Err(array) => array,
         };
         let array = match array.try_downcast::<Struct>() {
@@ -333,7 +332,7 @@ fn export_canonical(
                 let bits = if len == 0 {
                     bits
                 } else {
-                    repack_arrow_validity_buffer(&bits, meta.offset(), len, meta.offset(), ctx)?
+                    export_arrow_validity_bitmap(&bits, meta.offset(), len, meta.offset(), ctx)?
                 };
                 export_fixed_size(
                     bits,
@@ -889,17 +888,7 @@ pub(super) async fn export_arrow_validity_buffer(
             let BoolDataParts { bits, meta } = array.into_data().into_parts(len);
             let bitmap = ctx.ensure_on_device(bits).await?;
             let bitmap =
-                match export_arrow_validity_bitmap(&bitmap, meta.offset(), len, arrow_offset, ctx)?
-                {
-                    Some(bitmap) => bitmap,
-                    None => repack_arrow_validity_buffer(
-                        &bitmap,
-                        meta.offset(),
-                        len,
-                        arrow_offset,
-                        ctx,
-                    )?,
-                };
+                export_arrow_validity_bitmap(&bitmap, meta.offset(), len, arrow_offset, ctx)?;
             // Keep nullable exports self-describing for consumers that require exact null counts.
             let null_count = count_arrow_validity_nulls(&bitmap, len, arrow_offset, ctx)?;
             Ok((Some(bitmap), null_count))
@@ -936,16 +925,16 @@ fn device_zeroed_byte_buffer(
     )
 }
 
-/// Exports a matching-offset bitmap by reusing it or copying it into zero-padded storage.
+/// Export a bitmap with cuDF-safe storage, repacking it when the bit offsets differ.
 fn export_arrow_validity_bitmap(
     bitmap: &BufferHandle,
     input_offset: usize,
     len: usize,
     arrow_offset: usize,
     ctx: &mut CudaExecutionCtx,
-) -> VortexResult<Option<BufferHandle>> {
+) -> VortexResult<BufferHandle> {
     if input_offset != arrow_offset {
-        return Ok(None);
+        return repack_arrow_validity_buffer(bitmap, input_offset, len, arrow_offset, ctx);
     }
 
     let output_bytes = validity_bitmap_byte_len(len, arrow_offset)?;
@@ -956,10 +945,10 @@ fn export_arrow_validity_bitmap(
         .is_multiple_of(size_of::<u32>() as u64)
         && bitmap.has_zeroed_tail_padding(output_bytes, allocation_bytes)?
     {
-        return Ok(Some(bitmap.slice(0..output_bytes)));
+        return Ok(bitmap.slice(0..output_bytes));
     }
 
-    copy_arrow_validity_buffer(bitmap, output_bytes, ctx).map(Some)
+    copy_arrow_validity_buffer(bitmap, output_bytes, ctx)
 }
 
 /// Copies a validity bitmap into a new cuDF-padded buffer without shifting bits.
@@ -2322,12 +2311,18 @@ mod tests {
         Ok(())
     }
 
+    #[rstest]
     #[crate::test]
-    async fn test_export_bool() -> VortexResult<()> {
-        let mut ctx = CudaSession::create_execution_ctx(&crate::cuda_session())
-            .vortex_expect("failed to create execution context");
+    async fn test_export_bool(#[values(false, true)] on_device: bool) -> VortexResult<()> {
+        let mut ctx = CudaSession::create_execution_ctx(&crate::cuda_session())?;
 
         let array = BoolArray::from_iter([true, false, true]).into_array();
+        let array = if on_device {
+            upload(array, &mut ctx).await?
+        } else {
+            array
+        };
+        let input_values = array.buffer_handles()[0].clone();
         let mut device_array = array.export_device_array(&mut ctx).await?;
 
         assert_eq!(device_array.array.length, 3);
@@ -2336,6 +2331,15 @@ mod tests {
         assert_eq!(device_array.array.n_children, 0);
         assert!(device_array.array.release.is_some());
         assert_eq!(device_array.device_type, ARROW_DEVICE_CUDA);
+
+        if on_device {
+            // SAFETY: The live export owns PrivateData until release below.
+            let private = unsafe { &*device_array.array.private_data.cast::<PrivateData>() };
+            let values = private.buffers[1]
+                .as_ref()
+                .ok_or_else(|| vortex_err!("expected exported bool values"))?;
+            assert_eq!(values.cuda_device_ptr()?, input_values.cuda_device_ptr()?);
+        }
 
         unsafe { release_exported_array(&raw mut device_array.array) };
         Ok(())
