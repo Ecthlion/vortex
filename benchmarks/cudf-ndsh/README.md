@@ -2,15 +2,24 @@
 
 [Plan](../../CUDF_POC_PLAN.md) · [Validation](VALIDATION.md) · [Resume here](PROGRESS.md)
 
-`upstream.patch` adds a **default-OFF Q1/Q5/Q6/Q9/Q10 read/query harness** for local
-Parquet/Vortex comparisons, with `write_vortex` / `read_vortex` adapters. Both formats
-use the same logical full-table data, identical scan projections, and cuDF post-read
-filters. Native Parquet-pushdown/output benchmarks are separate.
+A **default-OFF Q1/Q5/Q6/Q9/Q10 read/query harness** compares local Parquet/Vortex
+files using the same logical data, scan projections, and cuDF post-read filters.
+Native Parquet-pushdown/output benchmarks remain separate.
 
-Build integration lives in `cpp/benchmarks/ndsh/` with one include hook in
-`cpp/benchmarks/CMakeLists.txt`. Current-source runtime validation and performance
-measurements are pending; see [Validation](VALIDATION.md) for recorded checks and
-[Progress](PROGRESS.md) for next steps.
+## Source layout
+
+- [`upstream.patch`](upstream.patch) changes only cuDF's five query files, named-table
+  generation helpers, and one opt-in CMake hook. The queries retain their original
+  operations; reader and result-consumer callbacks allow matched comparisons.
+- [`src/vortex_ndsh/`](src/vortex_ndsh/) owns the Vortex adapter, local benchmarks,
+  CPU references, and fixture/cache helpers. Each `qNN.inc` is included once, after
+  its cuDF query definitions, through the target-private `CUDF_NDSH_QUERY_EXTENSION`.
+  It reuses those definitions rather than copying the query implementation.
+- [`vortex.cmake`](vortex.cmake) builds the harness and Vortex library from the same
+  checkout. [`tests/`](tests/) contains the adapter and build-smoke executables.
+
+Current-source build/runtime validation and performance measurements are pending;
+see [Validation](VALIDATION.md) and [Progress](PROGRESS.md).
 
 ## I/O and timing contract
 
@@ -75,7 +84,9 @@ python3 benchmarks/cudf-ndsh/reproduce.py run --scale-factor 1
 The runner preserves build settings such as `CC`, `CXX`, `CUDACXX`, `CUDAHOSTCXX`,
 `CMAKE_PREFIX_PATH` and `LIBCLANG_PATH`. Additional CMake definitions can be passed
 with repeated `--cmake-arg=-DNAME=VALUE`, including `CMAKE_CUDA_COMPILER` and
-`CMAKE_CUDA_HOST_COMPILER`. Use absolute paths for file-valued definitions. Vortex's
+`CMAKE_CUDA_HOST_COMPILER`. The runner selects this checkout through
+`FETCHCONTENT_SOURCE_DIR_VORTEX`; direct cuDF CMake users set that path alongside
+`CUDF_NDSH_WITH_VORTEX=ON`. Use absolute paths for file-valued definitions. Vortex's
 CMake-to-Cargo bridge forwards the selected toolkit, architectures and explicit CUDA
 host compiler. cuDF owns nvCOMP selection for the chosen environment.
 
@@ -96,8 +107,9 @@ log before explicitly rerunning with a larger limit.
 ## Run and collect results
 
 `run` reuses the recorded build environment, giving the freshly built cuDF library
-precedence on the library search path. It checks source and binary/library hashes,
-runs smoke and adapter checks, then runs Q1/Q5/Q6/Q9/Q10 **sequentially on device 0**.
+precedence on the library search path. It verifies the clean source revision and
+binary/library hashes, runs smoke and adapter checks, then runs Q1/Q5/Q6/Q9/Q10
+**sequentially on device 0**.
 Each query covers Parquet/Vortex × read/full-query × warm/cold; Q9 covers all three existing
 amount engines. Correctness checks and fixture generation remain outside timing.
 Use `--scale-factor 10` for SF10, or `--queries 6` for a focused run.
@@ -105,8 +117,8 @@ Use `--scale-factor 10` for SF10, or `--queries 6` for a focused run.
 Commands, selected environment and tool versions go under `<work-dir>/logs/`;
 benchmark JSON and build provenance go under `<work-dir>/results/`. Temporary fixtures
 use `<work-dir>/tmp/`, on the chosen filesystem. Missing, skipped or untimed states fail
-the run. Build artifacts and results are ignored; the recipe, source lock and benchmark
-source patch are versioned. **The clean recipe has not yet been
+the run. Build artifacts and results are ignored; the harness sources, cuDF patch,
+recipe and dependency lock are versioned. **The clean recipe has not yet been
 executed end to end**; recorded build evidence is in [Validation](VALIDATION.md).
 
 Prefix profiler launches with `env -u ANTHROPIC_API_KEY` and follow the

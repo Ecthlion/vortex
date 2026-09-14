@@ -6,40 +6,23 @@ across Q1/Q5/Q6/Q9/Q10 at SF1/SF10, warm and cold**. The goal is **not met**.
 
 [Setup](benchmarks/cudf-ndsh/README.md) · [Validation](benchmarks/cudf-ndsh/VALIDATION.md) · [Progress](benchmarks/cudf-ndsh/PROGRESS.md)
 
-## Current implementation
+## Scope
 
-- **Benchmark integration:** default-OFF Q1/Q5/Q6/Q9/Q10 comparisons in
-  `cpp/benchmarks/ndsh/`, with one include hook in `cpp/benchmarks/CMakeLists.txt`.
-  Both formats use the original pinned cuDF generator, identical logical fixtures,
-  scan projections, post-read predicates, and existing cuDF query operations.
-  Native Parquet-pushdown benchmarks remain separate.
-- **Vortex I/O:** CPU writing in 16,777,216-row CUDA-flat blocks; reads use pooled
-  cacheable pinned-host staging → HtoD → GPU decode → Arrow Device imports → one
-  final owning cuDF materialization. The CUDA memory pool retains up to 8 GiB.
-- **Cache controls:** warm reads use the OS page cache. Cold callbacks sync and evict
-  each input file, then require zero resident pages. Cold Vortex data uses `O_DIRECT`,
-  metadata is buffered, and Parquet uses its native reader. Coldness is defined at
-  the OS page-cache level.
-- **Timing:** CPU wall time covers complete reads, selected query work, destruction,
-  and device completion. Fixture writing, correctness checks, and eviction are untimed.
+Default-OFF local-file comparisons use matched fixtures and projections, Vortex GPU
+decompression, and existing cuDF query operations. Independent CPU references and
+synthetic cases check correctness outside timing. See the README for the
+[I/O and timing contract](benchmarks/cudf-ndsh/README.md#io-and-timing-contract) and
+[dataset choices](benchmarks/cudf-ndsh/README.md#dataset-and-correctness).
 
-Exact projection/value checks and independent CPU references cover generated results,
-with synthetic cases for nonempty results, boundaries, joins, nulls, and empty inputs.
-The original generator can yield degenerate Q6/Q10 results and low-SF supplier joins;
-match counts identify which runs provide meaningful full-query performance evidence.
+## Next steps
 
-The optional [generator-fixes.patch](benchmarks/cudf-ndsh/generator-fixes.patch) supplies
-four generator fixes and a regression target. Selecting it requires regenerating both
-formats' fixtures and labeling the dataset and measurements separately.
+**The clean Release recipe and current-source runtime measurements remain unvalidated.**
+Earlier isolated-build and runtime evidence is recorded in
+[Validation](benchmarks/cudf-ndsh/VALIDATION.md).
 
-## Status and next steps
-
-The rebased Vortex Release archive and all five query executables plus the adapter-test
-executable built and linked against pinned Release cuDF. **Current-source runtime
-validation and measurements are pending.** Recorded checks and historical measurements
-are in [Validation](benchmarks/cudf-ndsh/VALIDATION.md).
-
-Next: validate the adapter and queries, collect fresh SF1 then SF10 warm/cold read/query
-baselines, and profile bottlenecks. Scale to SF100 after these matrices are stable,
-with separate Vortex/RMM memory accounting. Publish the Vortex prerequisites and update
-the immutable pin for the upstream POC.
+1. Build the tracked recipe, then validate adapter and query correctness.
+2. Collect fresh SF1, then SF10 warm/cold read/query baselines. Label the generator
+   choice and match counts; use nondegenerate results for full-query performance claims.
+3. Profile bottlenecks and optimize. Scale to SF100 once these matrices are stable,
+   accounting for Vortex and RMM memory separately.
+4. Publish validated revisions and prerequisites, then prepare the upstream POC.
