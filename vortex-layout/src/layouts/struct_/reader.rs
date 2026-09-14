@@ -11,6 +11,7 @@ use vortex_array::ArrayRef;
 use vortex_array::IntoArray;
 use vortex_array::MaskFuture;
 use vortex_array::VortexSessionExecute;
+use vortex_array::arrays::ConstantArray;
 use vortex_array::arrays::StructArray;
 use vortex_array::arrays::struct_::StructArrayExt;
 use vortex_array::builtins::ArrayBuiltins;
@@ -30,6 +31,7 @@ use vortex_array::expr::transform::partition_bound;
 use vortex_array::expr::traversal::NodeExt;
 use vortex_array::expr::traversal::Transformed;
 use vortex_array::expr::traversal::TraversalOrder;
+use vortex_array::scalar::Scalar;
 use vortex_array::scalar_fn::fns::get_item::GetItem;
 use vortex_array::scalar_fn::fns::merge::Merge;
 use vortex_array::scalar_fn::fns::pack::Pack;
@@ -394,6 +396,10 @@ impl LayoutReader for StructReader {
         expr: &BoundExpression,
         mask: Mask,
     ) -> VortexResult<MaskFuture> {
+        // Child statistics do not include nulls inherited from this struct.
+        if self.dtype().is_nullable() {
+            return Ok(MaskFuture::ready(mask));
+        }
         // Partition the expression into expressions that can be evaluated over individual fields
         match &self.partition_expr(expr)? {
             Partitioned::Single(name, partition) => {
@@ -420,18 +426,27 @@ impl LayoutReader for StructReader {
         expr: &BoundExpression,
         mask: MaskFuture,
     ) -> VortexResult<MaskFuture> {
+        let validity = self
+            .validity()?
+            .map(|reader| {
+                let root = root().bind(reader.dtype())?;
+                reader.filter_evaluation(row_range, &root, mask.clone())
+            })
+            .transpose()?;
+        let field_mask = validity.as_ref().unwrap_or(&mask).clone();
+
         // Partition the expression into expressions that can be evaluated over individual fields
-        match &self.partition_expr(expr)? {
+        let filtered = match &self.partition_expr(expr)? {
             Partitioned::Single(name, partition) => {
                 let reader = self.field_reader(name)?;
                 reader
-                    .filter_evaluation(row_range, partition, mask)
+                    .filter_evaluation(row_range, partition, field_mask)
                     .map_err(|err| {
                         err.with_context(format!("While evaluating filter partition {name}"))
                     })
             }
             Partitioned::Multi(partitioned) => Arc::clone(partitioned).into_mask_future(
-                mask,
+                field_mask,
                 |name, expr, mask| {
                     let reader = self.field_reader(name)?;
                     reader
@@ -452,7 +467,38 @@ impl LayoutReader for StructReader {
                 },
                 self.session.clone(),
             ),
-        }
+        }?;
+        let Some(validity) = validity else {
+            return Ok(filtered);
+        };
+
+        let expr = expr.clone();
+        let dtype = self.dtype().clone();
+        let session = self.session.clone();
+        Ok(MaskFuture::new(mask.len(), async move {
+            let mask = mask.await?;
+            let valid = validity.await?;
+            let filtered = if valid.all_false() {
+                valid.clone()
+            } else {
+                filtered.await?
+            };
+            let nulls = &mask & &!valid;
+            if nulls.all_false() {
+                return Ok(filtered);
+            }
+
+            // Every null parent evaluates identically, regardless of its stored child values.
+            let null_result = ConstantArray::new(Scalar::null(dtype), 1)
+                .into_array()
+                .apply_bound(&expr)?
+                .execute_scalar(0, &mut session.create_execution_ctx())?;
+            if null_result.as_bool().value() == Some(true) {
+                Ok(filtered | &nulls)
+            } else {
+                Ok(filtered)
+            }
+        }))
     }
 
     fn projection_evaluation(
@@ -564,6 +610,8 @@ mod tests {
     use vortex_array::expr::eq;
     use vortex_array::expr::get_item;
     use vortex_array::expr::gt;
+    use vortex_array::expr::is_not_null;
+    use vortex_array::expr::is_null;
     use vortex_array::expr::lit;
     use vortex_array::expr::or;
     use vortex_array::expr::pack;
@@ -906,6 +954,34 @@ mod tests {
         );
         assert_nth_scalar!(result, 1, 2, &mut ctx);
         assert_nth_scalar!(result, 2, 3, &mut ctx);
+    }
+
+    #[rstest]
+    #[case::is_null(is_null(col("a")), [true, false, false])]
+    #[case::is_not_null(is_not_null(col("a")), [false, true, true])]
+    #[case::comparison(gt(col("a"), lit(1)), [false, true, true])]
+    #[case::null_root(is_null(root()), [true, false, false])]
+    fn test_nullable_struct_filter(
+        #[from(null_struct_layout)] (segments, layout): (Arc<dyn SegmentSource>, LayoutRef),
+        #[case] expr: Expression,
+        #[case] expected: [bool; 3],
+        #[values(false, true)] exclude_null: bool,
+    ) -> vortex_error::VortexResult<()> {
+        let input = Mask::from_iter([!exclude_null, true, false]);
+        let expected = &Mask::from_iter(expected) & &input;
+        let result = block_on(move |handle| {
+            let session = new_session().with_handle(handle);
+            async move {
+                let reader =
+                    layout.new_reader("".into(), segments, &session, &Default::default())?;
+                let expr = expr.bind(reader.dtype())?;
+                reader
+                    .filter_evaluation(&(0..3), &expr, MaskFuture::ready(input))?
+                    .await
+            }
+        })?;
+        assert_eq!(result, expected);
+        Ok(())
     }
 
     #[rstest]
