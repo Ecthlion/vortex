@@ -41,7 +41,7 @@ fn has_valid_json_extension(field: &Field) -> bool {
 
 impl ArrowExportVTable for Json {
     fn export_key(&self) -> ArrowExportKey {
-        ArrowExportKey::arrow_extension(*ARROW_JSON, Json.id())
+        ArrowExportKey::extension(Json.id(), *ARROW_JSON)
     }
 
     fn to_arrow_field(
@@ -57,7 +57,9 @@ impl ArrowExportVTable for Json {
             return Ok(None);
         }
 
-        let mut field = session.to_arrow_field(name, ext_dtype.storage_dtype())?;
+        let Some(mut field) = session.to_arrow_field(name, ext_dtype.storage_dtype())? else {
+            return Ok(None);
+        };
         field
             .try_with_extension_type(ArrowJson::default())
             .vortex_expect("Utf8 is a valid storage type for Arrow JSON");
@@ -165,6 +167,7 @@ mod tests {
     use vortex_arrow::ArrowSessionExt;
     use vortex_error::VortexExpect;
     use vortex_error::VortexResult;
+    use vortex_error::vortex_err;
 
     use crate::Json;
     use crate::initialize;
@@ -185,7 +188,10 @@ mod tests {
         dbg!(&ext_dtype);
         let array = ExtensionArray::new(ext_dtype, storage).into_array();
 
-        let field = session.arrow().to_arrow_field("data", array.dtype())?;
+        let field = session
+            .arrow()
+            .to_arrow_field("data", array.dtype())?
+            .ok_or_else(|| vortex_err!("json dtype has no Arrow field"))?;
         assert_eq!(field.extension_type_name(), Some(ArrowJson::NAME));
         ArrowJson::try_new_from_field_metadata(field.data_type(), field.metadata())?;
 

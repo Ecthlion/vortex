@@ -57,7 +57,7 @@ static ARROW_UUID: CachedId = CachedId::new(ArrowUuid::NAME);
 
 impl ArrowExportVTable for Uuid {
     fn export_key(&self) -> ArrowExportKey {
-        ArrowExportKey::arrow_extension(*ARROW_UUID, Uuid.id())
+        ArrowExportKey::extension(Uuid.id(), *ARROW_UUID)
     }
 
     // Encode all of these.
