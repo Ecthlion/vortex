@@ -21,10 +21,10 @@ block()
   target_include_directories(NDSH_VORTEX_IO PUBLIC "${CMAKE_CURRENT_LIST_DIR}/src")
   target_link_libraries(NDSH_VORTEX_IO
                         PUBLIC cudf::cudf
-                        PRIVATE Vortex::cpp_static nanoarrow::nanoarrow CUDA::cudart)
+                        PRIVATE Vortex::cpp_static nanoarrow::nanoarrow CUDA::cudart nvtx3::nvtx3-cpp)
 
   foreach(query IN ITEMS 01 05 06 09 10)
-    target_link_libraries(NDSH_Q${query}_NVBENCH PRIVATE NDSH_VORTEX_IO)
+    target_link_libraries(NDSH_Q${query}_NVBENCH PRIVATE NDSH_VORTEX_IO kvikio::kvikio)
     target_include_directories(NDSH_Q${query}_NVBENCH PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/ndsh")
     target_compile_definitions(NDSH_Q${query}_NVBENCH
                                PRIVATE CUDF_NDSH_QUERY_EXTENSION="vortex_ndsh/q${query}.inc")
@@ -38,5 +38,6 @@ block()
 
   add_executable(NDSH_VORTEX_IO_TEST EXCLUDE_FROM_ALL
                  "${CMAKE_CURRENT_LIST_DIR}/tests/vortex_io_test.cpp")
-  target_link_libraries(NDSH_VORTEX_IO_TEST PRIVATE NDSH_VORTEX_IO nanoarrow::nanoarrow CUDA::cudart)
+  target_link_libraries(NDSH_VORTEX_IO_TEST
+                          PRIVATE NDSH_VORTEX_IO nanoarrow::nanoarrow CUDA::cudart nvtx3::nvtx3-cpp)
 endblock()

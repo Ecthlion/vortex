@@ -87,8 +87,12 @@ add_library(cudf INTERFACE)
 add_library(cudf::cudf INTERFACE IMPORTED)
 add_library(nanoarrow::nanoarrow INTERFACE IMPORTED)
 add_library(CUDA::cudart INTERFACE IMPORTED)
+add_library(nvtx3::nvtx3-cpp INTERFACE IMPORTED)
+add_library(kvikio::kvikio INTERFACE IMPORTED)
 target_compile_definitions(nanoarrow::nanoarrow INTERFACE NANOARROW_FAKE_LINK=1)
 target_compile_definitions(CUDA::cudart INTERFACE CUDA_FAKE_LINK=1)
+target_compile_definitions(nvtx3::nvtx3-cpp INTERFACE NVTX_FAKE_LINK=1)
+target_compile_definitions(kvikio::kvikio INTERFACE KVIKIO_FAKE_LINK=1)
 add_library(ndsh_utilities INTERFACE)
 set(benchmarks NDSH_Q01_NVBENCH NDSH_Q06_NVBENCH NDSH_Q05_NVBENCH
                NDSH_Q09_NVBENCH NDSH_Q10_NVBENCH NDSH_HELPER)
@@ -113,7 +117,7 @@ foreach(target IN LISTS benchmarks)
   set(definitions "")
   set(includes "")
   if(CUDF_NDSH_WITH_VORTEX AND target MATCHES "^NDSH_Q(0[1569]|10)_NVBENCH$")
-    list(APPEND links NDSH_VORTEX_IO)
+    list(APPEND links NDSH_VORTEX_IO kvikio::kvikio)
     set(definitions "CUDF_NDSH_QUERY_EXTENSION=\"vortex_ndsh/q${CMAKE_MATCH_1}.inc\"")
     set(includes "${CMAKE_CURRENT_SOURCE_DIR}/ndsh")
   endif()
@@ -134,13 +138,15 @@ foreach(target IN ITEMS cudf cudf::cudf ndsh_utilities unrelated)
   endforeach()
 endforeach()
 
-foreach(target IN ITEMS nanoarrow::nanoarrow CUDA::cudart)
+foreach(target IN ITEMS nanoarrow::nanoarrow CUDA::cudart nvtx3::nvtx3-cpp kvikio::kvikio)
   foreach(property IN ITEMS LINK_LIBRARIES INTERFACE_LINK_LIBRARIES COMPILE_DEFINITIONS)
     assert_property(${target} ${property} "")
   endforeach()
 endforeach()
 assert_property(nanoarrow::nanoarrow INTERFACE_COMPILE_DEFINITIONS NANOARROW_FAKE_LINK=1)
 assert_property(CUDA::cudart INTERFACE_COMPILE_DEFINITIONS CUDA_FAKE_LINK=1)
+assert_property(nvtx3::nvtx3-cpp INTERFACE_COMPILE_DEFINITIONS NVTX_FAKE_LINK=1)
+assert_property(kvikio::kvikio INTERFACE_COMPILE_DEFINITIONS KVIKIO_FAKE_LINK=1)
 
 set(integration_targets NDSH_VORTEX_IO NDSH_VORTEX_BUILD_SMOKE NDSH_VORTEX_IO_TEST)
 if(CUDF_NDSH_WITH_VORTEX)
@@ -155,9 +161,10 @@ if(CUDF_NDSH_WITH_VORTEX)
     assert_property(${target} INTERFACE_COMPILE_DEFINITIONS "")
   endforeach()
   assert_property(NDSH_VORTEX_IO TYPE STATIC_LIBRARY)
-  assert_property(NDSH_VORTEX_IO LINK_LIBRARIES "cudf::cudf;Vortex::cpp_static;nanoarrow::nanoarrow;CUDA::cudart")
+  assert_property(NDSH_VORTEX_IO LINK_LIBRARIES
+                    "cudf::cudf;Vortex::cpp_static;nanoarrow::nanoarrow;CUDA::cudart;nvtx3::nvtx3-cpp")
   assert_property(NDSH_VORTEX_IO INTERFACE_LINK_LIBRARIES
-                  "cudf::cudf;$<LINK_ONLY:Vortex::cpp_static>;$<LINK_ONLY:nanoarrow::nanoarrow>;$<LINK_ONLY:CUDA::cudart>")
+                  "cudf::cudf;$<LINK_ONLY:Vortex::cpp_static>;$<LINK_ONLY:nanoarrow::nanoarrow>;$<LINK_ONLY:CUDA::cudart>;$<LINK_ONLY:nvtx3::nvtx3-cpp>")
   assert_property(NDSH_VORTEX_IO COMPILE_FEATURES cxx_std_20)
   assert_property(NDSH_VORTEX_IO INTERFACE_COMPILE_FEATURES cxx_std_20)
   set(harness "${FETCHCONTENT_SOURCE_DIR_VORTEX}/benchmarks/cudf-ndsh")
@@ -169,7 +176,8 @@ if(CUDF_NDSH_WITH_VORTEX)
   assert_property(NDSH_VORTEX_BUILD_SMOKE LINK_LIBRARIES "cudf::cudf;Vortex::cpp_static")
   assert_property(NDSH_VORTEX_BUILD_SMOKE INTERFACE_LINK_LIBRARIES "")
   assert_property(NDSH_VORTEX_BUILD_SMOKE COMPILE_FEATURES cxx_std_20)
-  assert_property(NDSH_VORTEX_IO_TEST LINK_LIBRARIES "NDSH_VORTEX_IO;nanoarrow::nanoarrow;CUDA::cudart")
+  assert_property(NDSH_VORTEX_IO_TEST LINK_LIBRARIES
+                    "NDSH_VORTEX_IO;nanoarrow::nanoarrow;CUDA::cudart;nvtx3::nvtx3-cpp")
   assert_property(NDSH_VORTEX_IO_TEST INTERFACE_LINK_LIBRARIES "")
 else()
   foreach(target IN ITEMS Vortex::cpp_static vortex_unwanted ${integration_targets})
@@ -210,18 +218,24 @@ DUMMY = """
 #ifndef PARENT_CXX_FLAG
 #error Parent compiler flags were lost
 #endif
-#if defined(VORTEX_FAKE_LINK) || defined(NANOARROW_FAKE_LINK) || defined(CUDA_FAKE_LINK)
+#if defined(VORTEX_FAKE_LINK) || defined(NANOARROW_FAKE_LINK) || defined(CUDA_FAKE_LINK) || defined(NVTX_FAKE_LINK)
 #error Private adapter dependency usage requirements leaked
 #endif
 #ifdef CUDF_NDSH_WITH_VORTEX
 #error Obsolete benchmark Vortex definition
 #endif
 #ifdef EXPECT_VORTEX
+#ifndef KVIKIO_FAKE_LINK
+#error Missing private query KvikIO dependency
+#endif
 #ifndef CUDF_NDSH_QUERY_EXTENSION
 #error Missing private benchmark extension definition
 #endif
 #include CUDF_NDSH_QUERY_EXTENSION
 #else
+#ifdef KVIKIO_FAKE_LINK
+#error Query KvikIO dependency leaked
+#endif
 #ifdef CUDF_NDSH_QUERY_EXTENSION
 #error Benchmark extension definition leaked
 #endif
@@ -233,10 +247,10 @@ IO_STUB = """
 #ifndef PARENT_CXX_FLAG
 #error Parent compiler flags were lost
 #endif
-#if !defined(VORTEX_FAKE_LINK) || !defined(NANOARROW_FAKE_LINK) || !defined(CUDA_FAKE_LINK)
+#if !defined(VORTEX_FAKE_LINK) || !defined(NANOARROW_FAKE_LINK) || !defined(CUDA_FAKE_LINK) || !defined(NVTX_FAKE_LINK)
 #error Missing private adapter dependency usage requirements
 #endif
-#if defined(CUDF_NDSH_QUERY_EXTENSION) || defined(CUDF_NDSH_WITH_VORTEX) || defined(EXPECT_VORTEX)
+#if defined(CUDF_NDSH_QUERY_EXTENSION) || defined(CUDF_NDSH_WITH_VORTEX) || defined(EXPECT_VORTEX) || defined(KVIKIO_FAKE_LINK)
 #error Benchmark definitions leaked into the adapter
 #endif
 int ndsh_vortex_io_stub() { return 0; }
