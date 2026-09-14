@@ -103,6 +103,51 @@ typedef struct {
 void duckdb_vx_table_filter_get_in_filter(duckdb_vx_table_filter ffi_filter,
                                           duckdb_vx_table_filter_in_filter *out);
 
+// An owned handle to the bloom filter that a DUCKDB_VX_TABLE_FILTER_TYPE_BLOOM_FILTER probes.
+// The filter itself is owned by the join hash table that builds it, which outlives every scan
+// the filter was pushed into.
+typedef struct duckdb_vx_bloom_filter_ *duckdb_vx_bloom_filter;
+
+typedef struct {
+    duckdb_vx_bloom_filter filter;
+    // The type of the join key the filter was built from. Owned by the caller.
+    duckdb_logical_type key_type;
+} duckdb_vx_table_filter_bloom;
+
+void duckdb_vx_table_filter_get_bloom(duckdb_vx_table_filter ffi_filter, duckdb_vx_table_filter_bloom *out);
+
+void duckdb_vx_bloom_filter_free(duckdb_vx_bloom_filter *ffi_filter);
+
+// A borrowed view over the bits of a bloom filter. `num_sectors` is always a power of two, and
+// each sector holds 64 bits.
+typedef struct {
+    const uint64_t *sectors;
+    uint64_t num_sectors;
+} duckdb_vx_bloom_filter_view;
+
+// Reads the current contents of the filter. Returns false while the join that owns the filter
+// has not populated it yet, leaving `out` untouched.
+bool duckdb_vx_bloom_filter_get_view(duckdb_vx_bloom_filter ffi_filter, duckdb_vx_bloom_filter_view *out);
+
+// Hashes a value exactly as DuckDB's vectorized hash does, which is how the values a bloom
+// filter was built from were hashed. This pins the Rust-side probe to DuckDB's own hashing.
+uint64_t duckdb_vx_value_hash(duckdb_value value);
+
+// The next two functions build a bloom filter the way a hash join does. They exist so that the
+// Rust probe can be tested against a filter DuckDB itself populated, rather than against a second
+// reimplementation of it.
+
+// Creates a bloom filter that has not been sized yet, matching the state of a join whose build
+// side has not finished. Free it with `duckdb_vx_bloom_filter_free`.
+duckdb_vx_bloom_filter duckdb_vx_bloom_filter_create(void);
+
+// Sizes the filter for `values_count` keys and inserts every value, hashing each one the way a
+// hash join hashes its build-side keys.
+void duckdb_vx_bloom_filter_build(duckdb_vx_bloom_filter ffi_filter,
+                                  duckdb_connection connection,
+                                  duckdb_value *values,
+                                  size_t values_count);
+
 #ifdef __cplusplus /* End C ABI */
 }
 #endif

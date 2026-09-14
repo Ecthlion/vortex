@@ -1,0 +1,32 @@
+--- a/src/include/duckdb/planner/filter/bloom_filter.hpp
++++ b/src/include/duckdb/planner/filter/bloom_filter.hpp
+@@ -32,6 +32,16 @@ public:
+ 		return initialized;
+ 	}
+ 
++	//! Read-only access to the raw sectors backing the filter, so that an external scan (such as
++	//! the Vortex extension) can probe the filter over its own vectors instead of first
++	//! converting them into DuckDB vectors.
++	const uint64_t *GetSectors() const {
++		return bf;
++	}
++	idx_t GetNumSectors() const {
++		return num_sectors;
++	}
++
+ private:
+ 	idx_t num_sectors;
+ 	uint64_t bitmask; // num_sectors - 1 -> used to get the sector offset
+@@ -69,6 +79,12 @@ public:
+ 		return key_type;
+ 	}
+ 
++	//! The bloom filter this table filter probes. It is owned by the join hash table, which
++	//! outlives every scan the filter was pushed into.
++	const BloomFilter &GetFilter() const {
++		return filter;
++	}
++
+ 	string ToString(const string &column_name) const override;
+ 
+ 	// Filters by first hashing and then probing the bloom filter. The &sel will hold

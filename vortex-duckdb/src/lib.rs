@@ -25,6 +25,7 @@ use vortex::session::VortexSession;
 use crate::duckdb::Database;
 use crate::duckdb::DatabaseRef;
 
+mod bloom_filter;
 mod column_statistics;
 mod convert;
 pub mod duckdb;
@@ -56,6 +57,7 @@ static SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
         .map_err(|error| vortex_err!("{error}"))
         .vortex_expect("DuckDB-supported draft core edition is registered");
     vortex_spatial::initialize(&session);
+    bloom_filter::register(&session);
     session
 });
 

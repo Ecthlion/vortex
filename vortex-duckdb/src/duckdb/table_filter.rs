@@ -6,15 +6,18 @@ use std::fmt::Debug;
 use std::fmt::Formatter;
 use std::marker::PhantomData;
 use std::ptr;
+use std::sync::atomic::AtomicU64;
 
 use cpp::duckdb_vx_table_filter;
 use num_traits::AsPrimitive;
+use vortex::error::VortexExpect;
 use vortex::error::vortex_panic;
 
 use crate::cpp;
 use crate::cpp::idx_t;
 use crate::duckdb::Expression;
 use crate::duckdb::ExpressionRef;
+use crate::duckdb::LogicalType;
 use crate::duckdb::Value;
 use crate::duckdb::ValueRef;
 use crate::lifetime_wrapper;
@@ -174,8 +177,16 @@ impl TableFilterRef {
                 TableFilterClass::ExpressionRef(expr)
             }
             cpp::DUCKDB_VX_TABLE_FILTER_TYPE::DUCKDB_VX_TABLE_FILTER_TYPE_BLOOM_FILTER => {
-                // TODO(aduffy): actually extract these parameters
-                TableFilterClass::Bloom
+                let mut out = cpp::duckdb_vx_table_filter_bloom {
+                    filter: ptr::null_mut(),
+                    key_type: ptr::null_mut(),
+                };
+                unsafe { cpp::duckdb_vx_table_filter_get_bloom(self.as_ptr(), &raw mut out) };
+
+                TableFilterClass::Bloom(BloomFilter {
+                    data: unsafe { BloomFilterData::own(out.filter) },
+                    key_type: unsafe { LogicalType::own(out.key_type) },
+                })
             }
         }
     }
@@ -202,7 +213,7 @@ pub enum TableFilterClass<'a> {
     InFilter(Values<'a>),
     Dynamic(DynamicFilter),
     ExpressionRef(&'a ExpressionRef),
-    Bloom,
+    Bloom(BloomFilter),
 }
 
 pub struct ConstantComparison<'a> {
@@ -285,5 +296,70 @@ impl DynamicFilterDataRef {
             return None;
         }
         Some(unsafe { Value::own(ptr) })
+    }
+}
+
+/// A bloom filter a hash join built over its build side and pushed into this scan.
+pub struct BloomFilter {
+    pub data: BloomFilterData,
+    /// The type of the join key the filter was built from.
+    pub key_type: LogicalType,
+}
+
+lifetime_wrapper!(
+    /// A handle to the bloom filter of a join hash table.
+    BloomFilterData,
+    cpp::duckdb_vx_bloom_filter,
+    cpp::duckdb_vx_bloom_filter_free
+);
+
+/// The handle borrows a bloom filter owned by a join hash table, which DuckDB keeps alive for
+/// the whole query. The build side writes to it atomically, so shared reads are safe.
+unsafe impl Send for BloomFilterData {}
+unsafe impl Sync for BloomFilterData {}
+
+impl BloomFilterDataRef {
+    /// The filter's sectors, or `None` while the join has not populated the filter yet.
+    ///
+    /// The build side of the join writes sectors atomically, so the returned slice must only be
+    /// read through its atomics.
+    pub fn sectors(&self) -> Option<&[AtomicU64]> {
+        let mut out = cpp::duckdb_vx_bloom_filter_view {
+            sectors: ptr::null(),
+            num_sectors: 0,
+        };
+        unsafe { cpp::duckdb_vx_bloom_filter_get_view(self.as_ptr(), &raw mut out) }.then(|| {
+            // SAFETY: DuckDB allocated `num_sectors` 64-bit sectors at this address and keeps
+            // them alive for the lifetime of the join that owns the filter. `AtomicU64` has the
+            // same layout as `u64`, and the C++ side also accesses the sectors atomically.
+            unsafe {
+                std::slice::from_raw_parts(
+                    out.sectors.cast::<AtomicU64>(),
+                    usize::try_from(out.num_sectors).vortex_expect("sector count fits in usize"),
+                )
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+impl BloomFilterData {
+    /// Creates a bloom filter that no join has built yet, so that the Rust probe can be tested
+    /// against a filter DuckDB itself populated.
+    pub fn new_unbuilt() -> Self {
+        unsafe { Self::own(cpp::duckdb_vx_bloom_filter_create()) }
+    }
+
+    /// Builds the filter over `values`, the way a hash join builds one over its build-side keys.
+    pub fn build(&self, connection: &crate::duckdb::ConnectionRef, values: &[Value]) {
+        let mut values: Vec<cpp::duckdb_value> = values.iter().map(|v| v.as_ptr()).collect();
+        unsafe {
+            cpp::duckdb_vx_bloom_filter_build(
+                self.as_ptr(),
+                connection.as_ptr(),
+                values.as_mut_ptr(),
+                values.len(),
+            );
+        }
     }
 }

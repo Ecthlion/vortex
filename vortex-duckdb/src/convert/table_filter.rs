@@ -28,6 +28,8 @@ use vortex::scan::selection::Selection;
 use vortex::scan::strict_sorted_buffer::StrictSortedBuffer;
 
 use super::expr::try_from_bound_expression_with_col_sub;
+use crate::bloom_filter::BloomFilterContains;
+use crate::bloom_filter::try_new_probe;
 use crate::cpp::DUCKDB_VX_EXPR_TYPE;
 use crate::duckdb::ExtractedValue;
 use crate::duckdb::TableFilterClass;
@@ -46,13 +48,18 @@ pub fn try_from_table_filter(
             Binary.new_expr(const_.operator.try_into()?, [col.clone(), lit(scalar)])
         }
         TableFilterClass::ConjunctionAnd(conj_and) => {
-            let Some(children) = conj_and
-                .children()
-                .map(|child| try_from_table_filter(child, col, scope_dtype))
-                .try_collect::<_, Option<Vec<_>>, _>()?
-            else {
-                return Ok(None);
-            };
+            let mut children = Vec::new();
+            for child in conj_and.children() {
+                match try_from_table_filter(child, col, scope_dtype)? {
+                    Some(expr) => children.push(expr),
+                    // Leaving a conjunct out only keeps rows DuckDB would have kept anyway, but
+                    // it is only safe for a conjunct DuckDB does not need the scan to apply.
+                    // Join filter pushdown mixes these: a bloom filter Vortex cannot probe sits
+                    // next to range filters it can.
+                    None if matches!(child.as_class(), TableFilterClass::Optional(_)) => {}
+                    None => return Ok(None),
+                }
+            }
 
             and_collect(children).unwrap_or_else(|| lit(true))
         }
@@ -130,8 +137,12 @@ pub fn try_from_table_filter(
                 None => return Ok(None),
             }
         }
-        TableFilterClass::Bloom => {
-            vortex_bail!("bloom filter table filter is not supported")
+        TableFilterClass::Bloom(bloom) => {
+            let dtype = col.return_dtype(scope_dtype)?;
+            let Some(probe) = try_new_probe(bloom.data, &bloom.key_type, &dtype) else {
+                return Ok(None);
+            };
+            BloomFilterContains.new_expr(probe, [col.clone()])
         }
     }))
 }

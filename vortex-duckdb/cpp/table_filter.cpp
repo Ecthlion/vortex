@@ -11,6 +11,8 @@
 #include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/filter/struct_filter.hpp"
 #include "duckdb/planner/filter/in_filter.hpp"
+#include "duckdb/planner/filter/bloom_filter.hpp"
+#include "duckdb/main/connection.hpp"
 
 using namespace duckdb;
 
@@ -176,4 +178,89 @@ extern "C" duckdb_value duckdb_vx_values_vec_get(duckdb_vx_values_vec ffi_vec, s
         return nullptr;
     }
     return reinterpret_cast<duckdb_value>(&(*vec)[idx]);
+}
+
+// Wrapper holding a borrowed reference to a join's bloom filter. The filter lives in the join
+// hash table, which outlives every scan the filter was pushed into, so borrowing is safe.
+namespace {
+struct BloomFilterWrapper {
+    const BloomFilter &filter;
+    // Only set for the filters `duckdb_vx_bloom_filter_create` builds for tests; a filter pushed
+    // down by a join is owned by that join's hash table.
+    unique_ptr<BloomFilter> owned;
+
+    explicit BloomFilterWrapper(const BloomFilter &filter_p) : filter(filter_p) {
+    }
+};
+} // namespace
+
+extern "C" void duckdb_vx_table_filter_get_bloom(duckdb_vx_table_filter ffi_filter,
+                                                 duckdb_vx_table_filter_bloom *out) {
+    if (!ffi_filter || !out) {
+        return;
+    }
+    auto &filter = reinterpret_cast<TableFilter *>(ffi_filter)->Cast<BFTableFilter>();
+
+    auto wrapper = make_uniq<BloomFilterWrapper>(filter.GetFilter());
+    out->filter = reinterpret_cast<duckdb_vx_bloom_filter>(wrapper.release());
+    out->key_type = reinterpret_cast<duckdb_logical_type>(new LogicalType(filter.GetKeyType()));
+}
+
+extern "C" void duckdb_vx_bloom_filter_free(duckdb_vx_bloom_filter *ffi_filter) {
+    if (!ffi_filter || !*ffi_filter) {
+        return;
+    }
+    delete reinterpret_cast<BloomFilterWrapper *>(*ffi_filter);
+    *ffi_filter = nullptr;
+}
+
+extern "C" bool duckdb_vx_bloom_filter_get_view(duckdb_vx_bloom_filter ffi_filter,
+                                                duckdb_vx_bloom_filter_view *out) {
+    if (!ffi_filter || !out) {
+        return false;
+    }
+    auto &filter = reinterpret_cast<BloomFilterWrapper *>(ffi_filter)->filter;
+    if (!filter.IsInitialized()) {
+        return false;
+    }
+    out->sectors = filter.GetSectors();
+    out->num_sectors = filter.GetNumSectors();
+    return true;
+}
+
+extern "C" uint64_t duckdb_vx_value_hash(duckdb_value value) {
+    if (!value) {
+        return 0;
+    }
+    return reinterpret_cast<Value *>(value)->Hash();
+}
+
+extern "C" duckdb_vx_bloom_filter duckdb_vx_bloom_filter_create() {
+    auto owned = make_uniq<BloomFilter>();
+    auto wrapper = make_uniq<BloomFilterWrapper>(*owned);
+    wrapper->owned = std::move(owned);
+    return reinterpret_cast<duckdb_vx_bloom_filter>(wrapper.release());
+}
+
+extern "C" void duckdb_vx_bloom_filter_build(duckdb_vx_bloom_filter ffi_filter,
+                                             duckdb_connection connection,
+                                             duckdb_value *values,
+                                             size_t values_count) {
+    if (!ffi_filter || !connection || (values_count > 0 && !values)) {
+        return;
+    }
+    auto wrapper = reinterpret_cast<BloomFilterWrapper *>(ffi_filter);
+    if (!wrapper->owned) {
+        return;
+    }
+
+    auto connection_ = reinterpret_cast<Connection *>(connection);
+    wrapper->owned->Initialize(*connection_->context, values_count);
+
+    Vector hashes_v(LogicalType::HASH, MaxValue<idx_t>(values_count, 1));
+    auto hashes = FlatVector::GetData<hash_t>(hashes_v);
+    for (size_t i = 0; i < values_count; i++) {
+        hashes[i] = reinterpret_cast<Value *>(values[i])->Hash();
+    }
+    wrapper->owned->InsertHashes(hashes_v, values_count);
 }
