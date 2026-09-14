@@ -2,73 +2,73 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 use std::cell::Cell;
-use std::rc::Rc;
 
 use rstest::rstest;
 use vortex_error::VortexResult;
 
-use super::ProbeCtx;
+use super::ProbeAccess;
+use super::ProbeState;
 use super::ProbeStorage;
 use super::ProbeUsage;
+use super::RetainedProbe;
+use crate::ExecutionCtx;
 use crate::IntoArray;
 use crate::VortexSessionExecute;
 use crate::arrays::PrimitiveArray;
 use crate::arrays::StructArray;
+use crate::scalar::Scalar;
 
-#[derive(Default)]
-struct Tracked {
-    drops: Rc<Cell<usize>>,
+struct TrackedProbe<'a> {
+    value: &'a i32,
+    reads: &'a Cell<usize>,
+    drops: &'a Cell<usize>,
 }
 
-impl Drop for Tracked {
+impl RetainedProbe for TrackedProbe<'_> {
+    fn scalar_at(&mut self, _index: usize, _ctx: &mut ExecutionCtx) -> VortexResult<Scalar> {
+        self.reads.set(self.reads.get() + 1);
+        Ok((*self.value).into())
+    }
+}
+
+impl Drop for TrackedProbe<'_> {
     fn drop(&mut self) {
         self.drops.set(self.drops.get() + 1);
     }
 }
 
-#[derive(Default)]
-struct Large {
-    tracked: Tracked,
-    padding: [[u8; 32]; 8],
-}
-
-#[repr(align(64))]
-#[derive(Default)]
-struct Aligned(Tracked);
-
-#[derive(Default)]
-struct Borrowed<'a>(Option<&'a usize>);
-
 #[test]
-fn inline_state_survives_moves_and_drops_once() {
-    let mut storage = ProbeStorage::new();
+fn borrowed_state_is_initialized_once_and_survives_moves() -> VortexResult<()> {
+    let value = 42;
     let initialized = Cell::new(0);
-    // SAFETY: every access to this storage uses Tracked.
-    let drops = Rc::clone(
-        &unsafe {
-            storage.get_or_init(|| {
-                initialized.set(initialized.get() + 1);
-                Tracked::default()
-            })
-        }
-        .drops,
+    let reads = Cell::new(0);
+    let drops = Cell::new(0);
+    let mut ctx = crate::array_session().create_execution_ctx();
+    let mut storage = ProbeStorage::new();
+    let init = || -> Box<dyn RetainedProbe + '_> {
+        initialized.set(initialized.get() + 1);
+        Box::new(TrackedProbe {
+            value: &value,
+            reads: &reads,
+            drops: &drops,
+        })
+    };
+    assert!(storage.probe.is_none());
+    assert_eq!(
+        storage.get_or_init(init).scalar_at(0, &mut ctx)?,
+        value.into()
     );
-    assert!(storage.heap.is_none());
-    let mut moved = (storage, 1);
-    // SAFETY: the moved storage still contains Tracked.
-    assert!(Rc::ptr_eq(
-        &unsafe {
-            moved.0.get_or_init(|| {
-                initialized.set(initialized.get() + 1);
-                Tracked::default()
-            })
-        }
-        .drops,
-        &drops
-    ));
-    drop(moved);
+    let mut moved = (storage, ());
+    assert_eq!(
+        moved.0.get_or_init(init).scalar_at(0, &mut ctx)?,
+        value.into()
+    );
     assert_eq!(initialized.get(), 1);
+    assert_eq!(reads.get(), 2);
+    assert_eq!(drops.get(), 0);
+    drop(moved);
     assert_eq!(drops.get(), 1);
+    Ok(())
 }
 
 #[test]
@@ -76,7 +76,7 @@ fn children_are_lazy_reused_and_bound_to_their_source_slots() -> VortexResult<()
     let leaf = PrimitiveArray::from_iter([10i32, 20]).into_array();
     let array = StructArray::from_fields(&[("left", leaf.clone()), ("right", leaf)])?.into_array();
     let mut ctx = crate::array_session().create_execution_ctx();
-    let mut probe = ProbeCtx::<usize>::new(&array);
+    let mut probe = ProbeState::<usize>::new(&array);
     assert_eq!(probe.children.slots.capacity(), 0);
     // Slot zero is the absent struct validity; invalid requests must not allocate.
     assert!(probe.child(0).is_err());
@@ -91,14 +91,14 @@ fn children_are_lazy_reused_and_bound_to_their_source_slots() -> VortexResult<()
         child
             .state
             .as_ref()
-            .is_some_and(|state| state.drop_fn.is_none())
+            .is_some_and(|state| state.probe.is_none())
     );
     assert!(child.scalar_at(2, &mut ctx).is_err());
     assert!(
         child
             .state
             .as_ref()
-            .is_some_and(|state| state.drop_fn.is_none())
+            .is_some_and(|state| state.probe.is_none())
     );
     assert_eq!(child.scalar_at(0, &mut ctx)?, 10i32.into());
     *state += 1;
@@ -109,7 +109,7 @@ fn children_are_lazy_reused_and_bound_to_their_source_slots() -> VortexResult<()
             .child(1)?
             .state
             .as_ref()
-            .is_some_and(|state| state.drop_fn.is_some())
+            .is_some_and(|state| state.probe.is_some())
     );
 
     // Identical sources in different slots still get independent probe state.
@@ -123,68 +123,21 @@ fn children_are_lazy_reused_and_bound_to_their_source_slots() -> VortexResult<()
             .child(2)?
             .state
             .as_ref()
-            .is_some_and(|state| state.drop_fn.is_none())
+            .is_some_and(|state| state.probe.is_none())
     );
-    let mut other = ProbeCtx::<usize>::new(&array);
+    let mut other = ProbeState::<usize>::new(&array);
     assert!(
         other
             .child(1)?
             .state
             .as_ref()
-            .is_some_and(|state| state.drop_fn.is_none())
+            .is_some_and(|state| state.probe.is_none())
     );
 
     let mut moved = (probe, ());
     assert_eq!(std::ptr::from_mut(moved.0.child(1)?), first);
     assert_eq!(moved.0.child(1)?.scalar_at(1, &mut ctx)?, 20i32.into());
     Ok(())
-}
-
-#[test]
-fn oversized_state_spills_and_drops_once() {
-    let mut storage = ProbeStorage::new();
-    // SAFETY: every access to this storage uses Large.
-    let state = unsafe { storage.get_or_init::<Large>(Large::default) };
-    state.padding[7][31] = 42;
-    let drops = Rc::clone(&state.tracked.drops);
-    assert!(storage.heap.is_some());
-    let mut moved = (storage, 1);
-    // SAFETY: the moved storage still contains Large.
-    assert_eq!(
-        unsafe { moved.0.get_or_init::<Large>(Large::default) }.padding[7][31],
-        42
-    );
-    drop(moved);
-    assert_eq!(drops.get(), 1);
-}
-
-#[test]
-fn over_aligned_state_spills() {
-    let mut storage = ProbeStorage::new();
-    // SAFETY: this storage is only used for Aligned.
-    let state = unsafe { storage.get_or_init::<Aligned>(Aligned::default) };
-    assert_eq!(std::ptr::from_ref(state).addr() % 64, 0);
-    let drops = Rc::clone(&state.0.drops);
-    assert!(storage.heap.is_some());
-    drop(storage);
-    assert_eq!(drops.get(), 1);
-}
-
-#[test]
-fn state_can_borrow_and_unit_needs_no_allocation() {
-    let value = 42;
-    let mut borrowed = ProbeStorage::new();
-    // SAFETY: the storage always contains Borrowed with the same source lifetime.
-    unsafe { borrowed.get_or_init::<Borrowed<'_>>(Borrowed::default) }.0 = Some(&value);
-    // SAFETY: same type and source lifetime as initialization.
-    assert_eq!(
-        unsafe { borrowed.get_or_init::<Borrowed<'_>>(Borrowed::default) }.0,
-        Some(&42)
-    );
-    let mut unit = ProbeStorage::new();
-    // SAFETY: this separate storage is only used for ().
-    unsafe { unit.get_or_init::<()>(Default::default) };
-    assert!(unit.heap.is_none());
 }
 
 #[rstest]
@@ -198,14 +151,14 @@ fn access_checks_bounds_and_nulls(#[case] usage: ProbeUsage) -> VortexResult<()>
         probe
             .state
             .as_ref()
-            .is_none_or(|state| state.drop_fn.is_none())
+            .is_none_or(|state| state.probe.is_none())
     );
     assert!(probe.scalar_at(3, &mut ctx).is_err());
     assert!(
         probe
             .state
             .as_ref()
-            .is_none_or(|state| state.drop_fn.is_none())
+            .is_none_or(|state| state.probe.is_none())
     );
     for index in [2, 1, 0, 2] {
         assert_eq!(
@@ -215,6 +168,43 @@ fn access_checks_bounds_and_nulls(#[case] usage: ProbeUsage) -> VortexResult<()>
     }
     if usage == ProbeUsage::Once {
         assert!(probe.state.is_none());
+    }
+    Ok(())
+}
+
+#[rstest]
+fn slot_access_uses_context_policy(
+    #[values(ProbeUsage::Once, ProbeUsage::Repeated)] usage: ProbeUsage,
+) -> VortexResult<()> {
+    let leaf = PrimitiveArray::from_option_iter([Some(10i32), None]).into_array();
+    let array = StructArray::from_fields(&[("values", leaf)])?.into_array();
+    let mut ctx = crate::array_session().create_execution_ctx();
+    let mut retained = ProbeState::<()>::new(&array);
+    {
+        let mut probe = match usage {
+            ProbeUsage::Once => ProbeAccess::Once(&array),
+            ProbeUsage::Repeated => ProbeAccess::Repeated(&mut retained),
+        };
+        assert!(probe.slot(0).is_err());
+        assert!(probe.slot(99).is_err());
+        for index in [1, 0, 1, 0] {
+            let mut slot = probe.slot(1)?;
+            assert_eq!(
+                slot.execute_scalar(index, &mut ctx)?,
+                slot.array().execute_scalar(index, &mut ctx)?
+            );
+        }
+        assert!(probe.slot(1)?.execute_scalar(2, &mut ctx).is_err());
+    }
+    match usage {
+        ProbeUsage::Once => assert_eq!(retained.children.slots.capacity(), 0),
+        ProbeUsage::Repeated => assert!(
+            retained
+                .child(1)?
+                .state
+                .as_ref()
+                .is_some_and(|state| state.probe.is_some())
+        ),
     }
     Ok(())
 }

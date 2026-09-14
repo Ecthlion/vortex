@@ -3,17 +3,16 @@
 
 //! Random scalar access with optional, encoding-specific retained state.
 
-use std::marker::PhantomData;
-use std::mem::MaybeUninit;
-use std::ptr::NonNull;
-
 use vortex_error::VortexResult;
 use vortex_error::vortex_ensure;
 use vortex_error::vortex_err;
 
 use crate::ArrayRef;
+use crate::ArrayView;
 use crate::ExecutionCtx;
+use crate::array::VTable;
 use crate::scalar::Scalar;
+use crate::vtable::OperationsVTable;
 
 /// Whether scalar access should retain preparation for subsequent lookups.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -26,15 +25,14 @@ pub enum ProbeUsage {
 
 /// A borrowed scalar accessor that retains encoding-specific state until it is dropped.
 ///
-/// `'a` is the borrow of the root array. Its [`ProbeCtx`] retains a child probe for each
+/// `'a` is the borrow of the root array. Its [`ProbeState`] retains a child probe for each
 /// requested slot, so one lifetime covers the whole tree and no array handles are cloned.
 /// Anything an encoding builds itself, such as a decoded page or validity mask, is owned
 /// by its state.
 ///
 /// Construction never allocates or executes the array. Repeated access initializes the
-/// encoding's context on the first in-bounds lookup. Small contexts live inline; larger or
-/// more aligned contexts use a heap allocation. Child storage and decoding may allocate
-/// separately, when first needed.
+/// encoding's context in a Box on the first in-bounds lookup. Child storage and decoding
+/// may allocate separately, when first needed.
 ///
 /// `Once` is a caching hint, not a restriction on how many times the probe may be called.
 /// Returned scalars own their values and can outlive the probe. Probes are local to a thread.
@@ -43,18 +41,77 @@ pub struct ArrayProbe<'a> {
     state: Option<ProbeStorage<'a>>,
 }
 
+/// Scalar access to a source array, with optional retained preparation.
+pub enum ProbeAccess<'a, 'p, S> {
+    /// Read slots with fresh probes that retain no state.
+    Once(&'a ArrayRef),
+    /// Reuse the source's local state and child probes.
+    Repeated(&'p mut ProbeState<'a, S>),
+}
+
+impl<'a, S> ProbeAccess<'a, '_, S> {
+    /// Access retained local state, if repeated access was requested.
+    pub fn state_mut(&mut self) -> Option<&mut S> {
+        match self {
+            Self::Once(_) => None,
+            Self::Repeated(state) => Some(state.state_mut()),
+        }
+    }
+
+    /// Access a child slot using this context's retention policy.
+    pub fn slot(&mut self, slot: usize) -> VortexResult<ProbeSlot<'a, '_>> {
+        match self {
+            Self::Once(array) => {
+                let child = array
+                    .slots()
+                    .get(slot)
+                    .and_then(Option::as_ref)
+                    .ok_or_else(|| vortex_err!("Probe child slot {slot} is missing"))?;
+                Ok(ProbeSlot::Once(child))
+            }
+            Self::Repeated(state) => Ok(ProbeSlot::Repeated(state.child(slot)?)),
+        }
+    }
+}
+
+/// A child accessor that either starts a fresh probe or borrows a retained probe.
+pub enum ProbeSlot<'a, 'p> {
+    /// A source read without retained preparation.
+    Once(&'a ArrayRef),
+    /// An existing repeated-access probe.
+    Repeated(&'p mut ArrayProbe<'a>),
+}
+
+impl<'a> ProbeSlot<'a, '_> {
+    /// The source array for this slot.
+    pub fn array(&self) -> &'a ArrayRef {
+        match self {
+            Self::Once(array) => array,
+            Self::Repeated(probe) => probe.array(),
+        }
+    }
+
+    /// Read a scalar using fresh or retained preparation as appropriate.
+    pub fn execute_scalar(&mut self, index: usize, ctx: &mut ExecutionCtx) -> VortexResult<Scalar> {
+        match self {
+            Self::Once(array) => array.probe(ProbeUsage::Once).scalar_at(index, ctx),
+            Self::Repeated(probe) => probe.scalar_at(index, ctx),
+        }
+    }
+}
+
 /// Local encoding state and lazy child probes retained for one source array.
 ///
 /// The framework initializes this context once for repeated access and passes it to
 /// [`OperationsVTable::probe_scalar`](crate::vtable::OperationsVTable::probe_scalar).
-/// One-off access receives `None` instead. `S` is the encoding's associated state type;
+/// One-off access uses [`ProbeAccess::Once`] instead. `S` is the encoding's associated state type;
 /// it may borrow the source tree for `'a` and own any prepared resources.
-pub struct ProbeCtx<'a, S> {
+pub struct ProbeState<'a, S> {
     state: S,
     children: ProbeChildren<'a>,
 }
 
-impl<'a, S: Default> ProbeCtx<'a, S> {
+impl<'a, S: Default> ProbeState<'a, S> {
     pub(crate) fn new(array: &'a ArrayRef) -> Self {
         Self {
             state: S::default(),
@@ -66,7 +123,7 @@ impl<'a, S: Default> ProbeCtx<'a, S> {
     }
 }
 
-impl<'a, S> ProbeCtx<'a, S> {
+impl<'a, S> ProbeState<'a, S> {
     /// Access the encoding's retained local state.
     pub fn state_mut(&mut self) -> &mut S {
         &mut self.state
@@ -88,7 +145,7 @@ impl<'a, S> ProbeCtx<'a, S> {
 
 /// Lazy child probes bound to the slots of one source array.
 ///
-/// Obtain this through [`ProbeCtx::parts`] when retaining a mutable borrow of local state
+/// Obtain this through [`ProbeState::parts`] when retaining a mutable borrow of local state
 /// while accessing children. Each slot has independent state, even if two slots reference
 /// the same array. The slot table allocates on its first valid request; unrequested slots
 /// remain empty. Dropping the parent context drops every created child probe.
@@ -158,83 +215,57 @@ impl<'a> ArrayProbe<'a> {
     }
 }
 
-// An open set of external state types cannot be represented by a fixed Rust enum. Erasing
-// them inline avoids a mandatory Box allocation; all raw storage operations are confined here.
-#[repr(align(16))]
-struct InlineStorage(MaybeUninit<[u8; 128]>);
-
 pub(crate) struct ProbeStorage<'a> {
-    inline: InlineStorage,
-    heap: Option<NonNull<u8>>,
-    drop_fn: Option<unsafe fn(*mut u8)>,
-    // The erased state may borrow the root array tree, and the type system cannot see that
-    // borrow once erased. This marker ties the storage to `'a` (invariantly) so it cannot
-    // outlive the borrow. NonNull also keeps the erased storage !Send and !Sync, since we
-    // impose neither bound on state types.
-    _lifetime: PhantomData<&'a mut &'a ()>,
+    // FIXME: Consider inline storage if benchmarks justify avoiding this allocation.
+    probe: Option<Box<dyn RetainedProbe + 'a>>,
+}
+
+trait RetainedProbe {
+    fn scalar_at(&mut self, index: usize, ctx: &mut ExecutionCtx) -> VortexResult<Scalar>;
+}
+
+struct EncodingProbe<'a, V: VTable> {
+    array: ArrayView<'a, V>,
+    state: ProbeState<'a, <V::OperationsVTable as OperationsVTable<V>>::ProbeState<'a>>,
+}
+
+impl<V: VTable> RetainedProbe for EncodingProbe<'_, V> {
+    fn scalar_at(&mut self, index: usize, ctx: &mut ExecutionCtx) -> VortexResult<Scalar> {
+        <V::OperationsVTable as OperationsVTable<V>>::probe_scalar(
+            self.array,
+            index,
+            ProbeAccess::Repeated(&mut self.state),
+            ctx,
+        )
+    }
 }
 
 impl<'a> ProbeStorage<'a> {
     fn new() -> Self {
-        Self {
-            inline: InlineStorage(MaybeUninit::uninit()),
-            heap: None,
-            drop_fn: None,
-            _lifetime: PhantomData,
-        }
+        Self { probe: None }
     }
 
-    /// # Safety
-    ///
-    /// Every call on this storage must use the same `T`, including its lifetime parameters.
-    /// The owning ArrayProbe fixes its source array, and only that array's erased adapter
-    /// may initialize/access this storage using its associated ProbeCtx type.
-    pub(crate) unsafe fn get_or_init<T: 'a>(&mut self, init: impl FnOnce() -> T) -> &mut T {
-        if self.drop_fn.is_none() {
-            let value = init();
-            if size_of::<T>() <= size_of::<InlineStorage>()
-                && align_of::<T>() <= align_of::<InlineStorage>()
-            {
-                // SAFETY: the size/alignment checks make the inline region suitable for T,
-                // and no value has been initialized in this storage yet.
-                unsafe { self.inline.0.as_mut_ptr().cast::<T>().write(value) };
-                self.drop_fn = Some(drop_inline::<T>);
-            } else {
-                self.heap = Some(NonNull::from(Box::leak(Box::new(value))).cast());
-                self.drop_fn = Some(drop_heap::<T>);
-            }
-        }
-        // SAFETY: initialization above, or the caller's same-T invariant, establishes a
-        // live T at this pointer. The exclusive storage borrow provides exclusive access.
-        unsafe { &mut *self.as_mut_ptr().cast::<T>() }
+    fn get_or_init(
+        &mut self,
+        init: impl FnOnce() -> Box<dyn RetainedProbe + 'a>,
+    ) -> &mut (dyn RetainedProbe + 'a) {
+        self.probe.get_or_insert_with(init).as_mut()
     }
 
-    fn as_mut_ptr(&mut self) -> *mut u8 {
-        match self.heap {
-            Some(ptr) => ptr.as_ptr(),
-            None => self.inline.0.as_mut_ptr().cast(),
-        }
+    pub(crate) fn scalar_at<V: VTable>(
+        &mut self,
+        array: ArrayView<'a, V>,
+        index: usize,
+        ctx: &mut ExecutionCtx,
+    ) -> VortexResult<Scalar> {
+        self.get_or_init(|| {
+            Box::new(EncodingProbe {
+                array,
+                state: ProbeState::new(array.array()),
+            })
+        })
+        .scalar_at(index, ctx)
     }
-}
-
-impl Drop for ProbeStorage<'_> {
-    fn drop(&mut self) {
-        if let Some(drop_fn) = self.drop_fn {
-            // SAFETY: the drop shim was installed only after its matching T was initialized.
-            // No pointer into inline storage is retained across moves of ProbeStorage.
-            unsafe { drop_fn(self.as_mut_ptr()) };
-        }
-    }
-}
-
-unsafe fn drop_inline<T>(ptr: *mut u8) {
-    // SAFETY: the storage installed this shim for an initialized inline T.
-    unsafe { ptr.cast::<T>().drop_in_place() };
-}
-
-unsafe fn drop_heap<T>(ptr: *mut u8) {
-    // SAFETY: the storage installed this shim for a T allocated by Box::new and leaked once.
-    drop(unsafe { Box::from_raw(ptr.cast::<T>()) });
 }
 
 #[cfg(test)]

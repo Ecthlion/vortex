@@ -5,7 +5,7 @@ use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 
 use crate::ExecutionCtx;
-use crate::ProbeCtx;
+use crate::ProbeAccess;
 use crate::array::ArrayView;
 use crate::array::VTable;
 use crate::scalar::Scalar;
@@ -22,21 +22,21 @@ pub trait OperationsVTable<V: VTable> {
     ///
     /// Default construction should be cheap and avoid allocation or execution. Preparation
     /// belongs in [`Self::probe_scalar`]. `'a` is the borrow of the root array, so state may
-    /// retain views into its source tree. Request retained child probes through [`ProbeCtx`].
+    /// retain views into its source tree. Request retained child probes through [`ProbeAccess`].
     /// Use `()` when no local state is needed.
     type ProbeState<'a>: Default + 'a;
 
     /// Read a scalar, handling nullness and optionally retaining state for subsequent reads.
     ///
-    /// Bounds have been checked, but the row may be null. `None` requests one-off access and
-    /// never initializes a context; `Some` reuses local state and child probes for this source.
+    /// Bounds have been checked, but the row may be null. `ProbeAccess::Once` requests one-off access and
+    /// never initializes a context; `ProbeAccess::Repeated` reuses local state and child probes for this source.
     /// The scalar must retain the source's logical dtype, including nullability.
     ///
     /// The default preserves the existing scalar path without adding caching.
     fn probe_scalar<'a>(
         array: ArrayView<'a, V>,
         index: usize,
-        _probe: Option<&mut ProbeCtx<'a, Self::ProbeState<'a>>>,
+        _probe: ProbeAccess<'a, '_, Self::ProbeState<'a>>,
         ctx: &mut ExecutionCtx,
     ) -> VortexResult<Scalar> {
         array.array().execute_scalar(index, ctx)
