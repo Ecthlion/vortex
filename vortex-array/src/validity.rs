@@ -190,6 +190,11 @@ impl Validity {
     }
 
     /// Returns whether the `index` item is valid, using `ctx` to execute the validity array.
+    #[deprecated(
+        note = "Use `Validity::probe` instead, which retains preparation across lookups: \
+        `validity.probe(ProbeUsage::Once).execute_is_valid(index, ctx)`, or `ProbeUsage::Repeated` \
+        when reading more than one index from the same validity."
+    )]
     #[inline]
     #[expect(deprecated)]
     pub fn execute_is_valid(&self, index: usize, ctx: &mut ExecutionCtx) -> VortexResult<bool> {
@@ -205,13 +210,22 @@ impl Validity {
     }
 
     /// Returns whether the `index` item is null, using `ctx` to execute the validity array.
+    #[deprecated(
+        note = "Use `Validity::probe` instead, which retains preparation across lookups: \
+        `validity.probe(ProbeUsage::Once).execute_is_invalid(index, ctx)`, or \
+        `ProbeUsage::Repeated` when reading more than one index from the same validity."
+    )]
     #[inline]
+    #[expect(deprecated)]
     pub fn execute_is_null(&self, index: usize, ctx: &mut ExecutionCtx) -> VortexResult<bool> {
         Ok(!self.execute_is_valid(index, ctx)?)
     }
 
     /// Returns whether the `index` item is valid.
-    #[deprecated(note = "use `execute_is_valid` with an explicit `ExecutionCtx`")]
+    #[deprecated(
+        note = "Use `Validity::probe` with an explicit `ExecutionCtx` instead: \
+        `validity.probe(ProbeUsage::Once).execute_is_valid(index, ctx)`."
+    )]
     #[inline]
     #[allow(clippy::disallowed_methods)]
     pub fn is_valid(&self, index: usize) -> VortexResult<bool> {
@@ -219,7 +233,10 @@ impl Validity {
     }
 
     /// Returns whether the `index` item is null.
-    #[deprecated(note = "use `execute_is_null` with an explicit `ExecutionCtx`")]
+    #[deprecated(
+        note = "Use `Validity::probe` with an explicit `ExecutionCtx` instead: \
+        `validity.probe(ProbeUsage::Once).execute_is_invalid(index, ctx)`."
+    )]
     #[inline]
     #[allow(clippy::disallowed_methods)]
     pub fn is_null(&self, index: usize) -> VortexResult<bool> {
