@@ -27,17 +27,21 @@ class CudaCodegenTests(CMakeTest):
         self.env = {
             name: value
             for name, value in rust_toolchain_environment().items()
-            if not name.startswith("NVCC_") and name != "VORTEX_CUDA_ARCH_FLAGS"
+            if not name.startswith("NVCC_") and name not in ("VORTEX_CUDA_ARCH_FLAGS", "VORTEX_CUDA_HOST_COMPILER")
         }
         self.env.update(PATH=str(self.work) + os.pathsep + self.env.get("PATH", ""), PROFILE="release")
         self.executable(
             "nvcc",
             """\
-            import json, sys
+            import json, os, sys
             from pathlib import Path
             args = sys.argv[1:]
+            environment = {
+                name: os.environ.get(name)
+                for name in ("NVCC_CCBIN", "NVCC_PREPEND_FLAGS", "NVCC_APPEND_FLAGS")
+            }
             with Path(__file__).with_name("nvcc.jsonl").open("a", encoding="utf-8") as log:
-                log.write(json.dumps(args) + "\\n")
+                log.write(json.dumps({"args": args, "env": environment}) + "\\n")
             Path(args[args.index("-o") + 1]).write_bytes(b"\\x00\\xff" + json.dumps(args).encode())
             """,
         )
@@ -94,13 +98,43 @@ class CudaCodegenTests(CMakeTest):
                 self.command(self.harness, self.work, env=env)
                 calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
                 self.assertEqual(len(calls), 2)
-                for args, (mode, name) in zip(calls, outputs, strict=True):
+                for call, (mode, name) in zip(calls, outputs, strict=True):
+                    args = call["args"]
                     self.assertEqual([arg for arg in args if arg.startswith(("-arch", "--generate-code"))], expected)
                     self.assertNotIn("", args)
                     self.assertEqual([arg for arg in args if arg in ("--fatbin", "--shared", "--ptx")], [mode])
                     self.assertEqual(Path(args[args.index("-o") + 1]), self.output / name)
                     # Reused outputs must contain this invocation, not the previous architecture flags.
                     self.assertEqual((self.output / name).read_bytes(), b"\x00\xff" + json.dumps(args).encode())
+
+    def test_host_compiler_is_an_explicit_nvcc_argument(self) -> None:
+        ambient = {
+            "NVCC_CCBIN": "default-g++",
+            "NVCC_PREPEND_FLAGS": "-ccbin=prepend-g++",
+            "NVCC_APPEND_FLAGS": "-ccbin=append-g++ --use_fast_math",
+        }
+        for compiler in (
+            None,
+            "",
+            str(self.work / "parent toolchain's/g++"),
+            os.fsdecode(os.fsencode(self.work) + b"/non-utf8-\xff/g++"),
+        ):
+            with self.subTest(compiler=compiler):
+                env = self.env | ambient
+                if compiler is not None:
+                    env["VORTEX_CUDA_HOST_COMPILER"] = compiler
+                log = self.work / "nvcc.jsonl"
+                log.unlink(missing_ok=True)
+                self.command(self.harness, self.work, env=env)
+                calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+                self.assertEqual(len(calls), 2)
+                for call in calls:
+                    args = call["args"]
+                    self.assertEqual(call["env"], ambient)
+                    self.assertEqual(args.count("--compiler-bindir"), 1 if compiler else 0)
+                    if compiler:
+                        index = args.index("--compiler-bindir")
+                        self.assertEqual(args[index : index + 2], ["--compiler-bindir", compiler])
 
     def test_binary_embedding_and_empty_table_exclude_stale_fatbins(self) -> None:
         stale = self.output / "stale.fatbin"
