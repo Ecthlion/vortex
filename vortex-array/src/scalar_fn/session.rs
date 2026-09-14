@@ -17,6 +17,7 @@ use crate::scalar_fn::fns::binary::Binary;
 use crate::scalar_fn::fns::byte_length::ByteLength;
 use crate::scalar_fn::fns::cast::Cast;
 use crate::scalar_fn::fns::ext_storage::ExtStorage;
+use crate::scalar_fn::fns::ext_wrap::ExtWrap;
 use crate::scalar_fn::fns::fill_null::FillNull;
 use crate::scalar_fn::fns::get_item::GetItem;
 use crate::scalar_fn::fns::is_not_null::IsNotNull;
@@ -68,6 +69,7 @@ impl Default for ScalarFnSession {
         this.register(ByteLength);
         this.register(Cast);
         this.register(ExtStorage);
+        this.register(ExtWrap);
         this.register(FillNull);
         this.register(GetItem);
         this.register(IsNotNull);

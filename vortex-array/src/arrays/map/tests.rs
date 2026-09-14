@@ -618,11 +618,13 @@ fn null_map_cast_cannot_create_sortedness_assertion() -> VortexResult<()> {
     let scalar = Scalar::null(unsorted_dtype);
 
     assert!(scalar.cast(&sorted_dtype).is_err());
-    let constant_cast = ConstantArray::new(scalar, 2)
-        .into_array()
-        .cast(sorted_dtype.clone())?;
-    let mut ctx = array_session().create_execution_ctx();
-    assert!(constant_cast.execute::<Canonical>(&mut ctx).is_err());
+    // The cast is rejected when it is bound, before any execution.
+    assert!(
+        ConstantArray::new(scalar, 2)
+            .into_array()
+            .cast(sorted_dtype.clone())
+            .is_err()
+    );
 
     let all_null =
         map_array_from_rows(unsorted_map_dtype, Nullability::Nullable, [None, None])?.into_array();

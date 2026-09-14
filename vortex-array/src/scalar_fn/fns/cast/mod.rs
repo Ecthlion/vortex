@@ -6,11 +6,13 @@ mod kernel;
 use std::fmt::Display;
 use std::fmt::Formatter;
 
+use itertools::Itertools;
 pub use kernel::*;
 use prost::Message;
 use vortex_error::VortexExpect as _;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
+use vortex_error::vortex_ensure;
 use vortex_error::vortex_err;
 use vortex_session::VortexSession;
 use vortex_session::registry::CachedId;
@@ -35,6 +37,8 @@ use crate::arrays::VarBinView;
 use crate::arrays::struct_::compute::cast::struct_cast;
 use crate::builtins::ArrayBuiltins;
 use crate::dtype::DType;
+use crate::dtype::MapDType;
+use crate::dtype::StructFields;
 use crate::expr::display::ExprDisplay;
 use crate::expr::expression::Expression;
 use crate::expr::lit;
@@ -52,12 +56,226 @@ use crate::scalar_fn::fns::literal::Literal;
 #[derive(Clone)]
 pub struct Cast;
 
+/// How a cast from one [`DType`] to another is carried out.
+///
+/// [`Cast::plan`] decides this from the two dtypes alone, so type-checking a cast (via
+/// [`ScalarFnVTable::return_dtype`]) and executing it share one definition of which casts exist.
+/// Kernels only implement the plan they are handed; they no longer decide whether a cast is legal.
+#[derive(Debug, Clone)]
+pub(crate) enum CastPlan {
+    /// Source and target dtypes are identical.
+    Identity,
+    /// Source and target dtypes differ only in nullability.
+    Nullability,
+    /// A built-in cast between non-extension dtypes, or from an extension dtype to its storage
+    /// dtype. Executed by the canonical [`CastKernel`]s and the scalar typed-view casts.
+    Builtin,
+    /// An expression over [`root()`](crate::expr::root) supplied by an extension dtype hook. It
+    /// evaluates to the target dtype and replaces the cast wherever it appears.
+    Rewrite(Expression),
+}
+
 impl Cast {
     /// Creates a lazy cast of `input` to `target_dtype`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the cast is unsupported; see [`Cast::try_new`].
     #[expect(clippy::new_ret_no_self, reason = "constructs the lazy result array")]
     pub fn new(input: ArrayRef, target_dtype: DType) -> ScalarFnArray {
+        Self::try_new(input, target_dtype).vortex_expect("unsupported cast")
+    }
+
+    /// Creates a lazy cast of `input` to `target_dtype`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no cast exists between the input's dtype and `target_dtype`. Casts
+    /// that exist can still fail during execution when values do not fit the target, for example
+    /// a null cast to a non-nullable dtype.
+    pub fn try_new(input: ArrayRef, target_dtype: DType) -> VortexResult<ScalarFnArray> {
         ScalarFnArray::try_new(Cast.bind(target_dtype), vec![input])
-            .vortex_expect("Cast has one child and an infallible return dtype")
+    }
+
+    /// Decides how to cast `source` to `target`, or returns an error if no such cast exists.
+    ///
+    /// This is the single source of truth for which casts are supported. It consults only the
+    /// dtypes, so accepted casts can be planned without executing them. Value-dependent failures
+    /// (overflow, nulls cast to non-nullable) are not detected here; they surface at execution.
+    ///
+    /// Extension dtypes take part through [`ExtVTable::cast_to`] and [`ExtVTable::cast_from`]:
+    /// the source hook is consulted first, then the default cast to the extension's storage
+    /// dtype, then the target hook.
+    ///
+    /// [`ExtVTable::cast_to`]: crate::dtype::extension::ExtVTable::cast_to
+    /// [`ExtVTable::cast_from`]: crate::dtype::extension::ExtVTable::cast_from
+    pub(crate) fn plan(source: &DType, target: &DType) -> VortexResult<CastPlan> {
+        if source == target {
+            return Ok(CastPlan::Identity);
+        }
+
+        // Nullability may change at any nesting depth; `eq_ignore_nullability` is recursive.
+        if source.eq_ignore_nullability(target) {
+            return Ok(CastPlan::Nullability);
+        }
+
+        // Null casts to any nullable dtype as null.
+        if matches!(source, DType::Null) {
+            vortex_ensure!(
+                target.is_nullable(),
+                "Cannot cast {source} to {target}: target dtype is non-nullable"
+            );
+            return Ok(CastPlan::Builtin);
+        }
+
+        if let Some(source_ext) = source.as_extension_opt() {
+            if let Some(rewrite) = source_ext.cast_to(target)? {
+                return Ok(CastPlan::Rewrite(rewrite));
+            }
+            if source_ext.storage_dtype().eq_ignore_nullability(target) {
+                return Ok(CastPlan::Builtin);
+            }
+            if let Some(target_ext) = target.as_extension_opt()
+                && let Some(rewrite) = target_ext.cast_from(source)?
+            {
+                return Ok(CastPlan::Rewrite(rewrite));
+            }
+            vortex_bail!(
+                "Cannot cast {source} to {target}: extension type {} only casts to its storage \
+                 dtype {}",
+                source_ext.id(),
+                source_ext.storage_dtype()
+            );
+        }
+
+        if let Some(target_ext) = target.as_extension_opt() {
+            if let Some(rewrite) = target_ext.cast_from(source)? {
+                return Ok(CastPlan::Rewrite(rewrite));
+            }
+            vortex_bail!(
+                "Cannot cast {source} to {target}: extension type {} does not accept casts from \
+                 {source}",
+                target_ext.id()
+            );
+        }
+
+        Self::plan_builtin(source, target)?;
+        Ok(CastPlan::Builtin)
+    }
+
+    /// The type-level rules for casts between non-extension dtypes.
+    ///
+    /// Every pair accepted here has both a canonical [`CastKernel`] and a scalar typed-view cast.
+    /// Union and variant dtypes only support nullability casts, which never reach here.
+    fn plan_builtin(source: &DType, target: &DType) -> VortexResult<()> {
+        match (source, target) {
+            (DType::Bool(_), DType::Bool(_) | DType::Primitive(..)) => Ok(()),
+            (DType::Primitive(..), DType::Primitive(..) | DType::Decimal(..)) => Ok(()),
+            (DType::Decimal(..), DType::Decimal(..) | DType::Primitive(..)) => Ok(()),
+            (DType::Utf8(_), DType::Utf8(_)) | (DType::Binary(_), DType::Binary(_)) => Ok(()),
+            // A list casts to a fixed-size list when every list has the target size, which is
+            // checked at execution.
+            (
+                DType::List(source_elem, _) | DType::FixedSizeList(source_elem, ..),
+                DType::List(target_elem, _) | DType::FixedSizeList(target_elem, ..),
+            ) => {
+                if let (
+                    DType::FixedSizeList(_, source_size, _),
+                    DType::FixedSizeList(_, target_size, _),
+                ) = (source, target)
+                {
+                    vortex_ensure!(
+                        source_size == target_size,
+                        "Cannot cast {source} to {target}: fixed-size lists must have the same size"
+                    );
+                }
+                Self::plan(source_elem, target_elem).map(drop)
+            }
+            (DType::Map(source_map, _), DType::Map(target_map, _)) => {
+                Self::plan_map(source, target, source_map, target_map)
+            }
+            (DType::Struct(source_fields, _), DType::Struct(target_fields, _)) => {
+                Self::plan_struct(source_fields, target_fields)
+            }
+            _ => vortex_bail!("Cannot cast {source} to {target}"),
+        }
+    }
+
+    fn plan_map(
+        source: &DType,
+        target: &DType,
+        source_map: &MapDType,
+        target_map: &MapDType,
+    ) -> VortexResult<()> {
+        vortex_ensure!(
+            !(target_map.keys_sorted() && !source_map.keys_sorted()),
+            "Cannot cast {source} to {target}: source does not assert sorted map keys"
+        );
+        Self::plan(&source_map.key_dtype(), &target_map.key_dtype())?;
+        Self::plan(&source_map.value_dtype(), &target_map.value_dtype())?;
+        Ok(())
+    }
+
+    /// Struct casts match fields by position when the names line up exactly, and by name
+    /// otherwise, in which case the target may add nullable fields (filled with nulls).
+    fn plan_struct(source_fields: &StructFields, target_fields: &StructFields) -> VortexResult<()> {
+        if struct_fields_match_order(source_fields, target_fields) {
+            for (source_field, target_field) in
+                source_fields.fields().zip_eq(target_fields.fields())
+            {
+                Self::plan(&source_field, &target_field)?;
+            }
+            return Ok(());
+        }
+
+        for (target_name, target_field) in
+            target_fields.names().iter().zip_eq(target_fields.fields())
+        {
+            match source_fields.find(target_name) {
+                None => vortex_ensure!(
+                    target_field.is_nullable(),
+                    "CAST for struct only supports added nullable fields, but {target_name} is \
+                     non-nullable"
+                ),
+                Some(source_idx) => {
+                    let source_field = source_fields
+                        .field_by_index(source_idx)
+                        .vortex_expect("field index returned by find");
+                    Self::plan(&source_field, &target_field)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Whether two struct dtypes have the same field names in the same order.
+pub(crate) fn struct_fields_match_order(source: &StructFields, target: &StructFields) -> bool {
+    source.nfields() == target.nfields()
+        && source
+            .names()
+            .iter()
+            .zip(target.names().iter())
+            .all(|(a, b)| a == b)
+}
+
+/// Instantiates a cast rewrite over the given input node.
+///
+/// `rewrite` is an expression over [`root()`](crate::expr::root); every root is replaced with
+/// `input`, producing a tree of the same kind as `input` (an expression or an array).
+fn instantiate_rewrite<T: ReduceNode>(rewrite: &Expression, input: &T) -> VortexResult<T> {
+    match rewrite {
+        Expression::Root => Ok(input.clone()),
+        Expression::Scalar {
+            scalar_fn,
+            children,
+        } => {
+            let children: Vec<T> = children
+                .iter()
+                .map(|child| instantiate_rewrite(child, input))
+                .try_collect()?;
+            input.new_node(scalar_fn.clone(), &children)
+        }
     }
 }
 
@@ -115,7 +333,10 @@ impl ScalarFnVTable for Cast {
         write!(f, ")")
     }
 
-    fn return_dtype(&self, dtype: &DType, _arg_dtypes: &[DType]) -> VortexResult<DType> {
+    fn return_dtype(&self, dtype: &DType, arg_dtypes: &[DType]) -> VortexResult<DType> {
+        // Type-checking a cast is deciding how it will run. Rejecting unsupported casts here
+        // means a cast expression that binds can also be executed.
+        Self::plan(&arg_dtypes[0], dtype)?;
         Ok(dtype.clone())
     }
 
@@ -126,6 +347,13 @@ impl ScalarFnVTable for Cast {
         ctx: &mut ExecutionCtx,
     ) -> VortexResult<ArrayRef> {
         let input = args.get(0)?;
+
+        match Self::plan(input.dtype(), target_dtype)? {
+            CastPlan::Identity => return Ok(input),
+            // The rewrite replaces the cast; the executor keeps evaluating the result.
+            CastPlan::Rewrite(rewrite) => return input.apply(&rewrite),
+            CastPlan::Nullability | CastPlan::Builtin => {}
+        }
 
         let Some(columnar) = input.as_opt::<AnyColumnar>() else {
             return input.execute::<ArrayRef>(ctx)?.cast(target_dtype.clone());
@@ -155,12 +383,14 @@ impl ScalarFnVTable for Cast {
     }
 
     fn reduce<T: ReduceNode>(&self, target_dtype: &DType, node: &T) -> VortexResult<Option<T>> {
-        // Collapse node if child is already the target type
         let child = node.child(0);
-        if &child.node_dtype()? == target_dtype {
-            return Ok(Some(child));
+        match Self::plan(&child.node_dtype()?, target_dtype)? {
+            // Collapse the node if the child is already the target type.
+            CastPlan::Identity => Ok(Some(child)),
+            // Splice the extension rewrite into the tree so it optimizes like any expression.
+            CastPlan::Rewrite(rewrite) => instantiate_rewrite(&rewrite, &child).map(Some),
+            CastPlan::Nullability | CastPlan::Builtin => Ok(None),
         }
-        Ok(None)
     }
 
     fn simplify_untyped(
@@ -213,16 +443,10 @@ fn cast_canonical(
         CanonicalView::Map(a) => <Map as CastKernel>::cast(a, dtype, ctx),
         CanonicalView::FixedSizeList(a) => <FixedSizeList as CastKernel>::cast(a, dtype, ctx),
         CanonicalView::Struct(a) => struct_cast(a, dtype, ctx),
-        CanonicalView::Union(_) => {
-            todo!(
-                "TODO(connor)[Union]: implement Union casting with conformance coverage for outer \
-                 nullability changes, including validation of nullable-to-nonnullable casts"
-            )
-        }
+        // `Cast::plan` rejects union and variant casts before execution.
+        CanonicalView::Union(_) => vortex_bail!("Union arrays don't support casting (yet)"),
         CanonicalView::Extension(a) => <Extension as CastReduce>::cast(a, dtype),
-        CanonicalView::Variant(_) => {
-            vortex_bail!("Variant arrays don't support casting")
-        }
+        CanonicalView::Variant(_) => vortex_bail!("Variant arrays don't support casting"),
     }
 }
 
@@ -233,6 +457,9 @@ fn cast_constant(array: ArrayView<Constant>, dtype: &DType) -> VortexResult<Opti
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use rstest::rstest;
     use vortex_buffer::buffer;
     use vortex_error::VortexExpect as _;
     use vortex_error::VortexResult;
@@ -245,24 +472,30 @@ mod tests {
     use crate::dtype::DecimalDType;
     use crate::dtype::Nullability;
     use crate::dtype::PType;
+    use crate::dtype::StructFields;
+    use crate::expr::BoundExpression;
     use crate::expr::Expression;
     use crate::expr::cast;
     use crate::expr::get_item;
     use crate::expr::lit;
     use crate::expr::root;
     use crate::expr::test_harness;
+    use crate::extension::datetime::TimeUnit;
+    use crate::extension::datetime::Timestamp;
     use crate::scalar::DecimalValue;
     use crate::scalar::Scalar;
+    use crate::scalar_fn::ScalarFnVTable;
+    use crate::scalar_fn::ScalarFnVTableExt;
+    use crate::scalar_fn::fns::ext_wrap::ExtWrap;
     use crate::scalar_fn::fns::literal::Literal;
 
     #[test]
     fn dtype() {
         let dtype = test_harness::struct_dtype();
+        let target = dtype.with_nullability(Nullability::Nullable);
         assert_eq!(
-            cast(root(), DType::Bool(Nullability::NonNullable))
-                .return_dtype(&dtype)
-                .unwrap(),
-            DType::Bool(Nullability::NonNullable)
+            cast(root(), target.clone()).return_dtype(&dtype).unwrap(),
+            target
         );
     }
 
@@ -346,6 +579,152 @@ mod tests {
 
         assert!(optimized.as_opt::<Literal>().is_none());
         assert_eq!(optimized.as_opt::<Cast>(), Some(&target));
+        Ok(())
+    }
+
+    /// Unsupported casts are rejected when the expression is typed, not when it executes.
+    #[rstest]
+    #[case(
+        DType::Utf8(Nullability::NonNullable),
+        DType::Primitive(PType::I32, Nullability::NonNullable)
+    )]
+    #[case(
+        DType::Primitive(PType::I32, Nullability::NonNullable),
+        DType::Utf8(Nullability::NonNullable)
+    )]
+    #[case(
+        DType::Utf8(Nullability::NonNullable),
+        DType::Binary(Nullability::NonNullable)
+    )]
+    #[case(
+        DType::Primitive(PType::I32, Nullability::NonNullable),
+        DType::Bool(Nullability::NonNullable)
+    )]
+    #[case(DType::Null, DType::Primitive(PType::I32, Nullability::NonNullable))]
+    #[case(
+        DType::List(
+            Arc::new(DType::Utf8(Nullability::NonNullable)),
+            Nullability::NonNullable
+        ),
+        DType::List(
+            Arc::new(DType::Primitive(PType::I32, Nullability::NonNullable)),
+            Nullability::NonNullable
+        )
+    )]
+    #[case(
+        DType::Primitive(PType::I64, Nullability::NonNullable),
+        DType::Extension(Timestamp::new(TimeUnit::Milliseconds, Nullability::NonNullable).erased())
+    )]
+    fn return_dtype_rejects_unsupported_casts(#[case] source: DType, #[case] target: DType) {
+        let result = Cast.return_dtype(&target, std::slice::from_ref(&source));
+        assert!(
+            result.is_err(),
+            "{source} -> {target} should be rejected, got {result:?}"
+        );
+
+        let bound = Cast.try_new_bound_expr(target, [BoundExpression::new_root(source)]);
+        assert!(bound.is_err());
+    }
+
+    #[rstest]
+    #[case(
+        DType::Bool(Nullability::NonNullable),
+        DType::Primitive(PType::U8, Nullability::Nullable)
+    )]
+    #[case(
+        DType::Primitive(PType::I32, Nullability::Nullable),
+        DType::Decimal(DecimalDType::new(10, 2), Nullability::Nullable)
+    )]
+    #[case(
+        DType::Decimal(DecimalDType::new(10, 2), Nullability::NonNullable),
+        DType::Primitive(PType::I32, Nullability::NonNullable)
+    )]
+    #[case(DType::Null, DType::Utf8(Nullability::Nullable))]
+    #[case(
+        DType::List(
+            Arc::new(DType::Primitive(PType::I32, Nullability::NonNullable)),
+            Nullability::NonNullable
+        ),
+        DType::List(
+            Arc::new(DType::Primitive(PType::I64, Nullability::Nullable)),
+            Nullability::Nullable
+        )
+    )]
+    #[case(
+        DType::Extension(Timestamp::new(TimeUnit::Milliseconds, Nullability::NonNullable).erased()),
+        DType::Primitive(PType::I64, Nullability::Nullable)
+    )]
+    #[case(
+        DType::Extension(Timestamp::new(TimeUnit::Milliseconds, Nullability::NonNullable).erased()),
+        DType::Extension(Timestamp::new(TimeUnit::Seconds, Nullability::NonNullable).erased())
+    )]
+    fn return_dtype_accepts_supported_casts(
+        #[case] source: DType,
+        #[case] target: DType,
+    ) -> VortexResult<()> {
+        assert_eq!(
+            Cast.return_dtype(&target, std::slice::from_ref(&source))?,
+            target
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn struct_cast_plan_matches_by_name_and_adds_nullable_fields() {
+        let source = DType::Struct(
+            StructFields::new(
+                ["a"].into(),
+                vec![DType::Primitive(PType::I32, Nullability::NonNullable)],
+            ),
+            Nullability::NonNullable,
+        );
+        let ok = DType::Struct(
+            StructFields::new(
+                ["b", "a"].into(),
+                vec![
+                    DType::Utf8(Nullability::Nullable),
+                    DType::Primitive(PType::I64, Nullability::NonNullable),
+                ],
+            ),
+            Nullability::NonNullable,
+        );
+        assert!(
+            Cast.return_dtype(&ok, std::slice::from_ref(&source))
+                .is_ok()
+        );
+
+        let added_non_nullable = DType::Struct(
+            StructFields::new(
+                ["a", "b"].into(),
+                vec![
+                    DType::Primitive(PType::I32, Nullability::NonNullable),
+                    DType::Utf8(Nullability::NonNullable),
+                ],
+            ),
+            Nullability::NonNullable,
+        );
+        assert!(
+            Cast.return_dtype(&added_non_nullable, std::slice::from_ref(&source))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn extension_rewrite_is_spliced_into_expressions() -> VortexResult<()> {
+        let source = DType::Extension(
+            Timestamp::new(TimeUnit::Milliseconds, Nullability::NonNullable).erased(),
+        );
+        let target = DType::Extension(
+            Timestamp::new(TimeUnit::Microseconds, Nullability::NonNullable).erased(),
+        );
+
+        let optimized = cast(root(), target.clone()).optimize(&source)?;
+        assert!(
+            optimized.as_opt::<Cast>().is_none(),
+            "cast should be rewritten: {optimized}"
+        );
+        assert!(optimized.as_opt::<ExtWrap>().is_some(), "{optimized}");
+        assert_eq!(optimized.return_dtype(&source)?, target);
         Ok(())
     }
 

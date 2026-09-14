@@ -22,6 +22,7 @@ use crate::array::ArrayView;
 use crate::arrays::Decimal;
 use crate::arrays::DecimalArray;
 use crate::arrays::PrimitiveArray;
+use crate::builtins::ArrayBuiltins;
 use crate::dtype::BigCast;
 use crate::dtype::DType;
 use crate::dtype::DecimalDType;
@@ -88,9 +89,14 @@ impl CastKernel for Decimal {
                 array.dtype()
             );
         };
-        if let DType::Primitive(PType::F64, nullability) = dtype {
+        if let DType::Primitive(ptype, nullability) = dtype {
             let scale = from_decimal_dtype.scale();
-            return cast_to_f64(array, scale, *nullability, ctx).map(Some);
+            let as_f64 = cast_to_f64(array, scale, *nullability, ctx)?;
+            if *ptype == PType::F64 {
+                return Ok(Some(as_f64));
+            }
+            // Other primitive targets go through f64, matching the scalar decimal cast.
+            return as_f64.cast(dtype.clone()).map(Some);
         }
         let DType::Decimal(to_decimal_dtype, to_nullability) = dtype else {
             return Ok(None);
@@ -722,19 +728,14 @@ mod tests {
             Validity::NonNullable,
         );
 
-        // Try to cast to non-decimal type - should fail since no kernel can handle it
+        // Casting to an unsupported dtype is rejected when the cast is bound.
         let result = array
             .into_array()
             .cast(DType::Utf8(Nullability::NonNullable))
             .and_then(|a| a.execute::<Canonical>(&mut ctx).map(|c| c.into_array()));
 
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("No CastKernel to cast canonical array")
-        );
+        assert!(result.unwrap_err().to_string().contains("Cannot cast"));
     }
 
     #[rstest]

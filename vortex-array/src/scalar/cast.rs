@@ -5,63 +5,50 @@
 
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
-use vortex_error::vortex_bail;
 use vortex_error::vortex_ensure;
-use vortex_error::vortex_err;
 
+use crate::IntoArray;
+use crate::VortexSessionExecute;
+use crate::arrays::ConstantArray;
 use crate::dtype::DType;
+use crate::expr::Expression;
 use crate::scalar::Scalar;
+use crate::scalar_fn::fns::cast::Cast;
+use crate::scalar_fn::fns::cast::CastPlan;
 
 impl Scalar {
     /// Cast this scalar to another data type.
+    ///
+    /// The supported casts are exactly those of the array-level cast: both are decided by
+    /// [`Cast::plan`] from the two dtypes.
     ///
     /// # Errors
     ///
     /// Returns an error if the cast is not supported or if a null value is cast to a non-nullable
     /// type.
     pub fn cast(&self, target_dtype: &DType) -> VortexResult<Scalar> {
-        // If the types are the same, return a clone.
-        if self.dtype() == target_dtype {
-            return Ok(self.clone());
+        match Cast::plan(self.dtype(), target_dtype)? {
+            CastPlan::Identity => Ok(self.clone()),
+            // `try_new` rejects a null value cast to a non-nullable dtype.
+            CastPlan::Nullability => Scalar::try_new(target_dtype.clone(), self.value().cloned()),
+            CastPlan::Builtin => self.cast_builtin(target_dtype),
+            CastPlan::Rewrite(rewrite) => self.cast_rewrite(target_dtype, &rewrite),
         }
+    }
 
-        // Check for solely nullability casting.
-        if self.dtype().eq_ignore_nullability(target_dtype) {
-            // Cast from non-nullable to nullable or vice versa.
-            // The `try_new` will handle nullability checks.
-            return Scalar::try_new(target_dtype.clone(), self.value().cloned());
-        }
-
-        if let (Some(source), Some(target)) = (self.dtype().as_map_opt(), target_dtype.as_map_opt())
-            && target.keys_sorted()
-            && !source.keys_sorted()
-        {
-            return Err(vortex_err!(
-                "Cannot cast {} to {target_dtype}: source does not assert sorted map keys",
-                self.dtype()
-            ));
-        }
-
-        // Null can be cast into any nullable type as null.
-        // Note that the `matches` clause is technically unnecessary here, just protective.
+    fn cast_builtin(&self, target_dtype: &DType) -> VortexResult<Scalar> {
+        // Null casts to null. The plan already verified the target is nullable for a `Null`
+        // source; a null value of any other source dtype needs the same check.
         if self.value().is_none() || matches!(self.dtype(), DType::Null) {
             vortex_ensure!(
                 target_dtype.is_nullable(),
                 "Cannot cast null to {target_dtype}: target type is non-nullable"
             );
-
-            return Scalar::try_new(target_dtype.clone(), self.value().cloned());
-        }
-
-        // TODO(connor): This isn't really correct for extension types.
-        // If the target is an extension type, then we want to cast to its storage type.
-        if let Some(ext_dtype) = target_dtype.as_extension_opt() {
-            let cast_storage_scalar_value = self.cast(ext_dtype.storage_dtype())?.into_value();
-            return Scalar::try_new(target_dtype.clone(), cast_storage_scalar_value);
+            return Scalar::try_new(target_dtype.clone(), None);
         }
 
         match &self.dtype() {
-            DType::Null => unreachable!("Handled by the if case above"),
+            DType::Null => unreachable!("Handled by the null case above"),
             DType::Bool(_) => self.as_bool().cast(target_dtype),
             DType::Primitive(..) => self.as_primitive().cast(target_dtype),
             DType::Decimal(..) => self.as_decimal().cast(target_dtype),
@@ -70,13 +57,36 @@ impl Scalar {
             DType::List(..) | DType::FixedSizeList(..) => self.as_list().cast(target_dtype),
             DType::Map(..) => self.as_map().cast(target_dtype),
             DType::Struct(..) => self.as_struct().cast(target_dtype),
-            DType::Union(..) => vortex_bail!(
-                "union scalar cast from {} to {target_dtype} is not supported (yet)",
-                self.dtype()
-            ),
-            DType::Variant(_) => vortex_bail!("Variant scalars can't be cast to {target_dtype}"),
+            DType::Union(..) | DType::Variant(_) => {
+                unreachable!("Cast::plan rejects union and variant casts")
+            }
             DType::Extension(..) => self.as_extension().cast(target_dtype),
         }
+    }
+
+    /// Evaluates an extension cast rewrite over this scalar.
+    ///
+    /// The rewrite is an expression, so it is evaluated over a one-element constant array. This
+    /// keeps a single definition of each extension cast for arrays and scalars alike.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "Scalar::cast takes no execution context, and the rewrite only uses built-in \
+                  scalar functions, so the session contents cannot change the result"
+    )]
+    fn cast_rewrite(&self, target_dtype: &DType, rewrite: &Expression) -> VortexResult<Scalar> {
+        if self.value().is_none() {
+            vortex_ensure!(
+                target_dtype.is_nullable(),
+                "Cannot cast null to {target_dtype}: target type is non-nullable"
+            );
+            return Ok(Scalar::null(target_dtype.clone()));
+        }
+
+        let mut ctx = crate::legacy_session().create_execution_ctx();
+        ConstantArray::new(self.clone(), 1)
+            .into_array()
+            .apply(rewrite)?
+            .execute_scalar(0, &mut ctx)
     }
 
     /// Cast the scalar into a nullable version of its current type.

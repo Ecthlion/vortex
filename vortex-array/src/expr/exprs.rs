@@ -15,6 +15,7 @@ use crate::dtype::DType;
 use crate::dtype::FieldName;
 use crate::dtype::FieldNames;
 use crate::dtype::Nullability;
+use crate::dtype::extension::ExtDTypeRef;
 use crate::expr::BoundExpression;
 use crate::expr::Expression;
 use crate::scalar::Scalar;
@@ -32,6 +33,7 @@ use crate::scalar_fn::fns::dynamic::DynamicComparison;
 use crate::scalar_fn::fns::dynamic::DynamicComparisonExpr;
 use crate::scalar_fn::fns::dynamic::Rhs;
 use crate::scalar_fn::fns::ext_storage::ExtStorage;
+use crate::scalar_fn::fns::ext_wrap::ExtWrap;
 use crate::scalar_fn::fns::fill_null::FillNull;
 use crate::scalar_fn::fns::get_item::GetItem;
 use crate::scalar_fn::fns::is_not_null::IsNotNull;
@@ -1155,6 +1157,30 @@ pub fn bound_ext_storage(input: BoundExpression) -> BoundExpression {
         .vortex_expect("extension-storage expressions require an extension child")
 }
 
+// ---- ExtWrap ----
+
+/// Creates an expression that wraps storage values into an extension dtype.
+///
+/// The input must have exactly the storage dtype of `ext_dtype`. This is the inverse of
+/// [`ext_storage`] and the building block for extension cast rewrites.
+///
+/// ```rust
+/// # use vortex_array::dtype::Nullability;
+/// # use vortex_array::expr::{ext_wrap, root};
+/// # use vortex_array::extension::datetime::{TimeUnit, Timestamp};
+/// let expr = ext_wrap(root(), Timestamp::new(TimeUnit::Seconds, Nullability::NonNullable).erased());
+/// ```
+pub fn ext_wrap(input: Expression, ext_dtype: ExtDTypeRef) -> Expression {
+    ExtWrap.new_expr(ext_dtype, [input])
+}
+
+/// Creates a bound expression that wraps storage values into an extension dtype.
+pub fn bound_ext_wrap(input: BoundExpression, ext_dtype: ExtDTypeRef) -> BoundExpression {
+    ExtWrap
+        .try_new_bound_expr(ext_dtype, [input])
+        .vortex_expect("ext_wrap expressions require a child with the extension's storage dtype")
+}
+
 // ---- ListLength ----
 
 /// Creates an expression that computes the number of elements in each list
@@ -1237,6 +1263,7 @@ pub mod bound {
     pub use super::bound_dynamic_with_options as dynamic_with_options;
     pub use super::bound_eq as eq;
     pub use super::bound_ext_storage as ext_storage;
+    pub use super::bound_ext_wrap as ext_wrap;
     pub use super::bound_fill_null as fill_null;
     pub use super::bound_get_item as get_item;
     pub use super::bound_gt as gt;

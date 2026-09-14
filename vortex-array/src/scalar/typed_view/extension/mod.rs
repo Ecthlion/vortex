@@ -84,30 +84,29 @@ impl<'a> ExtScalar<'a> {
         self.value
     }
 
-    /// Casts this scalar to the given `dtype`.
+    /// Casts this scalar to its storage dtype, or to the same extension dtype with a different
+    /// nullability.
+    ///
+    /// Other extension casts are rewrites supplied by the extension type and are evaluated by
+    /// [`Scalar::cast`]; see [`ExtVTable::cast_to`](crate::dtype::extension::ExtVTable::cast_to).
     pub(crate) fn cast(&self, target_dtype: &DType) -> VortexResult<Scalar> {
         if self.value.is_none() && !target_dtype.is_nullable() {
             vortex_bail!(
-                "cannot cast extension dtype with id {} and storage type {} to {}",
+                "cannot cast null extension dtype with id {} and storage type {} to non-nullable {}",
                 self.ext_dtype.id(),
                 self.ext_dtype.storage_dtype(),
                 target_dtype
             );
         }
 
-        if self
+        let is_storage = self
             .ext_dtype
             .storage_dtype()
-            .eq_ignore_nullability(target_dtype)
-        {
-            // Casting from an extension type to the underlying storage type is OK.
-            return Scalar::try_new(target_dtype.clone(), self.value.cloned());
-        }
-
-        // We only allow casting to the same extension dtype for now.
-        if let DType::Extension(ext_dtype) = target_dtype
-            && self.ext_dtype.eq_ignore_nullability(ext_dtype)
-        {
+            .eq_ignore_nullability(target_dtype);
+        let is_same_ext = target_dtype
+            .as_extension_opt()
+            .is_some_and(|ext_dtype| self.ext_dtype.eq_ignore_nullability(ext_dtype));
+        if is_storage || is_same_ext {
             return Scalar::try_new(target_dtype.clone(), self.value.cloned());
         }
 

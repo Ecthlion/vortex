@@ -496,12 +496,7 @@ fn test_decimal_to_unsupported_type() {
     // Try to cast to string - should fail
     let result = decimal.cast(&DType::Utf8(Nullability::NonNullable));
     assert!(result.is_err());
-    assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("Cannot cast decimal to")
-    );
+    assert!(result.unwrap_err().to_string().contains("Cannot cast"));
 }
 
 #[rstest]

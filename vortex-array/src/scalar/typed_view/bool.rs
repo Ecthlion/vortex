@@ -83,15 +83,18 @@ impl<'a> BoolScalar<'a> {
 
     /// Casts this scalar to the given `dtype`.
     pub(crate) fn cast(&self, dtype: &DType) -> VortexResult<Scalar> {
-        if !matches!(dtype, DType::Bool(..)) {
-            vortex_bail!(
-                "Cannot cast bool to {dtype}: boolean scalars can only be cast to boolean types with different nullability"
-            )
+        let value = self.value.vortex_expect("nullness handled in Scalar::cast");
+        match dtype {
+            DType::Bool(nullability) => Ok(Scalar::bool(value, *nullability)),
+            // `true` casts to one and `false` to zero, matching the array kernel.
+            DType::Primitive(..) => {
+                Scalar::primitive(u8::from(value), dtype.nullability()).cast(dtype)
+            }
+            _ => vortex_bail!(
+                "Cannot cast bool to {dtype}: boolean scalars can only be cast to boolean or \
+                 primitive types"
+            ),
         }
-        Ok(Scalar::bool(
-            self.value.vortex_expect("nullness handled in Scalar::cast"),
-            dtype.nullability(),
-        ))
     }
 
     /// Returns a new boolean scalar with the inverted value.
@@ -204,13 +207,29 @@ mod test {
     }
 
     #[test]
-    fn test_bool_cast_to_non_bool_fails() {
+    fn test_bool_cast_to_primitive() {
         use crate::dtype::PType;
 
+        let target = DType::Primitive(PType::I32, Nullable);
+        let one = Scalar::bool(true, NonNullable)
+            .as_bool()
+            .cast(&target)
+            .unwrap();
+        assert_eq!(one, Scalar::primitive(1i32, Nullable));
+
+        let zero = Scalar::bool(false, NonNullable)
+            .as_bool()
+            .cast(&target)
+            .unwrap();
+        assert_eq!(zero, Scalar::primitive(0i32, Nullable));
+    }
+
+    #[test]
+    fn test_bool_cast_to_non_bool_fails() {
         let bool_scalar = Scalar::bool(true, NonNullable);
         let bool = bool_scalar.as_bool();
 
-        let result = bool.cast(&DType::Primitive(PType::I32, NonNullable));
+        let result = bool.cast(&DType::Utf8(NonNullable));
         assert!(result.is_err());
     }
 

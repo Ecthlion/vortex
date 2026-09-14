@@ -40,15 +40,26 @@ pub fn scalar<'py>(
 }
 
 pub fn scalar_helper(value: &Bound<'_, PyAny>, dtype: Option<&DType>) -> PyVortexResult<Scalar> {
-    let scalar = scalar_helper_inner(value, dtype)?;
+    let Some(dtype) = dtype else {
+        return Ok(scalar_helper_inner(value, None)?);
+    };
 
-    // If a dtype was provided, attempt to  cast the scalar to that dtype.
-    // This is a trivially cheap no-op if the scalar is already of the correct type.
-    if let Some(dtype) = dtype {
-        Ok(scalar.cast(dtype)?)
-    } else {
-        Ok(scalar)
+    // A Python value for an extension dtype is its storage value, so build the storage scalar and
+    // wrap it. Casting into an extension dtype is not implied by the storage dtype alone; only an
+    // existing extension scalar goes through the cast, which lets the extension type decide.
+    if let Some(ext_dtype) = dtype.as_extension_opt() {
+        let scalar = scalar_helper_inner(value, Some(ext_dtype.storage_dtype()))?;
+        if scalar.dtype().is_extension() {
+            return Ok(scalar.cast(dtype)?);
+        }
+        let storage = scalar.cast(ext_dtype.storage_dtype())?;
+        return Ok(Scalar::try_new(dtype.clone(), storage.into_value())?);
     }
+
+    // Cast the scalar to the requested dtype. This is a trivially cheap no-op if the scalar is
+    // already of the correct type.
+    let scalar = scalar_helper_inner(value, Some(dtype))?;
+    Ok(scalar.cast(dtype)?)
 }
 
 /// Attempts to convert the python object to a scalar, with a hint of the expected

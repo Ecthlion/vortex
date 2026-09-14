@@ -20,6 +20,7 @@ use crate::dtype::Nullability;
 use crate::dtype::extension::ExtDTypeRef;
 use crate::dtype::extension::ExtId;
 use crate::dtype::extension::ExtVTable;
+use crate::expr::Expression;
 use crate::scalar::ScalarValue;
 
 /// A typed extension data type, parameterized by a concrete [`ExtVTable`].
@@ -108,6 +109,18 @@ impl<V: ExtVTable> ExtDType<V> {
         V::validate_scalar_value(self, storage_value)
     }
 
+    /// Returns an expression casting this extension dtype to `target`, if the extension type
+    /// supports it. See [`ExtVTable::cast_to`].
+    pub fn cast_to(&self, target: &DType) -> VortexResult<Option<Expression>> {
+        V::cast_to(self, target)
+    }
+
+    /// Returns an expression casting `source` to this extension dtype, if the extension type
+    /// supports it. See [`ExtVTable::cast_from`].
+    pub fn cast_from(&self, source: &DType) -> VortexResult<Option<Expression>> {
+        V::cast_from(self, source)
+    }
+
     /// Erase the concrete type information, returning a type-erased extension dtype.
     pub fn erased(self) -> ExtDTypeRef {
         ExtDTypeRef(Arc::new(self))
@@ -133,6 +146,8 @@ pub(super) trait DynExtDType: 'static + Send + Sync + super::sealed::Sealed {
     fn validate_scalar_value(&self, storage_value: &ScalarValue) -> VortexResult<()>;
     fn value_display(&self, f: &mut fmt::Formatter<'_>, storage_value: &ScalarValue)
     -> fmt::Result;
+    fn cast_to(&self, target: &DType) -> VortexResult<Option<Expression>>;
+    fn cast_from(&self, source: &DType) -> VortexResult<Option<Expression>>;
 }
 
 /// Blanket impl: thin forwarder to `ExtDType<V>` inherent methods.
@@ -185,6 +200,14 @@ impl<V: ExtVTable> DynExtDType for ExtDType<V> {
 
     fn validate_scalar_value(&self, storage_value: &ScalarValue) -> VortexResult<()> {
         self.validate_scalar_value(storage_value)
+    }
+
+    fn cast_to(&self, target: &DType) -> VortexResult<Option<Expression>> {
+        self.cast_to(target)
+    }
+
+    fn cast_from(&self, source: &DType) -> VortexResult<Option<Expression>> {
+        self.cast_from(source)
     }
 
     fn value_display(

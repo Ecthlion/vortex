@@ -20,15 +20,7 @@ mod tests {
     use crate::scalar::ScalarValue;
 
     #[rstest]
-    fn null_can_cast_to_anything_nullable(
-        #[values(
-            DType::Null,
-            DType::Bool(Nullability::Nullable),
-            DType::Primitive(PType::I32, Nullability::Nullable),
-            DType::Extension(Date::new(TimeUnit::Days, Nullability::Nullable).erased()),
-            DType::Extension(Timestamp::new(TimeUnit::Days, Nullability::Nullable).erased()),
-        )]
-        source_dtype: DType,
+    fn null_dtype_can_cast_to_anything_nullable(
         #[values(
             DType::Null,
             DType::Bool(Nullability::Nullable),
@@ -39,12 +31,46 @@ mod tests {
         target_dtype: DType,
     ) {
         assert_eq!(
-            Scalar::null(source_dtype)
+            Scalar::null(DType::Null)
                 .cast(&target_dtype)
                 .unwrap()
                 .dtype(),
             &target_dtype
         );
+    }
+
+    /// A null value only casts where its dtype casts: the rules are type-level, so a null `i32`
+    /// does not become a null `Date` any more than a valid `i32` would.
+    #[rstest]
+    #[case(
+        DType::Bool(Nullability::Nullable),
+        DType::Primitive(PType::I32, Nullability::Nullable),
+        true
+    )]
+    #[case(
+        DType::Primitive(PType::I32, Nullability::Nullable),
+        DType::Primitive(PType::I64, Nullability::Nullable),
+        true
+    )]
+    #[case(DType::Extension(Date::new(TimeUnit::Days, Nullability::Nullable).erased()), DType::Primitive(PType::I32, Nullability::Nullable), true)]
+    #[case(DType::Primitive(PType::I32, Nullability::Nullable), DType::Extension(Date::new(TimeUnit::Days, Nullability::Nullable).erased()), false)]
+    #[case(DType::Extension(Date::new(TimeUnit::Days, Nullability::Nullable).erased()), DType::Extension(Timestamp::new(TimeUnit::Days, Nullability::Nullable).erased()), false)]
+    #[case(
+        DType::Primitive(PType::I32, Nullability::Nullable),
+        DType::Primitive(PType::I32, Nullability::NonNullable),
+        false
+    )]
+    fn null_value_follows_dtype_cast_rules(
+        #[case] source_dtype: DType,
+        #[case] target_dtype: DType,
+        #[case] supported: bool,
+    ) {
+        let result = Scalar::null(source_dtype).cast(&target_dtype);
+        assert_eq!(result.is_ok(), supported, "{result:?}");
+        if let Ok(scalar) = result {
+            assert!(scalar.is_null());
+            assert_eq!(scalar.dtype(), &target_dtype);
+        }
     }
 
     #[test]

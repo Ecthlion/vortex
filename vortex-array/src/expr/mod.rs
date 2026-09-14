@@ -87,6 +87,7 @@ pub use exprs::dynamic;
 pub use exprs::dynamic_with_options;
 pub use exprs::eq;
 pub use exprs::ext_storage;
+pub use exprs::ext_wrap;
 pub use exprs::fill_null;
 pub use exprs::get_item;
 pub use exprs::gt;

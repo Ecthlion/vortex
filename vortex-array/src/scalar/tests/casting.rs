@@ -100,28 +100,20 @@ mod tests {
         let actual = ext_scalar.cast(expected_dtype).unwrap();
         assert_eq!(actual.dtype(), expected_dtype);
 
-        // cast from storage type to extension
-        let expected_dtype = &ext_dtype;
-        let actual = storage_scalar.cast(expected_dtype).unwrap();
-        assert_eq!(actual.dtype(), expected_dtype);
-
-        // cast from storage type to extension, nullable
-        let expected_dtype = &ext_dtype.as_nullable();
-        let actual = storage_scalar.cast(expected_dtype).unwrap();
-        assert_eq!(actual.dtype(), expected_dtype);
-
-        // cast from *incompatible* storage type to extension
-        let apples_u8 =
-            ExtDType::<Apples>::try_new(0, DType::Primitive(PType::U8, Nullability::NonNullable))
-                .unwrap();
-        let expected_dtype = &DType::Extension(apples_u8.erased());
-        let result = storage_scalar.cast(expected_dtype);
+        // Casting from the storage type into an extension type requires the extension type to
+        // opt in via `ExtVTable::cast_from`; `Apples` does not.
+        let result = storage_scalar.cast(&ext_dtype);
         assert!(
             result
                 .as_ref()
-                .is_err_and(|err| { err.to_string().contains("Cannot cast 1000u16 to u8") }),
+                .is_err_and(|err| err.to_string().contains("does not accept casts from")),
             "{result:?}"
         );
+        assert!(storage_scalar.cast(&ext_dtype.as_nullable()).is_err());
+
+        // Casting to a wider dtype than the storage is not implied either.
+        let result = ext_scalar.cast(&DType::Primitive(PType::U32, Nullability::NonNullable));
+        assert!(result.is_err(), "{result:?}");
     }
 
     #[test]

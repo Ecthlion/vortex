@@ -21,8 +21,17 @@ use crate::dtype::PType;
 use crate::dtype::extension::ExtDType;
 use crate::dtype::extension::ExtId;
 use crate::dtype::extension::ExtVTable;
+use crate::expr::Expression;
+use crate::expr::cast;
+use crate::expr::ext_storage;
+use crate::expr::ext_wrap;
+use crate::expr::lit;
+use crate::expr::root;
 use crate::extension::datetime::TimeUnit;
 use crate::scalar::ScalarValue;
+use crate::scalar_fn::ScalarFnVTableExt;
+use crate::scalar_fn::fns::binary::Binary;
+use crate::scalar_fn::fns::operators::Operator;
 
 /// Timestamp DType.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
@@ -109,6 +118,17 @@ impl fmt::Display for TimestampValue<'_> {
     }
 }
 
+/// Nanoseconds in one tick of `unit`, or `None` for units a timestamp cannot carry.
+fn nanos_per_unit(unit: TimeUnit) -> Option<i64> {
+    match unit {
+        TimeUnit::Nanoseconds => Some(1),
+        TimeUnit::Microseconds => Some(1_000),
+        TimeUnit::Milliseconds => Some(1_000_000),
+        TimeUnit::Seconds => Some(1_000_000_000),
+        TimeUnit::Days => None,
+    }
+}
+
 impl ExtVTable for Timestamp {
     type Metadata = TimestampOptions;
 
@@ -187,6 +207,45 @@ impl ExtVTable for Timestamp {
             "Timestamp storage dtype must be i64"
         );
         Ok(())
+    }
+
+    /// Timestamps cast between time units when their timezones match, by scaling the storage
+    /// values. Coarsening truncates toward zero, as Arrow does. A different timezone is not a
+    /// cast, so it is declined.
+    fn cast_to(ext_dtype: &ExtDType<Self>, target: &DType) -> VortexResult<Option<Expression>> {
+        let Some(target_ext) = target.as_extension_opt() else {
+            return Ok(None);
+        };
+        let Some(target_options) = target_ext.metadata_opt::<Timestamp>() else {
+            return Ok(None);
+        };
+        let options = ext_dtype.metadata();
+        if options.tz != target_options.tz {
+            return Ok(None);
+        }
+        let (Some(from_ns), Some(to_ns)) = (
+            nanos_per_unit(options.unit),
+            nanos_per_unit(target_options.unit),
+        ) else {
+            return Ok(None);
+        };
+
+        let storage = ext_storage(root());
+        let scaled = if from_ns == to_ns {
+            storage
+        } else if from_ns > to_ns {
+            Binary.new_expr(Operator::Mul, [storage, lit(from_ns / to_ns)])
+        } else {
+            Binary.new_expr(Operator::Div, [storage, lit(to_ns / from_ns)])
+        };
+
+        let target_storage = target_ext.storage_dtype();
+        let storage = if target_storage.nullability() == ext_dtype.storage_dtype().nullability() {
+            scaled
+        } else {
+            cast(scaled, target_storage.clone())
+        };
+        Ok(Some(ext_wrap(storage, target_ext.clone())))
     }
 
     fn unpack_native<'a>(

@@ -14,30 +14,29 @@ use crate::dtype::DType;
 use crate::scalar_fn::fns::cast::CastReduce;
 
 impl CastReduce for Extension {
+    /// Handles the two extension casts that need no extension-specific knowledge: unwrapping to
+    /// the storage dtype, and changing the nullability of the same extension dtype. Every other
+    /// extension cast is a rewrite chosen by [`Cast::plan`](crate::scalar_fn::fns::cast::Cast)
+    /// and never reaches this rule.
     fn cast(array: ArrayView<'_, Extension>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
-        if !array.dtype().eq_ignore_nullability(dtype) {
-            // Target is not the same extension type.
-            // Delegate to the storage array's cast.
+        let ext_dtype = array.ext_dtype();
+
+        if ext_dtype.storage_dtype().eq_ignore_nullability(dtype) {
             return Ok(Some(array.storage_array().cast(dtype.clone())?));
         }
 
-        let DType::Extension(ext_dtype) = dtype else {
-            unreachable!("Already verified we have an extension dtype");
+        let Some(target_ext_dtype) = dtype.as_extension_opt() else {
+            return Ok(None);
         };
+        if !ext_dtype.eq_ignore_nullability(target_ext_dtype) {
+            return Ok(None);
+        }
 
-        let new_storage = match array
+        let new_storage = array
             .storage_array()
-            .cast(ext_dtype.storage_dtype().clone())
-        {
-            Ok(arr) => arr,
-            Err(e) => {
-                tracing::warn!("Failed to cast storage array: {e}");
-                return Ok(None);
-            }
-        };
-
+            .cast(target_ext_dtype.storage_dtype().clone())?;
         Ok(Some(
-            ExtensionArray::new(ext_dtype.clone(), new_storage).into_array(),
+            ExtensionArray::new(target_ext_dtype.clone(), new_storage).into_array(),
         ))
     }
 }
@@ -49,10 +48,12 @@ mod tests {
     use rstest::rstest;
     use vortex_buffer::Buffer;
     use vortex_buffer::buffer;
+    use vortex_error::VortexExpect;
     use vortex_session::VortexSession;
 
     use super::*;
     use crate::IntoArray;
+    use crate::arrays::ConstantArray;
     use crate::arrays::PrimitiveArray;
     use crate::assert_arrays_eq;
     use crate::builtins::ArrayBuiltins;
@@ -63,6 +64,7 @@ mod tests {
     use crate::executor::VortexSessionExecute;
     use crate::extension::datetime::TimeUnit;
     use crate::extension::datetime::Timestamp;
+    use crate::scalar::Scalar;
 
     static SESSION: LazyLock<VortexSession> = LazyLock::new(crate::array_session);
 
@@ -99,24 +101,137 @@ mod tests {
         assert_eq!(output.dtype(), &new_dtype);
     }
 
-    #[test]
-    fn cast_different_ext_dtype() {
-        let original_dtype =
-            Timestamp::new(TimeUnit::Milliseconds, Nullability::NonNullable).erased();
-        // Note NS here instead of MS
-        let target_dtype = Timestamp::new(TimeUnit::Nanoseconds, Nullability::NonNullable).erased();
+    fn timestamp_dtype(unit: TimeUnit, tz: Option<&str>, nullability: Nullability) -> DType {
+        DType::Extension(Timestamp::new_with_tz(unit, tz.map(Into::into), nullability).erased())
+    }
 
-        let storage = buffer![1i64].into_array();
-        let arr = ExtensionArray::new(original_dtype, storage);
+    #[rstest]
+    #[case(TimeUnit::Milliseconds, TimeUnit::Nanoseconds, buffer![1i64, -2, 3], buffer![1_000_000i64, -2_000_000, 3_000_000])]
+    #[case(TimeUnit::Seconds, TimeUnit::Milliseconds, buffer![1i64, 2], buffer![1_000i64, 2_000])]
+    #[case(TimeUnit::Nanoseconds, TimeUnit::Milliseconds, buffer![1_500_000i64, -1_500_000], buffer![1i64, -1])]
+    #[case(TimeUnit::Microseconds, TimeUnit::Seconds, buffer![2_000_000i64, 999_999], buffer![2i64, 0])]
+    fn cast_timestamp_unit(
+        #[case] from: TimeUnit,
+        #[case] to: TimeUnit,
+        #[case] storage: Buffer<i64>,
+        #[case] expected: Buffer<i64>,
+    ) -> VortexResult<()> {
+        let mut ctx = SESSION.create_execution_ctx();
+        let source = timestamp_dtype(from, Some("UTC"), Nullability::NonNullable);
+        let target = timestamp_dtype(to, Some("UTC"), Nullability::NonNullable);
+        let arr = ExtensionArray::new(
+            source.as_extension_opt().vortex_expect("extension").clone(),
+            storage.into_array(),
+        )
+        .into_array();
 
         let result = arr
+            .cast(target.clone())?
+            .execute::<ExtensionArray>(&mut ctx)?;
+        assert_eq!(result.dtype(), &target);
+        assert_arrays_eq!(
+            result.storage_array().clone(),
+            expected.into_array(),
+            &mut ctx
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cast_timestamp_unit_changes_nullability() -> VortexResult<()> {
+        let mut ctx = SESSION.create_execution_ctx();
+        let source = timestamp_dtype(TimeUnit::Milliseconds, None, Nullability::NonNullable);
+        let target = timestamp_dtype(TimeUnit::Microseconds, None, Nullability::Nullable);
+        let arr = ExtensionArray::new(
+            source.as_extension_opt().vortex_expect("extension").clone(),
+            buffer![5i64].into_array(),
+        )
+        .into_array();
+
+        let result = arr
+            .cast(target.clone())?
+            .execute::<ExtensionArray>(&mut ctx)?;
+        assert_eq!(result.dtype(), &target);
+        assert_eq!(
+            result.into_array().execute_scalar(0, &mut ctx)?,
+            Scalar::extension_ref(
+                target.as_extension_opt().vortex_expect("extension").clone(),
+                Scalar::primitive(5_000i64, Nullability::Nullable)
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cast_constant_timestamp_unit() -> VortexResult<()> {
+        let mut ctx = SESSION.create_execution_ctx();
+        let source = timestamp_dtype(TimeUnit::Seconds, Some("UTC"), Nullability::NonNullable);
+        let target = timestamp_dtype(
+            TimeUnit::Milliseconds,
+            Some("UTC"),
+            Nullability::NonNullable,
+        );
+        let scalar = Scalar::extension_ref(
+            source.as_extension_opt().vortex_expect("extension").clone(),
+            Scalar::from(3i64),
+        );
+
+        // The same rewrite serves the scalar and the constant array.
+        let expected = Scalar::extension_ref(
+            target.as_extension_opt().vortex_expect("extension").clone(),
+            Scalar::from(3_000i64),
+        );
+        assert_eq!(scalar.cast(&target)?, expected);
+
+        let constant = ConstantArray::new(scalar, 4)
             .into_array()
-            .cast(DType::Extension(target_dtype))
-            .and_then(|a| {
-                a.execute::<ExtensionArray>(&mut SESSION.create_execution_ctx())
-                    .map(|c| c.into_array())
-            });
-        assert!(result.is_err());
+            .cast(target.clone())?;
+        assert_eq!(constant.dtype(), &target);
+        assert_eq!(constant.execute_scalar(2, &mut ctx)?, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn cast_timestamp_rejects_timezone_change() {
+        let source = timestamp_dtype(
+            TimeUnit::Milliseconds,
+            Some("UTC"),
+            Nullability::NonNullable,
+        );
+        let target = timestamp_dtype(
+            TimeUnit::Nanoseconds,
+            Some("Europe/London"),
+            Nullability::NonNullable,
+        );
+        let arr = ExtensionArray::new(
+            source.as_extension_opt().vortex_expect("extension").clone(),
+            buffer![1i64].into_array(),
+        )
+        .into_array();
+
+        // Rejected when the cast is bound, before any execution.
+        let result = arr.cast(target);
+        assert!(result.is_err(), "expected error, got {result:?}");
+    }
+
+    #[test]
+    fn cast_storage_to_extension_requires_opt_in() {
+        let target = timestamp_dtype(TimeUnit::Milliseconds, None, Nullability::NonNullable);
+        let result = buffer![1i64].into_array().cast(target);
+        assert!(result.is_err(), "expected error, got {result:?}");
+    }
+
+    #[test]
+    fn cast_extension_to_wider_storage_is_rejected() {
+        let source = timestamp_dtype(TimeUnit::Milliseconds, None, Nullability::NonNullable);
+        let arr = ExtensionArray::new(
+            source.as_extension_opt().vortex_expect("extension").clone(),
+            buffer![1i64].into_array(),
+        )
+        .into_array();
+
+        let result = arr.cast(DType::Primitive(PType::F64, Nullability::NonNullable));
+        assert!(result.is_err(), "expected error, got {result:?}");
     }
 
     #[test]
