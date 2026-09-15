@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -8,6 +9,7 @@ use std::sync::atomic::Ordering;
 use cudarc::driver::CudaContext;
 use cudarc::driver::CudaEvent;
 use cudarc::driver::CudaStream;
+use cudarc::driver::CudaViewMut;
 use cudarc::driver::HostSlice;
 use cudarc::driver::SyncOnDrop;
 use cudarc::driver::result;
@@ -116,6 +118,38 @@ impl HostSlice<u8> for PinnedByteBuffer {
             unsafe { std::slice::from_raw_parts_mut(self.ptr, self.logical_len) },
             SyncOnDrop::Record(Some((&self.event, stream))),
         )
+    }
+}
+
+/// A borrowed range that preserves the pinned buffer's stream synchronization.
+struct PinnedByteBufferView<'a> {
+    buffer: &'a mut PinnedByteBuffer,
+    range: Range<usize>,
+}
+
+impl HostSlice<u8> for PinnedByteBufferView<'_> {
+    fn len(&self) -> usize {
+        self.range.len()
+    }
+
+    unsafe fn stream_synced_slice<'a>(
+        &'a self,
+        stream: &'a CudaStream,
+    ) -> (&'a [u8], SyncOnDrop<'a>) {
+        // SAFETY: The caller must use the returned slice only with this stream. Returning the
+        // original guard preserves the owner's completion event for the selected range.
+        let (slice, sync) = unsafe { self.buffer.stream_synced_slice(stream) };
+        (&slice[self.range.clone()], sync)
+    }
+
+    unsafe fn stream_synced_mut_slice<'a>(
+        &'a mut self,
+        stream: &'a CudaStream,
+    ) -> (&'a mut [u8], SyncOnDrop<'a>) {
+        // SAFETY: The caller must use the returned slice only with this stream, and the view
+        // exclusively borrows the owner. The original guard tracks writes to the selected range.
+        let (slice, sync) = unsafe { self.buffer.stream_synced_mut_slice(stream) };
+        (&mut slice[self.range.clone()], sync)
     }
 }
 
@@ -355,21 +389,52 @@ impl PooledPinnedBuffer {
     ///
     /// The pinned buffer is placed in the pool's inflight queue, gated on a `CudaEvent` marking
     /// the transfer completion. The pool reclaims it once the event fires.
-    pub fn transfer_to_device(
-        mut self,
-        stream: &VortexCudaStream,
-    ) -> VortexResult<CudaDeviceBuffer> {
-        let pinned = self
+    pub fn transfer_to_device(self, stream: &VortexCudaStream) -> VortexResult<CudaDeviceBuffer> {
+        let len = self
             .inner
             .as_ref()
-            .unwrap_or_else(|| vortex_panic!("buffer already consumed"));
-        let len = pinned.len();
-
+            .unwrap_or_else(|| vortex_panic!("buffer already consumed"))
+            .len();
         let mut cuda_slice = stream.device_alloc::<u8>(len)?;
+        self.copy_to_device(stream, 0..len, &mut cuda_slice.slice_mut(..))?;
+        Ok(CudaDeviceBuffer::new(cuda_slice))
+    }
 
+    /// Submits a non-blocking H2D copy of `range` into an equally sized destination view.
+    ///
+    /// The range must be within the source's logical length. Both bounds and destination length
+    /// are validated before enqueuing work. The pool retains the entire pinned allocation until
+    /// the copy completes, even if the caller drops the destination or stops waiting for it.
+    pub(crate) fn copy_to_device(
+        mut self,
+        stream: &VortexCudaStream,
+        range: Range<usize>,
+        destination: &mut CudaViewMut<'_, u8>,
+    ) -> VortexResult<()> {
+        let pinned = self
+            .inner
+            .as_mut()
+            .unwrap_or_else(|| vortex_panic!("buffer already consumed"));
+        vortex_ensure!(
+            range.start <= range.end && range.end <= pinned.len(),
+            "invalid pinned host buffer range {:?} for length {}",
+            range,
+            pinned.len()
+        );
+        vortex_ensure!(
+            range.len() == destination.len(),
+            "pinned host buffer range length {} does not match destination length {}",
+            range.len(),
+            destination.len()
+        );
+
+        let source = PinnedByteBufferView {
+            buffer: pinned,
+            range,
+        };
         // The page-locked source and its completion event keep this asynchronous.
         stream
-            .memcpy_htod(pinned, &mut cuda_slice)
+            .memcpy_htod(&source, destination)
             .map_err(|e| vortex_err!("Failed to schedule H2D copy: {}", e))?;
 
         let event = Arc::new(
@@ -378,15 +443,13 @@ impl PooledPinnedBuffer {
                 .map_err(|e| vortex_err!("Failed to record CUDA event: {}", e))?,
         );
 
-        // Take ownership only after all fallible ops succeed. Before this point,
-        // errors cause `self` to drop, returning the buffer to the pool.
+        // On earlier errors, Drop returns the buffer to the pool, but the HostSlice event still
+        // gates access and freeing. On success, the inflight queue retains it until completion.
         let inner = self
             .inner
             .take()
             .unwrap_or_else(|| vortex_panic!("buffer already consumed"));
-        self.pool.put_inflight(event, inner)?;
-
-        Ok(CudaDeviceBuffer::new(cuda_slice))
+        self.pool.put_inflight(event, inner)
     }
 }
 
@@ -403,6 +466,7 @@ mod tests {
     use std::sync::Arc;
 
     use cudarc::driver::CudaContext;
+    use rstest::rstest;
     use vortex::array::buffer::DeviceBuffer;
     use vortex::buffer::Alignment;
     use vortex::error::VortexResult;
@@ -431,6 +495,121 @@ mod tests {
 
         let host_buf = device_buf.copy_to_host_sync(Alignment::of::<u8>())?;
         assert_eq!(host_buf.as_ref(), &data[..]);
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::nonzero_range(3..9, 2..8)]
+    #[case::empty_at_end(16..16, 4..4)]
+    #[crate::test]
+    fn copy_to_device_subview(
+        #[case] source_range: Range<usize>,
+        #[case] destination_range: Range<usize>,
+    ) -> VortexResult<()> {
+        let (pool, stream) = setup()?;
+        let data: Vec<u8> = (0..16).collect();
+        let mut pinned = pool.get(data.len())?;
+        pinned.as_mut_slice().copy_from_slice(&data);
+
+        let mut expected = [0xA5u8; 12];
+        let mut destination = stream
+            .clone_htod(&expected)
+            .map_err(|e| vortex_err!("Failed to initialize destination: {e}"))?;
+        expected[destination_range.clone()].copy_from_slice(&data[source_range.clone()]);
+        pinned.copy_to_device(
+            &stream,
+            source_range,
+            &mut destination.slice_mut(destination_range),
+        )?;
+
+        let host = CudaDeviceBuffer::new(destination).copy_to_host_sync(Alignment::of::<u8>())?;
+        assert_eq!(host.as_ref(), &expected[..]);
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::reversed(6, 2, 4)]
+    #[case::end_past_logical_length(4, 11, 7)]
+    #[case::start_past_logical_length(11, 11, 0)]
+    #[case::destination_too_short(2, 6, 3)]
+    #[case::destination_too_long(2, 6, 5)]
+    #[case::extreme_end(0, usize::MAX, 4)]
+    #[crate::test]
+    fn copy_to_device_rejects_invalid_input(
+        #[case] start: usize,
+        #[case] end: usize,
+        #[case] destination_len: usize,
+    ) -> VortexResult<()> {
+        let (pool, stream) = setup()?;
+        let mut pinned = pool.get(10)?;
+        pinned.as_mut_slice().fill(0xAB);
+        let expected = [0xA5u8; 16];
+        let mut destination = stream
+            .clone_htod(&expected)
+            .map_err(|e| vortex_err!("Failed to initialize destination: {e}"))?;
+
+        assert!(
+            pinned
+                .copy_to_device(
+                    &stream,
+                    start..end,
+                    &mut destination.slice_mut(2..2 + destination_len),
+                )
+                .is_err()
+        );
+        assert!(pool.inflight.lock().is_empty());
+        assert_eq!(pool.stats().puts, 1);
+        let host = CudaDeviceBuffer::new(destination).copy_to_host_sync(Alignment::of::<u8>())?;
+        assert_eq!(host.as_ref(), &expected[..]);
+        Ok(())
+    }
+
+    #[crate::test]
+    fn copy_to_device_retains_source_until_sync() -> VortexResult<()> {
+        let (pool, stream) = setup()?;
+        let mut pinned = pool.get(1024)?;
+        pinned.as_mut_slice().fill(0xAB);
+        let allocation = pinned.as_mut_slice().as_ptr();
+        let mut destination = stream.device_alloc::<u8>(256)?;
+        pinned.copy_to_device(&stream, 128..384, &mut destination.slice_mut(..))?;
+
+        assert_eq!(pool.stats().puts, 0);
+        {
+            let inflight = pool.inflight.lock();
+            assert_eq!(inflight.len(), 1);
+            assert_eq!(inflight[0].buffer.ptr.cast_const(), allocation);
+        }
+        stream
+            .synchronize()
+            .map_err(|e| vortex_err!("Failed to sync stream: {e}"))?;
+
+        let mut reused = pool.get(1024)?;
+        assert_eq!(reused.as_mut_slice().as_ptr(), allocation);
+        assert!(pool.inflight.lock().is_empty());
+        assert_eq!(pool.stats().allocs, 1);
+        assert_eq!(pool.stats().puts, 1);
+        reused.as_mut_slice().fill(0xCD);
+        let host = CudaDeviceBuffer::new(destination).copy_to_host_sync(Alignment::of::<u8>())?;
+        assert_eq!(host.as_ref(), &[0xAB; 256]);
+        Ok(())
+    }
+
+    #[crate::test]
+    fn copy_to_device_pool_drop_waits_for_source() -> VortexResult<()> {
+        let (pool, stream) = setup()?;
+        let len = 1024 * 1024;
+        let mut pinned = pool.get(len)?;
+        pinned.as_mut_slice().fill(0xEF);
+        let mut destination = stream.device_alloc::<u8>(len - 16)?;
+        pinned.copy_to_device(&stream, 16..len, &mut destination.slice_mut(..))?;
+
+        // Dropping the last pool owner must not free the source while DMA still reads it.
+        drop(pool);
+        stream
+            .synchronize()
+            .map_err(|e| vortex_err!("Failed to sync stream: {e}"))?;
+        let host = CudaDeviceBuffer::new(destination).copy_to_host_sync(Alignment::of::<u8>())?;
+        assert_eq!(host.as_ref(), vec![0xEF; len - 16].as_slice());
         Ok(())
     }
 
