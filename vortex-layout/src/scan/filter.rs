@@ -438,9 +438,10 @@ mod tests {
         let lhs = gt(col("a"), lit(5_i32));
         let rhs = lt(col("b"), lit(10_i32));
 
-        assert_grouped(and(lhs.clone(), rhs.clone()), grouping, [
-            vec![lhs],
-            vec![rhs],
-        ])
+        assert_grouped(
+            and(lhs.clone(), rhs.clone()),
+            grouping,
+            [vec![lhs], vec![rhs]],
+        )
     }
 }
