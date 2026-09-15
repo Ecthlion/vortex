@@ -244,8 +244,10 @@ mod tests {
             Nullability::NonNullable,
         );
 
-        let cast = source.cast(target, &SESSION).unwrap();
-        let optimized = cast.optimize().unwrap();
+        // A session without the struct cast plugin leaves the cast in place.
+        let session = VortexSession::empty().with_some(KernelSession::empty());
+        let cast = source.cast(target, &session).unwrap();
+        let optimized = cast.optimize_ctx(&session).unwrap();
         assert!(optimized.is::<ScalarFn>());
     }
 
@@ -269,7 +271,6 @@ mod tests {
             Nullability::NonNullable,
         );
 
-        let cast = source.cast(target, &SESSION).unwrap();
         let kernels = KernelSession::empty();
         kernels.kernels().register_reduce_parent(
             Cast.id(),
@@ -278,6 +279,7 @@ mod tests {
         );
         let session = VortexSession::empty().with_some(kernels);
 
+        let cast = source.cast(target, &session).unwrap();
         let optimized = cast.optimize_ctx(&session).unwrap();
         assert!(optimized.is::<ScalarFn>());
     }

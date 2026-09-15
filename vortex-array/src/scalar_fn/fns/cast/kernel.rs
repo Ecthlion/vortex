@@ -199,9 +199,10 @@ fn cast_canonical(
 /// For example, RunEnd pushes cast down to its values array, ZigZag transforms
 /// the target dtype to unsigned and pushes to its encoded array.
 ///
-/// Reduce rules run on [`Cast`] before the session resolves it, because the optimizer has no
-/// session. They therefore restructure every cast between a pair of dtypes as if it were the
-/// standard one, and a rule that folds values, such as a constant's, uses the default session.
+/// Reduce rules run on [`Cast`] before it is resolved to a [`CastRule`](super::CastRule), so they
+/// restructure every cast between a pair of dtypes as if it were the standard one. They receive
+/// the session being optimized for, so a rule that folds values, such as a constant's, applies
+/// that session's cast rules.
 ///
 /// Returns `Ok(None)` if the rule doesn't apply to this array/dtype combination.
 pub trait CastReduce: VTable {

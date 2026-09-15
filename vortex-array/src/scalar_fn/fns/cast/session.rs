@@ -15,12 +15,12 @@
 //! registered. The most recently registered rule is consulted first, so a rule registered into a
 //! default session adds a cast the standard rules do not perform, or replaces one they do.
 //!
-//! Rules apply when a cast executes, which is where the session is known. Binding a cast
-//! expression therefore cannot consult them, so [`Cast::return_dtype`](super::Cast) accepts every
-//! pair of dtypes and an unsupported cast fails when it executes. Reduce rules and
-//! [`Scalar::cast`](crate::scalar::Scalar::cast) have no session either: they use the rules of
-//! the default session, so a rule registered into another session applies to arrays executed in
-//! that session, not to constants folded before execution.
+//! Rules apply when a cast is optimized or executed, which is where the session is known. Binding
+//! a cast expression cannot consult them, so [`Cast::return_dtype`](super::Cast) accepts every
+//! pair of dtypes and an unsupported cast fails when it executes. Reduce rules receive the session
+//! being optimized for, so a constant cast folds with that session's rules;
+//! [`Scalar::cast_ctx`](crate::scalar::Scalar::cast_ctx) casts a scalar with a given session and
+//! [`Scalar::cast`](crate::scalar::Scalar::cast) with the default one.
 
 use std::any::Any;
 use std::fmt::Debug;

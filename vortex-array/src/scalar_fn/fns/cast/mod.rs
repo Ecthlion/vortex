@@ -576,11 +576,11 @@ mod tests {
         assert!(CastSession::empty().is_empty());
     }
 
-    /// The optimizer has no session, so it folds constants and literals with the rules of the
-    /// default session: a rule adding a cast is reached at execution, while a rule replacing a
-    /// standard cast does not apply to constants folded beforehand.
+    /// The optimizer folds constants and literals with the rules of the session it is given. A
+    /// cast built with another session is left in place, and the rule still applies when it
+    /// executes in this one.
     #[test]
-    fn optimizer_folds_with_the_default_rules() -> VortexResult<()> {
+    fn optimizer_folds_with_the_session_rules() -> VortexResult<()> {
         let utf8 = DType::Utf8(Nullability::NonNullable);
         let session = array_session();
         session.casts().register(ConstantRule {
@@ -588,6 +588,7 @@ mod tests {
             value: Scalar::from("x"),
         });
         let mut ctx = session.create_execution_ctx();
+        let scope = test_harness::struct_dtype();
 
         // Standard cast: folded while the cast is built.
         let folded = ConstantArray::new(Scalar::from(7i32), 3)
@@ -598,17 +599,34 @@ mod tests {
             "not folded: {folded}"
         );
 
-        // Cast known only to the session's rule: left in place and executed through the rule.
-        let deferred = ConstantArray::new(Scalar::from(7i32), 3)
+        // Cast known only to this session's rule: folded through the rule.
+        let folded_by_rule = ConstantArray::new(Scalar::from(7i32), 3)
             .into_array()
             .cast(utf8.clone(), ctx.session())?;
+        assert!(
+            folded_by_rule.as_opt::<ScalarFn>().is_none(),
+            "not folded: {folded_by_rule}"
+        );
+        assert_eq!(
+            folded_by_rule.execute_scalar(0, &mut ctx)?,
+            Scalar::from("x")
+        );
+
+        // Built with a session that lacks the rule: left in place, and resolved through the rule
+        // when it executes here.
+        let deferred = ConstantArray::new(Scalar::from(7i32), 3)
+            .into_array()
+            .cast(utf8.clone(), &SESSION)?;
         assert!(
             deferred.as_opt::<ScalarFn>().is_some(),
             "folded: {deferred}"
         );
         assert_eq!(deferred.execute_scalar(0, &mut ctx)?, Scalar::from("x"));
 
-        let expr = cast(lit(7i32), utf8).optimize(&test_harness::struct_dtype(), ctx.session())?;
+        // Literals fold the same way.
+        let expr = cast(lit(7i32), utf8.clone()).optimize(&scope, ctx.session())?;
+        assert_eq!(expr.as_opt::<Literal>(), Some(&Scalar::from("x")));
+        let expr = cast(lit(7i32), utf8).optimize(&scope, &SESSION)?;
         assert!(expr.as_opt::<Literal>().is_none(), "folded: {expr}");
         Ok(())
     }
