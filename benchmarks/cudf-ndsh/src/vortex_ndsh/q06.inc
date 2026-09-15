@@ -100,8 +100,11 @@ struct q6_files {
   ndsh::local_table_files tables;
   ndsh::q6_reference_result reference;
 
-  q6_files(double scale_factor, ndsh::vortex_io const& io)
+  explicit q6_files(double scale_factor)
   {
+    check_q6_boundaries();
+    check_q6_reference_boundaries();
+    ndsh::vortex_io io{cuda::stream_ref{cudf::get_default_stream()}.get()};
     auto generated = generate_lineitem(scale_factor);
     tables.write("lineitem", *generated, io);
     reference = ndsh::q6_cpu_reference(generated->select(q6_columns), cudf::get_default_stream());
@@ -121,13 +124,7 @@ q6_files const& q6_fixture(double scale_factor)
 {
   // Cache only files/host results, so all format/workload states use identical rows.
   static std::map<double, q6_files> fixtures;
-  if (auto const files = fixtures.find(scale_factor); files != fixtures.end()) {
-    return files->second;
-  }
-  check_q6_boundaries();
-  check_q6_reference_boundaries();
-  ndsh::vortex_io io{cuda::stream_ref{cudf::get_default_stream()}.get()};
-  return fixtures.try_emplace(scale_factor, scale_factor, io).first->second;
+  return fixtures.try_emplace(scale_factor, scale_factor).first->second;
 }
 
 void ndsh_q6_local(nvbench::state& state)
@@ -147,25 +144,13 @@ void ndsh_q6_local(nvbench::state& state)
     return ndsh::read_local_file(
       files.tables.path("lineitem", use_vortex), use_vortex, io, q6_columns, cold);
   };
-  if (!cold) {
-    auto warmup = read();
-    CUDF_CUDA_TRY(cudaDeviceSynchronize());
-  }
-  state.add_element_count(files.tables.rows, "Rows");
-  state.exec(
-    nvbench::exec_tag::sync | nvbench::exec_tag::timer, [&](nvbench::launch&, auto& timer) {
-      if (cold) { ndsh::evict_file_pages(files.tables.paths(use_vortex)); }
-      timer.start();
-      {
-        auto result = workload == "read"
-                        ? read()
-                        : execute_q6([&](auto const&, auto const&) { return read(); });
-        CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));
-      }
-      // Include cleanup queued on Vortex's independent producer streams, for both formats.
-      CUDF_CUDA_TRY(cudaDeviceSynchronize());
-      timer.stop();
-    });
+  ndsh::warm_local_inputs(cold, read);
+  ndsh::exec_local_benchmark(state, files.tables, use_vortex, cold, [&] {
+    auto result = workload == "read"
+                    ? read()
+                    : execute_q6([&](auto const&, auto const&) { return read(); });
+    CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));
+  });
   state.add_buffer_size(files.tables.bytes(use_vortex), "file_size", "File size");
   state.add_buffer_size(memory.peak_memory_usage(), "rmm_peak", "RMM peak (excludes Vortex)");
   auto& summary = state.add_summary("ndsh/q6/revenue");

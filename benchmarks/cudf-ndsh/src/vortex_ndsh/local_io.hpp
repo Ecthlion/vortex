@@ -16,11 +16,14 @@
 
 #include <kvikio/file_utils.hpp>
 
+#include <nvbench/nvbench.cuh>
+
 #include <cstdint>
 #include <filesystem>
 #include <map>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace ndsh {
@@ -114,6 +117,37 @@ inline void evict_file_pages(std::vector<std::string> const& paths)
     auto const resident_pages = kvikio::get_page_cache_info(path).first;
     CUDF_EXPECTS(resident_pages == 0, "Input pages remain cached after eviction: " + path);
   }
+}
+
+template <typename ReadAll>
+void warm_local_inputs(bool cold, ReadAll&& read_all)
+{
+  if (!cold) {
+    auto inputs = read_all();
+    CUDF_CUDA_TRY(cudaDeviceSynchronize());
+  }
+}
+
+// The callback keeps owners alive through consumer-stream synchronization, then releases them.
+// The final device sync includes cleanup on independent Vortex producer streams, for both formats.
+template <typename Run>
+void exec_local_benchmark(nvbench::state& state,
+                          local_table_files const& files,
+                          bool use_vortex,
+                          bool cold,
+                          Run&& run)
+{
+  static_assert(std::is_void_v<std::invoke_result_t<Run&>>,
+                "The timed callback must release its owners before returning");
+  state.add_element_count(files.rows, "Rows");
+  state.exec(nvbench::exec_tag::sync | nvbench::exec_tag::timer,
+             [&](nvbench::launch&, auto& timer) {
+               if (cold) { evict_file_pages(files.paths(use_vortex)); }
+               timer.start();
+               run();
+               CUDF_CUDA_TRY(cudaDeviceSynchronize());
+               timer.stop();
+             });
 }
 
 inline void check_projection(cudf::table_view expected,

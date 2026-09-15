@@ -13,7 +13,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -161,9 +160,7 @@ inline void check_q5_result(q5_reference_result const& expected,
       CUDF_EXPECTS(group != expected.revenue.end() && seen.insert(countries[i]).second,
                    "Unexpected or duplicate Q5 country: " + countries[i]);
       double const value = revenues[i], want = group->second;
-      CUDF_EXPECTS(std::isfinite(value) && std::isfinite(want) &&
-                     std::abs(value - want) <= 1e-10 * std::max(1.0, std::abs(want)),
-                   "Q5 revenue mismatch: " + countries[i]);
+      CUDF_EXPECTS(detail::reference_equal(value, want), "Q5 revenue mismatch: " + countries[i]);
       CUDF_EXPECTS(value <= previous, "Q5 revenues are not sorted descending");
       previous = value;
     }

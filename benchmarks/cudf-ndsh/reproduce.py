@@ -157,7 +157,7 @@ class Runner:
             if digest(temporary) != source["sha256"]:
                 raise RuntimeError(f"Checksum mismatch: {name}")
             temporary.replace(path)
-        if digest(path) != source["sha256"]:
+        elif digest(path) != source["sha256"]:
             raise RuntimeError(f"Checksum mismatch: {name}")
         return path
 

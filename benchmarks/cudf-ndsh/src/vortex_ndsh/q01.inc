@@ -80,13 +80,15 @@ struct q1_files {
   ndsh::local_table_files tables;
   ndsh::q1_reference_result reference;
 
-  q1_files(double scale_factor, ndsh::vortex_io const& io)
+  explicit q1_files(double scale_factor)
   {
+    check_q1_boundaries();
+    cuda::stream_ref const stream = cudf::get_default_stream();
+    ndsh::vortex_io io{stream.get()};
     auto generated = generate_lineitem(scale_factor);
     CUDF_EXPECTS(generated->table().num_columns() == 16, "Q1 fixture requires full lineitem");
     tables.write("lineitem", *generated, io);
-    cuda::stream_ref const stream = cudf::get_default_stream();
-    reference                     = ndsh::q1_cpu_reference(generated->select(q1_columns), stream);
+    reference = ndsh::q1_cpu_reference(generated->select(q1_columns), stream);
 
     for (bool use_vortex : {false, true}) {
       auto input =
@@ -104,13 +106,7 @@ q1_files const& q1_fixture(double scale_factor)
 {
   // Retain only files and host references, shared by every format/workload state for this SF.
   static std::map<double, q1_files> fixtures;
-  if (auto const files = fixtures.find(scale_factor); files != fixtures.end()) {
-    return files->second;
-  }
-  check_q1_boundaries();
-  cuda::stream_ref const stream = cudf::get_default_stream();
-  ndsh::vortex_io io{stream.get()};
-  return fixtures.try_emplace(scale_factor, scale_factor, io).first->second;
+  return fixtures.try_emplace(scale_factor, scale_factor).first->second;
 }
 
 void ndsh_q1_local(nvbench::state& state)
@@ -131,31 +127,19 @@ void ndsh_q1_local(nvbench::state& state)
       files.tables.path("lineitem", use_vortex), use_vortex, io, q1_columns, cold);
   };
 
-  if (!cold) {
-    auto warmup = read();
-    CUDF_CUDA_TRY(cudaDeviceSynchronize());
-  }
+  ndsh::warm_local_inputs(cold, read);
   if (workload == "q1") {
     auto result = execute_q1([&](auto const&, auto const&) { return read(); }, true);
     ndsh::check_q1_result(files.reference, *result, stream);
     CUDF_CUDA_TRY(cudaDeviceSynchronize());
   }
-  state.add_element_count(files.tables.rows, "Rows");
-  state.exec(
-    nvbench::exec_tag::sync | nvbench::exec_tag::timer, [&](nvbench::launch&, auto& timer) {
-      if (cold) { ndsh::evict_file_pages(files.tables.paths(use_vortex)); }
-      timer.start();
-      {
-        cudf::benchmark::scoped_range timed_range{"ndsh_q1_local_timed"};
-        auto result = workload == "read"
-                        ? read()
-                        : execute_q1([&](auto const&, auto const&) { return read(); }, true);
-        CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));
-      }
-      // Include result cleanup on independent Vortex producer streams, for both formats.
-      CUDF_CUDA_TRY(cudaDeviceSynchronize());
-      timer.stop();
-    });
+  ndsh::exec_local_benchmark(state, files.tables, use_vortex, cold, [&] {
+    cudf::benchmark::scoped_range timed_range{"ndsh_q1_local_timed"};
+    auto result = workload == "read"
+                    ? read()
+                    : execute_q1([&](auto const&, auto const&) { return read(); }, true);
+    CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));
+  });
   state.add_buffer_size(files.tables.bytes(use_vortex), "file_size", "File size");
   state.add_buffer_size(memory.peak_memory_usage(), "rmm_peak", "RMM peak (excludes Vortex)");
   auto& matched = state.add_summary("ndsh/q1/matched_rows");

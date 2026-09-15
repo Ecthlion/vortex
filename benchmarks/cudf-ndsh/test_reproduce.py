@@ -20,6 +20,7 @@ reproduce = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(reproduce)
 LOCK = json.loads((HERE / "build-lock.json").read_text(encoding="utf-8"))
 QUERIES = (1, 5, 6, 9, 10)
+COMPILERS = ("CMAKE_C_COMPILER", "CMAKE_CXX_COMPILER", "CMAKE_CUDA_COMPILER", "CMAKE_CUDA_HOST_COMPILER")
 
 
 def result_data(query: int) -> dict:
@@ -185,6 +186,36 @@ class ReproduceTests(unittest.TestCase):
                 runner.assert_not_called()
                 self.assertFalse((self.args.work_dir / "results").exists())
                 self.write(path)
+
+    def test_download_checks_fresh_and_cached_files_once(self):
+        source = {"url": "https://example.invalid/fixture", "sha256": hashlib.sha256(b"fixture").hexdigest()}
+        for cached, valid in itertools.product((False, True), repeat=2):
+            with self.subTest(cached=cached, valid=valid):
+                name = f"fixture-{cached}-{valid}.cmake"
+                path = self.args.work_dir / name
+                temporary = path.with_suffix(path.suffix + ".part")
+                contents = "fixture" if valid else "corrupt"
+                if cached:
+                    self.write(path, contents)
+                self.runner.run.reset_mock()
+                self.runner.run.side_effect = lambda _label, argv, contents=contents: self.write(argv[4], contents)
+                with patch.object(reproduce, "digest", wraps=reproduce.digest) as digest:
+                    if valid:
+                        self.assertEqual(reproduce.Runner.download(self.runner, name, source), path)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "Checksum mismatch"):
+                            reproduce.Runner.download(self.runner, name, source)
+                    digest.assert_called_once_with(path if cached else temporary)
+                if cached:
+                    self.runner.run.assert_not_called()
+                else:
+                    self.runner.run.assert_called_once_with(
+                        name, ["curl", "--fail", "--location", "--output", temporary, source["url"]]
+                    )
+                self.assertEqual(path.exists(), cached or valid)
+                self.assertEqual(temporary.exists(), not cached and not valid)
+                if path.exists():
+                    self.assertEqual(path.read_text(), contents)
 
     def test_identity_requires_a_clean_revision(self):
         with patch.object(reproduce, "git_output", side_effect=["", "revision"]) as git:
@@ -390,23 +421,7 @@ class ReproduceTests(unittest.TestCase):
         self.assertEqual(env["TMPDIR"], str(self.args.work_dir / "tmp"))
         self.assertEqual(env["CARGO_BUILD_JOBS"], "4")
 
-    def test_record_toolchain_uses_cmake_cache_and_requires_cuda_12_8(self):
-        compilers = {
-            name: self.root / name.lower()
-            for name in ("CMAKE_C_COMPILER", "CMAKE_CXX_COMPILER", "CMAKE_CUDA_COMPILER", "CMAKE_CUDA_HOST_COMPILER")
-        }
-        for name, path in compilers.items():
-            self.write(path, name)
-        cache = {
-            **{name: str(path) for name, path in compilers.items()},
-            "CMAKE_CUDA_ARCHITECTURES": "90",
-            "CMAKE_TOOLCHAIN_FILE": str(self.root / "toolchain.cmake"),
-            "CMAKE_SYSROOT": str(self.root / "sysroot"),
-            "CUDAToolkit_BIN_DIR": str(self.root / "cuda/bin"),
-            "CMAKE_CXX_FLAGS": "-O2 -DVALUE=a=b",
-            "CMAKE_CUDA_FLAGS_RELEASE": "-O3 -DNDEBUG",
-            "nvcomp_DIR": str(self.root / "native-nvcomp/lib/cmake/nvcomp"),
-        }
+    def write_cmake_cache(self, compilers: dict[str, Path], settings: dict[str, str]):
         self.write(
             self.args.work_dir / "cudf-build/CMakeCache.txt",
             "\n".join(
@@ -415,12 +430,26 @@ class ReproduceTests(unittest.TestCase):
                     "//Compiler settings",
                     "",
                     *(f"{name}:FILEPATH={path}" for name, path in compilers.items()),
-                    *(f"{name}:STRING={value}" for name, value in cache.items() if name not in compilers),
-                    "CMAKE_C_FLAGS:STRING=",
-                    "UNRELATED:STRING=ignored",
+                    *(f"{name}:STRING={value}" for name, value in settings.items()),
                 ]
             ),
         )
+
+    def test_record_toolchain_uses_cmake_cache_and_requires_cuda_12_8(self):
+        compilers = {name: self.root / name.lower() for name in COMPILERS}
+        for name, path in compilers.items():
+            self.write(path, name)
+        settings = {
+            "CMAKE_CUDA_ARCHITECTURES": "90",
+            "CMAKE_TOOLCHAIN_FILE": str(self.root / "toolchain.cmake"),
+            "CMAKE_SYSROOT": str(self.root / "sysroot"),
+            "CUDAToolkit_BIN_DIR": str(self.root / "cuda/bin"),
+            "CMAKE_CXX_FLAGS": "-O2 -DVALUE=a=b",
+            "CMAKE_CUDA_FLAGS_RELEASE": "-O3 -DNDEBUG",
+            "nvcomp_DIR": str(self.root / "native-nvcomp/lib/cmake/nvcomp"),
+        }
+        cache = {**{name: str(path) for name, path in compilers.items()}, **settings}
+        self.write_cmake_cache(compilers, {**settings, "CMAKE_C_FLAGS": "", "UNRELATED": "ignored"})
         for version, accepted in (
             ("12.8", True),
             ("12.9", True),
@@ -459,16 +488,10 @@ class ReproduceTests(unittest.TestCase):
         wrapper = self.root / "compiler-wrapper"
         self.write(wrapper)
         arguments = {
-            name: f'"compiler tools/{name.lower()}" --config \'config with spaces\''
-            for name in ("CMAKE_C_COMPILER", "CMAKE_CXX_COMPILER", "CMAKE_CUDA_COMPILER", "CMAKE_CUDA_HOST_COMPILER")
+            name: f'"compiler tools/{name.lower()}" --config \'config with spaces\'' for name in COMPILERS
         }
-        self.write(
-            self.args.work_dir / "cudf-build/CMakeCache.txt",
-            "\n".join(
-                line
-                for name, arg1 in arguments.items()
-                for line in (f"{name}:FILEPATH={wrapper}", f"{name}_ARG1:STRING={arg1}")
-            ),
+        self.write_cmake_cache(
+            dict.fromkeys(COMPILERS, wrapper), {f"{name}_ARG1": arg1 for name, arg1 in arguments.items()}
         )
         self.runner.run.side_effect = lambda label, _argv: (
             "Cuda compilation tools, release 12.8\n" if label == "cmake_cuda_compiler" else "compiler fixture version\n"

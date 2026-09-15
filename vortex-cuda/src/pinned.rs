@@ -40,7 +40,6 @@ pub(crate) struct PinnedByteBuffer {
 unsafe impl Send for PinnedByteBuffer {}
 unsafe impl Sync for PinnedByteBuffer {}
 
-#[expect(clippy::same_name_method)]
 impl PinnedByteBuffer {
     /// Allocate a pinned host buffer with a given capacity and logical length.
     ///
@@ -93,34 +92,6 @@ impl PinnedByteBuffer {
     }
 }
 
-impl HostSlice<u8> for PinnedByteBuffer {
-    fn len(&self) -> usize {
-        self.len()
-    }
-
-    unsafe fn stream_synced_slice<'a>(
-        &'a self,
-        stream: &'a CudaStream,
-    ) -> (&'a [u8], SyncOnDrop<'a>) {
-        stream.context().record_err(stream.wait(&self.event));
-        (
-            unsafe { std::slice::from_raw_parts(self.ptr, self.logical_len) },
-            SyncOnDrop::Record(Some((&self.event, stream))),
-        )
-    }
-
-    unsafe fn stream_synced_mut_slice<'a>(
-        &'a mut self,
-        stream: &'a CudaStream,
-    ) -> (&'a mut [u8], SyncOnDrop<'a>) {
-        stream.context().record_err(stream.wait(&self.event));
-        (
-            unsafe { std::slice::from_raw_parts_mut(self.ptr, self.logical_len) },
-            SyncOnDrop::Record(Some((&self.event, stream))),
-        )
-    }
-}
-
 /// A borrowed range that preserves the pinned buffer's stream synchronization.
 struct PinnedByteBufferView<'a> {
     buffer: &'a mut PinnedByteBuffer,
@@ -136,9 +107,11 @@ impl HostSlice<u8> for PinnedByteBufferView<'_> {
         &'a self,
         stream: &'a CudaStream,
     ) -> (&'a [u8], SyncOnDrop<'a>) {
-        // SAFETY: The caller must use the returned slice only with this stream. Returning the
-        // original guard preserves the owner's completion event for the selected range.
-        let (slice, sync) = unsafe { self.buffer.stream_synced_slice(stream) };
+        stream.context().record_err(stream.wait(&self.buffer.event));
+        // SAFETY: The view retains the allocation, and the caller must use the returned slice
+        // only with this stream. The guard records completion on the owner's event.
+        let slice = unsafe { std::slice::from_raw_parts(self.buffer.ptr, self.buffer.logical_len) };
+        let sync = SyncOnDrop::Record(Some((&self.buffer.event, stream)));
         (&slice[self.range.clone()], sync)
     }
 
@@ -146,9 +119,12 @@ impl HostSlice<u8> for PinnedByteBufferView<'_> {
         &'a mut self,
         stream: &'a CudaStream,
     ) -> (&'a mut [u8], SyncOnDrop<'a>) {
-        // SAFETY: The caller must use the returned slice only with this stream, and the view
-        // exclusively borrows the owner. The original guard tracks writes to the selected range.
-        let (slice, sync) = unsafe { self.buffer.stream_synced_mut_slice(stream) };
+        stream.context().record_err(stream.wait(&self.buffer.event));
+        // SAFETY: The view exclusively borrows the allocation, and the caller must use the
+        // returned slice only with this stream. The guard tracks writes on the owner's event.
+        let slice =
+            unsafe { std::slice::from_raw_parts_mut(self.buffer.ptr, self.buffer.logical_len) };
+        let sync = SyncOnDrop::Record(Some((&self.buffer.event, stream)));
         (&mut slice[self.range.clone()], sync)
     }
 }
@@ -186,7 +162,7 @@ impl std::fmt::Debug for PinnedByteBufferPool {
 }
 
 struct InflightPinnedBuffer {
-    event: Arc<CudaEvent>,
+    event: CudaEvent,
     buffer: PinnedByteBuffer,
 }
 
@@ -215,10 +191,9 @@ impl PinnedByteBufferPool {
     /// Returns `Ok(None)` if no buffer is available in the pool for the requested size class.
     /// Unlike `get`, this will never call `cuMemAllocHost`.
     pub fn try_get(self: &Arc<Self>, len: usize) -> VortexResult<Option<PooledPinnedBuffer>> {
-        match self.try_get_inner(len)? {
-            Some(inner) => Ok(Some(PooledPinnedBuffer::new(inner, Arc::clone(self)))),
-            None => Ok(None),
-        }
+        Ok(self
+            .try_get_inner(len)?
+            .map(|inner| PooledPinnedBuffer::new(inner, Arc::clone(self))))
     }
 
     /// Acquire a pooled pinned buffer of the given size in bytes.
@@ -230,14 +205,10 @@ impl PinnedByteBufferPool {
     }
 
     /// Defer returning a pinned buffer to the pool until the CUDA event completes.
-    pub(crate) fn put_inflight(
-        &self,
-        event: Arc<CudaEvent>,
-        buffer: PinnedByteBuffer,
-    ) -> VortexResult<()> {
-        let mut inflight = self.inflight.lock();
-        inflight.push(InflightPinnedBuffer { event, buffer });
-        Ok(())
+    fn put_inflight(&self, event: CudaEvent, buffer: PinnedByteBuffer) {
+        self.inflight
+            .lock()
+            .push(InflightPinnedBuffer { event, buffer });
     }
 
     /// Snapshot pool reuse statistics.
@@ -278,22 +249,12 @@ impl PinnedByteBufferPool {
     }
 
     fn get_inner(&self, len: usize) -> VortexResult<PinnedByteBuffer> {
-        self.reclaim_completed()?;
-        let key_len = self.size_class_len(len);
-        {
-            let mut buckets = self.buckets.lock();
-            if let Some(bucket) = buckets.get_mut(&key_len)
-                && let Some(buf) = bucket.pop()
-            {
-                self.hits.fetch_add(1, Ordering::Relaxed);
-                let mut buf = buf;
-                buf.set_logical_len(len);
-                return Ok(buf);
-            }
+        if let Some(buffer) = self.try_get_inner(len)? {
+            return Ok(buffer);
         }
         self.misses.fetch_add(1, Ordering::Relaxed);
         self.allocs.fetch_add(1, Ordering::Relaxed);
-        unsafe { PinnedByteBuffer::uninit_with_capacity(&self.ctx, key_len, len) }
+        unsafe { PinnedByteBuffer::uninit_with_capacity(&self.ctx, self.size_class_len(len), len) }
     }
 
     fn put(&self, buf: PinnedByteBuffer) {
@@ -437,11 +398,9 @@ impl PooledPinnedBuffer {
             .memcpy_htod(&source, destination)
             .map_err(|e| vortex_err!("Failed to schedule H2D copy: {}", e))?;
 
-        let event = Arc::new(
-            stream
-                .record_event(None)
-                .map_err(|e| vortex_err!("Failed to record CUDA event: {}", e))?,
-        );
+        let event = stream
+            .record_event(None)
+            .map_err(|e| vortex_err!("Failed to record CUDA event: {}", e))?;
 
         // On earlier errors, Drop returns the buffer to the pool, but the HostSlice event still
         // gates access and freeing. On success, the inflight queue retains it until completion.
@@ -449,7 +408,8 @@ impl PooledPinnedBuffer {
             .inner
             .take()
             .unwrap_or_else(|| vortex_panic!("buffer already consumed"));
-        self.pool.put_inflight(event, inner)
+        self.pool.put_inflight(event, inner);
+        Ok(())
     }
 }
 
@@ -670,24 +630,38 @@ mod tests {
         Ok(())
     }
 
+    #[rstest]
     #[crate::test]
-    fn drop_returns_buffer_to_pool() -> VortexResult<()> {
+    fn drop_returns_buffer_to_pool(#[values(false, true)] try_get: bool) -> VortexResult<()> {
         let (pool, _stream) = setup()?;
+        assert!(pool.try_get(512)?.is_none());
+        assert_eq!(pool.stats().allocs, 0);
+        assert_eq!(pool.stats().misses, 0);
 
-        {
+        let allocation = {
             let mut pinned = pool.get(512)?;
             pinned.as_mut_slice().fill(0);
-        }
+            pinned.as_mut_slice().as_ptr()
+        };
 
         let stats = pool.stats();
         assert_eq!(stats.puts, 1);
         assert_eq!(stats.allocs, 1);
+        assert_eq!(stats.misses, 1);
 
-        // Getting again should be a pool hit, not a new allocation.
-        let _pinned2 = pool.get(512)?;
+        // A shorter request in the same size class reuses storage and updates the logical length.
+        let mut reused = if try_get {
+            pool.try_get(300)?
+                .ok_or_else(|| vortex_err!("expected cached pinned buffer"))?
+        } else {
+            pool.get(300)?
+        };
+        assert_eq!(reused.as_mut_slice().len(), 300);
+        assert_eq!(reused.as_mut_slice().as_ptr(), allocation);
         let stats = pool.stats();
         assert_eq!(stats.hits, 1);
         assert_eq!(stats.allocs, 1);
+        assert_eq!(stats.misses, 1);
 
         Ok(())
     }

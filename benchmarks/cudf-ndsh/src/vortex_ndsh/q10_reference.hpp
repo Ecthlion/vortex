@@ -13,7 +13,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -58,6 +57,7 @@ class q10_reference_builder {
       detail::reference_schema(projected, {FLOAT64, FLOAT64, INT32, STRING});
     }
 
+    // Filtered dimensions must also reject duplicates among discarded rows.
     std::unordered_set<int32_t> primary_keys;
     for (cudf::size_type begin = 0; begin < projected.num_rows();) {
       auto const count = std::min<cudf::size_type>(1 << 20, projected.num_rows() - begin);
@@ -70,8 +70,7 @@ class q10_reference_builder {
           detail::reference_host_strings(projected.column(0), begin, count, stream);
         auto const keys = values(int8_t{}, 1);
         for (cudf::size_type i = 0; i < count; ++i) {
-          CUDF_EXPECTS(primary_keys.insert(keys[i]).second, "Duplicate Q10 nation key");
-          nations_.emplace(keys[i], names[i]);
+          CUDF_EXPECTS(nations_.try_emplace(keys[i], names[i]).second, "Duplicate Q10 nation key");
         }
       } else if (name == "customer") {
         auto const keys = values(int32_t{}, 0);
@@ -187,10 +186,8 @@ inline void check_q10_result(q10_reference_result const& expected,
                      phones[i] == want.phone && comments[i] == want.comment,
                    "Q10 customer attributes mismatch: " + std::to_string(keys[i]));
       double const value = revenues[i];
-      CUDF_EXPECTS(
-        std::isfinite(value) && std::isfinite(want.revenue) &&
-          std::abs(value - want.revenue) <= 1e-10 * std::max(1.0, std::abs(want.revenue)),
-        "Q10 revenue mismatch: " + std::to_string(keys[i]));
+      CUDF_EXPECTS(detail::reference_equal(value, want.revenue),
+                   "Q10 revenue mismatch: " + std::to_string(keys[i]));
       CUDF_EXPECTS(value <= previous, "Q10 revenues are not sorted descending");
       previous = value;
     }

@@ -14,7 +14,6 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -70,6 +69,7 @@ class q9_reference_builder {
       detail::reference_schema(projected, {INT32, INT32, INT32, FLOAT64, FLOAT64, INT8});
     }
 
+    // Filtered dimensions must also reject duplicates among discarded rows.
     std::unordered_set<int32_t> primary_keys;
 
     for (cudf::size_type begin = 0; begin < projected.num_rows();) {
@@ -83,8 +83,7 @@ class q9_reference_builder {
         auto const names =
           detail::reference_host_strings(projected.column(1), begin, count, stream);
         for (cudf::size_type i = 0; i < count; ++i) {
-          CUDF_EXPECTS(primary_keys.insert(keys[i]).second, "Duplicate Q9 nation key");
-          nations_.emplace(keys[i], names[i]);
+          CUDF_EXPECTS(nations_.try_emplace(keys[i], names[i]).second, "Duplicate Q9 nation key");
         }
       } else if (name == "supplier") {
         auto const keys    = values(int32_t{}, 0);
@@ -106,7 +105,7 @@ class q9_reference_builder {
         auto const keys  = values(int32_t{}, 0);
         auto const dates = values(cudf::timestamp_D{}, 1);
         for (cudf::size_type i = 0; i < count; ++i) {
-          CUDF_EXPECTS(primary_keys.insert(keys[i]).second, "Duplicate Q9 order key");
+          CUDF_EXPECTS(!orders_.contains(keys[i]), "Duplicate Q9 order key");
           auto const date =
             std::chrono::sys_days{std::chrono::days{dates[i].time_since_epoch().count()}};
           auto const calendar = std::chrono::year_month_day{date};
@@ -187,10 +186,7 @@ inline void check_q9_result(q9_reference_result const& expected,
       CUDF_EXPECTS(
         group != expected.sum_profit.end() && group->first == std::make_pair(nations[i], years[i]),
         "Q9 ordered group keys mismatch");
-      double const value = profits[i], want = group->second;
-      CUDF_EXPECTS(std::isfinite(value) && std::isfinite(want) &&
-                     std::abs(value - want) <= 1e-10 * std::max(1.0, std::abs(want)),
-                   "Q9 sum_profit mismatch");
+      CUDF_EXPECTS(detail::reference_equal(profits[i], group->second), "Q9 sum_profit mismatch");
     }
     begin += count;
   }

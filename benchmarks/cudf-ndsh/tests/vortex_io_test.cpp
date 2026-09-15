@@ -51,9 +51,9 @@ void check_flat_schema(ArrowSchema const& schema);
 
 namespace {
 
-void require(bool condition, std::string const& message)
+void require(bool condition, std::string_view message)
 {
-  if (!condition) { throw std::runtime_error(message); }
+  if (!condition) { throw std::runtime_error(std::string{message}); }
 }
 
 void check_cuda(cudaError_t status, char const* operation)
@@ -76,9 +76,7 @@ class temporary_directory {
   temporary_directory()
   {
     auto pattern = (std::filesystem::temp_directory_path() / "ndsh-vortex-io-XXXXXX").string();
-    std::vector<char> buffer(pattern.begin(), pattern.end());
-    buffer.push_back('\0');
-    auto const created = ::mkdtemp(buffer.data());
+    auto const created = ::mkdtemp(pattern.data());
     if (created == nullptr) {
       throw std::runtime_error(std::string{"mkdtemp: "} + std::strerror(errno));
     }

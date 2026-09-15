@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright the Vortex contributors
-"""Offline CMake/source regression tests; run with python3 -B path/to/test_build_integration.py."""
+"""Offline build wiring and benchmark-policy guards.
+
+Full cuDF builds and GPU cases cover C++ includes, projections, and query results;
+source checks here focus on contracts those cannot establish, such as timing boundaries.
+Run with python3 -B benchmarks/cudf-ndsh/test_build_integration.py.
+"""
 
 import re
 import shutil
@@ -21,7 +26,6 @@ IO_TEST = HARNESS / "tests/vortex_io_test.cpp"
 BENCHMARKS = Path("cpp/benchmarks")
 NDSH = BENCHMARKS / "ndsh"
 QUERIES = (1, 5, 6, 9, 10)
-
 
 
 def patch_postimages():
@@ -115,20 +119,19 @@ endforeach()
 foreach(target IN LISTS benchmarks)
   set(links "cudf::cudf;ndsh_utilities")
   set(definitions "")
-  set(includes "")
   if(CUDF_NDSH_WITH_VORTEX AND target MATCHES "^NDSH_Q(0[1569]|10)_NVBENCH$")
     list(APPEND links NDSH_VORTEX_IO kvikio::kvikio)
     set(definitions "CUDF_NDSH_QUERY_EXTENSION=\"vortex_ndsh/q${CMAKE_MATCH_1}.inc\"")
-    set(includes "${CMAKE_CURRENT_SOURCE_DIR}/ndsh")
   endif()
   assert_property(${target} LINK_LIBRARIES "${links}")
   assert_property(${target} COMPILE_DEFINITIONS "${definitions}")
-  assert_property(${target} INCLUDE_DIRECTORIES "${includes}")
   assert_property(${target} INTERFACE_LINK_LIBRARIES "")
   assert_property(${target} INTERFACE_COMPILE_DEFINITIONS "")
   assert_property(${target} INTERFACE_INCLUDE_DIRECTORIES "")
   if(definitions)
     target_compile_definitions(${target} PRIVATE EXPECT_VORTEX=1)
+  else()
+    assert_property(${target} INCLUDE_DIRECTORIES "")
   endif()
 endforeach()
 foreach(target IN ITEMS cudf cudf::cudf ndsh_utilities unrelated)
@@ -150,11 +153,6 @@ assert_property(kvikio::kvikio INTERFACE_COMPILE_DEFINITIONS KVIKIO_FAKE_LINK=1)
 
 set(integration_targets NDSH_VORTEX_IO NDSH_VORTEX_BUILD_SMOKE NDSH_VORTEX_IO_TEST)
 if(CUDF_NDSH_WITH_VORTEX)
-  foreach(target IN ITEMS Vortex::cpp_static ${integration_targets})
-    if(NOT TARGET ${target})
-      message(FATAL_ERROR "Missing enabled Vortex target: ${target}")
-    endif()
-  endforeach()
   foreach(target IN LISTS integration_targets)
     assert_property(${target} EXCLUDE_FROM_ALL TRUE)
     assert_property(${target} COMPILE_DEFINITIONS "")
@@ -171,8 +169,6 @@ if(CUDF_NDSH_WITH_VORTEX)
   assert_property(NDSH_VORTEX_IO SOURCES "${harness}/src/vortex_ndsh/vortex_io.cpp")
   assert_property(NDSH_VORTEX_BUILD_SMOKE SOURCES "${harness}/tests/vortex_build_smoke.cpp")
   assert_property(NDSH_VORTEX_IO_TEST SOURCES "${harness}/tests/vortex_io_test.cpp")
-  assert_property(NDSH_VORTEX_IO INCLUDE_DIRECTORIES "${harness}/src")
-  assert_property(NDSH_VORTEX_IO INTERFACE_INCLUDE_DIRECTORIES "${harness}/src")
   assert_property(NDSH_VORTEX_BUILD_SMOKE LINK_LIBRARIES "cudf::cudf;Vortex::cpp_static;CUDA::cudart")
   assert_property(NDSH_VORTEX_BUILD_SMOKE INTERFACE_LINK_LIBRARIES "")
   assert_property(NDSH_VORTEX_BUILD_SMOKE COMPILE_FEATURES cxx_std_20)
@@ -224,21 +220,12 @@ DUMMY = """
 #ifdef CUDF_NDSH_WITH_VORTEX
 #error Obsolete benchmark Vortex definition
 #endif
+#if defined(EXPECT_VORTEX) != defined(KVIKIO_FAKE_LINK) || defined(EXPECT_VORTEX) != defined(CUDF_NDSH_QUERY_EXTENSION)
+#error Query dependency or extension missing or leaked
+#endif
 #ifdef EXPECT_VORTEX
-#ifndef KVIKIO_FAKE_LINK
-#error Missing private query KvikIO dependency
-#endif
-#ifndef CUDF_NDSH_QUERY_EXTENSION
-#error Missing private benchmark extension definition
-#endif
 #include CUDF_NDSH_QUERY_EXTENSION
 #else
-#ifdef KVIKIO_FAKE_LINK
-#error Query KvikIO dependency leaked
-#endif
-#ifdef CUDF_NDSH_QUERY_EXTENSION
-#error Benchmark extension definition leaked
-#endif
 int main() { return 0; }
 #endif
 """
@@ -277,21 +264,15 @@ class BuildIntegrationTests(unittest.TestCase):
         self.source = Path(temporary.name)
         self.binary = self.source / "out"
         self.fake = self.source / "fake-vortex"
-        harness = self.fake / HARNESS
-        harness.mkdir(parents=True)
-        shutil.copy2(ROOT / MODULE, self.fake / MODULE)
-        for directory in ("src", "tests"):
-            shutil.copytree(ROOT / HARNESS / directory, harness / directory)
-        for path in (MODULE, SMOKE, IO, IO.with_suffix(".hpp"), IO_TEST):
-            self.assertTrue((self.fake / path).is_file(), f"Tracked harness is missing {path}")
-        # Compile tests cover wiring with stubs; the real sources need separate GPU validation.
-        # Leave smoke/I/O test sources intact: neither may build implicitly without CUDA/Rust.
+        # Compile only wiring stubs. Real smoke/I/O sources must stay excluded from default builds.
+        for path in (MODULE, SMOKE, IO_TEST):
+            destination = self.fake / path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / path, destination)
         self.write(self.fake / IO, IO_STUB)
         for query in QUERIES:
-            extension = self.fake / SOURCES / f"q{query:02}.inc"
-            self.assertTrue(extension.is_file(), f"Tracked harness is missing {extension.name}")
             self.write(
-                extension,
+                self.fake / SOURCES / f"q{query:02}.inc",
                 '#include "utilities.hpp"\n'
                 "int ndsh_vortex_io_stub();\n"
                 "int main() { return ndsh_vortex_io_stub(); }\n",
@@ -357,10 +338,8 @@ class BuildIntegrationTests(unittest.TestCase):
     def test_enabled_private_links_and_excluded_targets(self):
         self.configure("-DCUDF_NDSH_WITH_VORTEX=ON")
         archive = self.binary / BENCHMARKS / "libNDSH_VORTEX_IO.a"
-        self.build("unrelated")
-        self.assertFalse(archive.exists(), "Unrelated target built the adapter")
-        self.build("NDSH_HELPER")
-        self.assertFalse(archive.exists(), "Unselected benchmarks built the adapter")
+        self.build("unrelated", "NDSH_HELPER")
+        self.assertFalse(archive.exists(), "Unselected targets built the adapter")
         # cuDF queries participate in ALL and pull in the adapter, but not standalone validation targets.
         self.build()
         self.assertTrue(archive.is_file(), "Default build did not build the static adapter through queries")
@@ -372,49 +351,33 @@ class BuildIntegrationTests(unittest.TestCase):
                 (self.binary / BENCHMARKS / target).exists(), f"Explicit target {target} was built implicitly"
             )
 
-    def test_disabled_ignores_unusable_local_source(self):
+    def test_local_checkout_requirement_is_enabled_only(self):
         (self.fake / MODULE).unlink()
         not_directory = self.source / "not-a-checkout"
         self.write(not_directory, "not a directory\n")
-        overrides = (None, "", self.fake, self.source / "missing-vortex", not_directory)
-        for setting in (None, "OFF"):
+        directory_module = self.source / "directory-module"
+        (directory_module / MODULE).mkdir(parents=True)
+        overrides = (None, "", self.fake, self.source / "missing-vortex", not_directory, directory_module)
+        for setting in (None, "OFF", "ON"):
+            enabled = setting == "ON"
             for index, override in enumerate(overrides):
                 with self.subTest(setting=setting, override=override):
-                    self.binary = self.source / f"disabled-{setting}-{index}"
-                    self.configure(
+                    self.binary = self.source / f"checkout-{setting}-{index}"
+                    output = self.configure(
                         *(() if setting is None else (f"-DCUDF_NDSH_WITH_VORTEX={setting}",)),
                         *(() if override is None else (f"-DFETCHCONTENT_SOURCE_DIR_VORTEX={override}",)),
-                        # The enabled-only Linux/CUDA requirement must not apply to OFF.
-                        "-DCMAKE_SYSTEM_NAME=Generic",
+                        # Disabled integration must ignore even an unsupported host.
+                        f"-DCMAKE_SYSTEM_NAME={'Linux' if enabled else 'Generic'}",
                         local_source=False,
+                        succeeds=not enabled,
                     )
-
-    def test_enabled_requires_local_module_offline(self):
-        (self.fake / MODULE).unlink()
-        not_directory = self.source / "not-a-checkout"
-        self.write(not_directory, "not a directory\n")
-        overrides = (None, "", self.fake, self.source / "missing-vortex", not_directory)
-        for index, override in enumerate(overrides):
-            with self.subTest(override=override):
-                self.binary = self.source / f"missing-{index}"
-                output = self.configure(
-                    "-DCUDF_NDSH_WITH_VORTEX=ON",
-                    *(() if override is None else (f"-DFETCHCONTENT_SOURCE_DIR_VORTEX={override}",)),
-                    local_source=False,
-                    succeeds=False,
-                )
-                message = " ".join(output.split())
-                self.assertIn("CUDF_NDSH_WITH_VORTEX=ON requires a Vortex checkout", message)
-                self.assertIn("benchmarks/cudf-ndsh/vortex.cmake", message)
-                self.assertIn("-DFETCHCONTENT_SOURCE_DIR_VORTEX=/path/to/vortex", message)
-                if override:
-                    self.assertIn(str(override), output)
-
-    def test_enabled_rejects_directory_in_place_of_module(self):
-        (self.fake / MODULE).unlink()
-        (self.fake / MODULE).mkdir()
-        output = self.configure("-DCUDF_NDSH_WITH_VORTEX=ON", succeeds=False)
-        self.assertIn("requires a Vortex checkout", " ".join(output.split()))
+                    if enabled:
+                        message = " ".join(output.split())
+                        self.assertIn("CUDF_NDSH_WITH_VORTEX=ON requires a Vortex checkout", message)
+                        self.assertIn("benchmarks/cudf-ndsh/vortex.cmake", message)
+                        self.assertIn("-DFETCHCONTENT_SOURCE_DIR_VORTEX=/path/to/vortex", message)
+                        if override:
+                            self.assertIn(str(override), output)
 
     def test_enabled_requires_linux(self):
         output = self.configure("-DCUDF_NDSH_WITH_VORTEX=ON", "-DCMAKE_SYSTEM_NAME=Generic", succeeds=False)
@@ -424,8 +387,7 @@ class BuildIntegrationTests(unittest.TestCase):
 class BenchmarkSourceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.patch_sources = patch_postimages()
-        cls.sources = dict(cls.patch_sources)
+        cls.sources = patch_postimages()
         paths = [ROOT / MODULE, *(ROOT / SOURCES).glob("*"), *(ROOT / HARNESS / "tests").glob("*.cpp")]
         for path in paths:
             if path.is_file():
@@ -443,28 +405,8 @@ class BenchmarkSourceTests(unittest.TestCase):
         self.assertIsNotNone(match, f"Missing source pattern: {pattern}")
         return match
 
-    def test_smoke_initializes_device_before_stream_sync(self):
-        smoke = self.source(SMOKE)
-        self.assertIn("#include <cudf/utilities/error.hpp>", smoke)
-        self.assertIn("#include <cuda_runtime_api.h>", smoke)
-        self.assertIn(
-            "CUDF_CUDA_TRY(cudaSetDevice(0)); auto const stream = cudf::get_default_stream(); stream.sync();",
-            smoke,
-        )
-        self.assertLess(smoke.index("stream.sync();"), smoke.index("vortex::Session host_session;"))
-        self.assertLess(smoke.index("vortex::Session host_session;"), smoke.index("vx_cuda_session_new(&error)"))
-
-    def test_bootstrap_uses_the_module_checkout(self):
-        hook = patch_hook()
-        self.assertRegex(hook, r'^option\(CUDF_NDSH_WITH_VORTEX "[^"]+" OFF\)\nif\(CUDF_NDSH_WITH_VORTEX\)')
-        self.assertIn('include("${FETCHCONTENT_SOURCE_DIR_VORTEX}/benchmarks/cudf-ndsh/vortex.cmake")', hook)
+    def test_module_does_not_fetch_or_discover_a_toolchain(self):
         module = self.source(MODULE)
-        self.assertIn('get_filename_component(vortex_root "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)', module)
-        self.assertIn(
-            'add_subdirectory("${vortex_root}/lang/cpp" '
-            '"${CMAKE_CURRENT_BINARY_DIR}/_deps/vortex-build" EXCLUDE_FROM_ALL SYSTEM)',
-            module,
-        )
         self.assertNotRegex(module, r"FetchContent|GIT_|file\(STRINGS|vortex_cuda\.h")
         self.assertNotRegex(module, r"find_package\(|enable_language\(|CMAKE_CUDA_COMPILER|nvcomp")
 
@@ -488,41 +430,6 @@ class BenchmarkSourceTests(unittest.TestCase):
             self.assertIn(name, self.source(NDSH / "utilities.hpp"))
             self.assertIn(name, self.source(NDSH / "utilities.cpp"))
 
-    def test_query_extension_hooks_and_shared_projections(self):
-        for query in QUERIES:
-            with self.subTest(query=query):
-                path = NDSH / f"q{query:02}.cpp"
-                source = self.source(path)
-                self.assertTrue(
-                    source.endswith(
-                        "#ifdef CUDF_NDSH_QUERY_EXTENSION #include CUDF_NDSH_QUERY_EXTENSION #endif"
-                    ),
-                    f"{path} must end with the generic extension hook",
-                )
-                self.assertEqual(source.count("#include CUDF_NDSH_QUERY_EXTENSION"), 1)
-                projection = f"q{query}_{'columns' if query in (1, 6) else 'projections'}"
-                extension = self.source(SOURCES / f"q{query:02}.inc")
-                self.assertIn(projection, source)
-                self.assertIn(projection, extension)
-                self.assertNotRegex(extension, rf"\bconst\s+{projection}\s*\{{")
-                if query != 9:
-                    self.assertIn(f"execute_q{query}(", source)
-                    self.assertIn("return consume(", source)
-
-    def test_harness_quoted_includes_resolve(self):
-        for path, source in self.sources.items():
-            if not path.is_relative_to(HARNESS) or path.suffix not in (".cpp", ".hpp", ".inc"):
-                continue
-            for header in re.findall(r'^#include "([^"]+)"', source, re.MULTILINE):
-                with self.subTest(path=path, header=header):
-                    candidates = (path.parent / header, SOURCES.parent / header)
-                    if path.parent == SOURCES:
-                        candidates += (NDSH / header,)
-                    self.assertTrue(
-                        any(candidate in self.sources for candidate in candidates),
-                        f"{path}: {header} is not reachable through the configured include directories",
-                    )
-
     def test_local_benchmark_names_and_axes(self):
         for query in QUERIES:
             with self.subTest(query=query):
@@ -543,24 +450,73 @@ class BenchmarkSourceTests(unittest.TestCase):
                     # This is the existing generic cuDF transform mode, not a custom query kernel.
                     self.assertEqual(axes.get("engine"), {"binaryop", "ast", "transform"})
 
-    def test_cache_preparation_precedes_each_manual_timer(self):
+    def test_shared_local_benchmark_phase_ordering(self):
+        source = self.source(SOURCES / "local_io.hpp")
+        self.require_match(
+            source,
+            r"void warm_local_inputs\(bool cold, ReadAll&& read_all\) \{ "
+            r"if \(!cold\) \{ auto inputs = read_all\(\); "
+            r"CUDF_CUDA_TRY\(cudaDeviceSynchronize\(\)\); \} \}",
+        )
+        self.require_match(
+            source,
+            r'state.add_element_count\(files.rows, "Rows"\); state.exec\(\s*'
+            r"nvbench::exec_tag::sync \| nvbench::exec_tag::timer, "
+            r"\[&\]\(nvbench::launch&, auto& timer\) \{ "
+            r"if \(cold\) \{ evict_file_pages\(files.paths\(use_vortex\)\); \} "
+            r"timer.start\(\); run\(\); CUDF_CUDA_TRY\(cudaDeviceSynchronize\(\)\); timer.stop\(\); \}\);",
+        )
+
+    def test_local_benchmarks_wire_warmup_and_timed_owners(self):
+        sync = r"CUDF_CUDA_TRY\(cudaStreamSynchronize\(stream.get\(\)\)\);"
         for query in QUERIES:
             with self.subTest(query=query):
-                source = self.query_source(query)
+                source = self.source(SOURCES / f"q{query:02}.inc")
                 local = self.require_match(source, rf"void ndsh_q{query}_local\([^)]*\) \{{(.*)").group(1)
-                self.require_match(local, r'cold = ndsh::use_cold_cache\(state.get_string\("cache"\)\)')
-                self.require_match(local, r"ndsh::read_local_file\([^;]+, cold\)")
-                self.require_match(local, r"if \(!cold\) \{ auto warmup =")
-                execution = self.require_match(local, r"state.exec\((.*?)timer.stop\(\);").group(1)
-                self.assertIn("nvbench::exec_tag::sync | nvbench::exec_tag::timer", execution)
-                eviction = self.require_match(
-                    execution, r"if \(cold\) \{ ndsh::evict_file_pages\((.*?)\); \} timer.start\(\);"
+                execution = self.require_match(
+                    local,
+                    r"ndsh::exec_local_benchmark\(\s*state, files.tables, use_vortex, cold, "
+                    r"\[&\] \{ (.*?) \}\); (?=state.add_buffer_size\()",
                 )
-                self.assertEqual(eviction.group(1), "files.tables.paths(use_vortex)")
-                timed = execution.split("timer.start();", 1)[1]
-                self.assertNotIn("evict_file_pages", timed)
-                self.assertIn(f"execute_q{query}(", timed)
-                self.assertIn("cudaDeviceSynchronize()", timed)
+                setup, timed = local[: execution.start()], execution.group(1)
+                self.require_match(setup, r'cold = ndsh::use_cold_cache\(state.get_string\("cache"\)\)')
+                self.require_match(setup, r"ndsh::read_local_file\([^;]+, cold\)")
+                self.assertNotRegex(local, r"state\.exec\(|timer\.(?:start|stop)\(|evict_file_pages\(")
+                if query in (1, 6):
+                    warmup = "ndsh::warm_local_inputs(cold, read);"
+                else:
+                    read_all = (
+                        "load_data(read)"
+                        if query == 9
+                        else f"ndsh::read_local_tables(q{query}_tables, q{query}_projections, read)"
+                    )
+                    warmup = f"ndsh::warm_local_inputs(cold, [&] {{ return {read_all}; }});"
+                self.assertIn(warmup, setup)
+                if query == 1:
+                    self.require_match(
+                        setup.split(warmup, 1)[1],
+                        r'if \(workload == "q1"\) \{ auto result = execute_q1\(.*?; '
+                        r"ndsh::check_q1_result\(files.reference, \*result, stream\); "
+                        r"CUDF_CUDA_TRY\(cudaDeviceSynchronize\(\)\); \}",
+                    )
+                if query in (1, 10):
+                    nvtx = self.require_match(
+                        timed,
+                        rf'^cudf::benchmark::scoped_range timed_range\{{"ndsh_q{query}_local_timed"\}}; ',
+                    )
+                    timed = timed[nvtx.end() :]
+                if query in (1, 6):
+                    self.require_match(
+                        timed,
+                        rf'^auto result = workload == "read" \? read\(\) : execute_q{query}\(.*?\); {sync}$',
+                    )
+                else:
+                    self.require_match(
+                        timed,
+                        r'^if \(workload == "read"\) \{ auto inputs = '
+                        + re.escape(read_all)
+                        + rf"; {sync} \}} else \{{ auto result = execute_q{query}\([^;]+; {sync} \}}$",
+                    )
 
     def test_read_only_tables_keep_projection_order_and_owners(self):
         source = self.source(SOURCES / "local_io.hpp")
@@ -571,48 +527,28 @@ class BenchmarkSourceTests(unittest.TestCase):
             r"for \(auto const& name : names\) \{ "
             r"tables.push_back\(read\(name, projections.at\(name\), no_predicate\)\); \} return tables;",
         )
-        for query in (5, 10):
-            with self.subTest(query=query):
-                source = self.query_source(query)
-                read = f"ndsh::read_local_tables(q{query}_tables, q{query}_projections, read)"
-                self.assertIn(f"auto warmup = {read};", source)
-                self.require_match(
-                    source,
-                    r'if \(workload == "read"\) \{ auto inputs = '
-                    + re.escape(read)
-                    + r"; CUDF_CUDA_TRY\(cudaStreamSynchronize\(stream.get\(\)\)\); \} else",
-                )
 
     def test_fixture_caches_are_lazy_and_construct_in_place(self):
         for query in QUERIES:
             with self.subTest(query=query):
                 source = self.query_source(query)
-                setup = self.require_match(
+                self.require_match(
                     source,
                     rf"static std::map<double, q{query}_files> fixtures; "
-                    r"if \(auto const files = fixtures.find\(scale_factor\); files != fixtures.end\(\)\) "
-                    r"\{ return files->second; \} (.*?) "
-                    r"return fixtures.try_emplace\(scale_factor, scale_factor, io\).first->second;",
+                    r"return fixtures.try_emplace\(scale_factor, scale_factor\).first->second; \}",
+                )
+                setup = self.require_match(
+                    source,
+                    rf"explicit q{query}_files\(double scale_factor\) \{{ (.*?ndsh::vortex_io io\{{[^;]+\}};)",
                 ).group(1)
                 validation = f"check_q{query}_{'cases' if query in (9, 10) else 'boundaries'}();"
-                session = self.require_match(setup, r"ndsh::vortex_io io\{[^;]+\};$").start()
+                session = setup.index("ndsh::vortex_io io{")
                 self.assertLess(setup.index(validation), session)
                 if query == 6:
                     self.assertLess(setup.index(validation), setup.index("check_q6_reference_boundaries();"))
                     self.assertLess(setup.index("check_q6_reference_boundaries();"), session)
-                # No placeholder or temporary fixture: a failed emplace leaves the key absent.
-                self.assertNotIn("fixtures[", setup)
-                self.assertNotIn(f"std::make_unique<q{query}_files>", source)
 
-    def test_fixture_projection_checks_keep_both_formats_and_cleanup(self):
-        source = self.source(SOURCES / "local_io.hpp")
-        self.require_match(
-            source,
-            r"inline void check_file_projections\([^)]*\) \{ "
-            r"for \(bool use_vortex : \{false, true\}\) \{ "
-            r"auto input = read_local_file\(files.path\(name, use_vortex\), use_vortex, io, columns\); "
-            r"check_projection\(expected, \*input, columns\); \} \}",
-        )
+    def test_generated_tables_are_checked_and_drained_before_release(self):
         for query in (5, 9, 10):
             with self.subTest(query=query):
                 source = self.query_source(query)
@@ -634,7 +570,7 @@ class BenchmarkSourceTests(unittest.TestCase):
             r"CUDF_EXPECTS\(resident_pages == 0,",
         )
 
-    def test_direct_io_is_opt_in_for_vortex_only(self):
+    def test_device_import_decodes_dictionaries_and_opts_into_direct_io(self):
         local = self.source(SOURCES / "local_io.hpp")
         self.assertIn("bool direct_io = false", self.source(IO.with_suffix(".hpp")))
         self.assertIn("bool direct_io = false", local)
@@ -647,15 +583,7 @@ class BenchmarkSourceTests(unittest.TestCase):
             r"options.flags = VX_CUDA_SCAN_FLAG_DECODE_DICTIONARIES "
             r"\| \(direct_io \? VX_CUDA_SCAN_FLAG_DIRECT_IO : 0\);",
         )
-
-    def test_plain_dictionary_decoded_import_is_preserved(self):
-        source = self.source(IO)
-        self.require_match(source, r"options.flags = VX_CUDA_SCAN_FLAG_DECODE_DICTIONARIES\b")
-        self.assertIn("vx_cuda_scan_path_arrow_device_stream_projected(", source)
-        self.assertIn("cudf::from_arrow_device(", source)
-        self.require_match(
-            source, r"if \(column.type\(\).id\(\) == cudf::type_id::DICTIONARY32\) \{ throw std::runtime_error\("
-        )
+        self.assertIn("cudf::from_arrow_device(", self.source(IO))
 
     def test_adapter_owners_release_after_consumer_completion(self):
         source = self.source(IO)
@@ -716,14 +644,7 @@ class BenchmarkSourceTests(unittest.TestCase):
                 self.assertIn(f'"ndsh/q{query}/matched_rows"', source)
                 self.assertNotIn("fixture has no", source)
                 self.assertNotRegex(source, r"CUDF_EXPECTS\((?:reference\.)?matched > 0")
-        q6 = self.query_source(6)
-        self.assertIn('CUDF_EXPECTS(!value, "Q6 SUM over no matching rows must be null")', q6)
-        self.assertIn('summary.set_string("value", "NULL")', q6)
-        self.assertIn("check_q6_reference_boundaries();", q6)
-        q9_reference = self.source(SOURCES / "q9_reference.hpp")
-        self.assertIn("std::unordered_multimap<uint64_t, double> supply_costs_", q9_reference)
-        self.assertIn("supply_costs_.equal_range(", q9_reference)
-        self.assertIn("duplicate_expected.matched = 7;", self.query_source(9))
+        self.assertIn('summary.set_string("value", "NULL")', self.query_source(6))
 
     def test_no_query_specific_kernels(self):
         for path, source in self.sources.items():

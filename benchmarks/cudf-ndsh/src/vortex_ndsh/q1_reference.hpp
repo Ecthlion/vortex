@@ -13,7 +13,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -120,9 +119,7 @@ inline void check_q1_result(q1_reference_result const& expected,
         for (cudf::size_type i = 0; i < count; ++i, ++reference) {
           double const value = values[i], want = reference->second[metric];
           bool const exact = metric == 0 || metric == 7;
-          CUDF_EXPECTS(std::isfinite(value) && std::isfinite(want) &&
-                         (exact ? value == want
-                                : std::abs(value - want) <= 1e-10 * std::max(1.0, std::abs(want))),
+          CUDF_EXPECTS(detail::reference_equal(value, want, exact),
                        "Q1 metric mismatch: " + names[metric + 2]);
           if (metric == 7) matched += static_cast<int64_t>(values[i]);
         }

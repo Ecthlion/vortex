@@ -10,6 +10,8 @@
 #include <cudf/table/table_view.hpp>
 #include <cudf/utilities/error.hpp>
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
@@ -17,6 +19,14 @@
 #include <vector>
 
 namespace ndsh::detail {
+// Integer-derived counts and sums remain exact; floating metrics use a shared 1e-10 tolerance.
+inline bool reference_equal(double value, double expected, bool exact = false)
+{
+  return std::isfinite(value) && std::isfinite(expected) &&
+         (exact ? value == expected
+                : std::abs(value - expected) <= 1e-10 * std::max(1.0, std::abs(expected)));
+}
+
 inline void reference_schema(cudf::table_view table, std::initializer_list<cudf::type_id> types)
 {
   CUDF_EXPECTS(static_cast<std::size_t>(table.num_columns()) == types.size(),

@@ -119,9 +119,11 @@ struct q9_files {
   ndsh::local_table_files tables;
   ndsh::q9_reference_result reference;
 
-  q9_files(double scale_factor, ndsh::vortex_io const& io)
+  explicit q9_files(double scale_factor)
   {
+    check_q9_cases();
     cuda::stream_ref const stream = cudf::get_default_stream();
+    ndsh::vortex_io io{stream.get()};
     {
       ndsh::q9_reference_builder builder;
       for_each_generated_table(
@@ -156,13 +158,7 @@ q9_files const& q9_fixture(double scale_factor)
 {
   // Share only full-table files and the CPU result across format/workload/engine states at this SF.
   static std::map<double, q9_files> fixtures;
-  if (auto const files = fixtures.find(scale_factor); files != fixtures.end()) {
-    return files->second;
-  }
-  check_q9_cases();
-  cuda::stream_ref const stream = cudf::get_default_stream();
-  ndsh::vortex_io io{stream.get()};
-  return fixtures.try_emplace(scale_factor, scale_factor, io).first->second;
+  return fixtures.try_emplace(scale_factor, scale_factor).first->second;
 }
 
 void ndsh_q9_local(nvbench::state& state)
@@ -183,26 +179,16 @@ void ndsh_q9_local(nvbench::state& state)
     return ndsh::read_local_file(
       files.tables.path(name, use_vortex), use_vortex, io, columns, cold);
   };
-  if (!cold) {
-    auto warmup = load_data(read);
-    CUDF_CUDA_TRY(cudaDeviceSynchronize());
-  }
-  state.add_element_count(files.tables.rows, "Rows");
-  state.exec(
-    nvbench::exec_tag::sync | nvbench::exec_tag::timer, [&](nvbench::launch&, auto& timer) {
-      if (cold) { ndsh::evict_file_pages(files.tables.paths(use_vortex)); }
-      timer.start();
-      if (workload == "read") {
-        auto inputs = load_data(read);
-        CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));
-      } else {
-        auto result = execute_q9(engine, read, stream, cudf::get_current_device_resource_ref());
-        CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));
-      }
-      // Include destruction on independent Vortex producer streams, for both formats.
-      CUDF_CUDA_TRY(cudaDeviceSynchronize());
-      timer.stop();
-    });
+  ndsh::warm_local_inputs(cold, [&] { return load_data(read); });
+  ndsh::exec_local_benchmark(state, files.tables, use_vortex, cold, [&] {
+    if (workload == "read") {
+      auto inputs = load_data(read);
+      CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));
+    } else {
+      auto result = execute_q9(engine, read, stream, cudf::get_current_device_resource_ref());
+      CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));
+    }
+  });
   state.add_buffer_size(files.tables.bytes(use_vortex), "file_size", "Total file size");
   state.add_buffer_size(memory.peak_memory_usage(), "rmm_peak", "RMM peak (excludes Vortex)");
   auto& matched = state.add_summary("ndsh/q9/matched_rows");
