@@ -31,6 +31,7 @@ use super::expr::try_from_bound_expression_with_col_sub;
 use crate::bloom_filter::BloomFilterContains;
 use crate::bloom_filter::try_new_probe;
 use crate::cpp::DUCKDB_VX_EXPR_TYPE;
+use crate::duckdb::Conjunction;
 use crate::duckdb::ExtractedValue;
 use crate::duckdb::TableFilterClass;
 use crate::duckdb::TableFilterRef;
@@ -48,20 +49,10 @@ pub fn try_from_table_filter(
             Binary.new_expr(const_.operator.try_into()?, [col.clone(), lit(scalar)])
         }
         TableFilterClass::ConjunctionAnd(conj_and) => {
-            let mut children = Vec::new();
-            for child in conj_and.children() {
-                match try_from_table_filter(child, col, scope_dtype)? {
-                    Some(expr) => children.push(expr),
-                    // Leaving a conjunct out only keeps rows DuckDB would have kept anyway, but
-                    // it is only safe for a conjunct DuckDB does not need the scan to apply.
-                    // Join filter pushdown mixes these: a bloom filter Vortex cannot probe sits
-                    // next to range filters it can.
-                    None if matches!(child.as_class(), TableFilterClass::Optional(_)) => {}
-                    None => return Ok(None),
-                }
+            match try_from_conjunction(conj_and, col, scope_dtype)? {
+                Some(expression) => expression,
+                None => return Ok(None),
             }
-
-            and_collect(children).unwrap_or_else(|| lit(true))
         }
         // This is a disjunction.
         TableFilterClass::ConjunctionOr(disjuction_or) => {
@@ -145,6 +136,50 @@ pub fn try_from_table_filter(
             BloomFilterContains.new_expr(probe, [col.clone()])
         }
     }))
+}
+
+/// Converts a conjunction of table filters over one column.
+///
+/// Join filter pushdown sends a bloom filter and the min/max range filters of the same join
+/// together, and marks all of them optional. Every key the bloom filter admits lies between the
+/// same min and max, so evaluating the range filters as well would decode the key column again
+/// for rows the bloom filter has already ruled out. The bloom filter therefore replaces them.
+///
+/// Returns `None` when a conjunct DuckDB needs the scan to apply cannot be converted, since
+/// leaving that one out would keep rows the query must not see.
+fn try_from_conjunction(
+    conjunction: Conjunction<'_>,
+    col: &Expression,
+    scope_dtype: &DType,
+) -> VortexResult<Option<Expression>> {
+    let mut required = Vec::new();
+    let mut optional = Vec::new();
+    let mut bloom = None;
+
+    for child in conjunction.children() {
+        let Some(expr) = try_from_table_filter(child, col, scope_dtype)? else {
+            if child.is_optional() {
+                continue;
+            }
+            return Ok(None);
+        };
+
+        if child.is_bloom_filter() {
+            bloom = Some(expr);
+        } else if child.is_optional() {
+            optional.push(expr);
+        } else {
+            required.push(expr);
+        }
+    }
+
+    if let Some(bloom) = bloom {
+        required.push(bloom);
+    } else {
+        required.append(&mut optional);
+    }
+
+    Ok(Some(and_collect(required).unwrap_or_else(|| lit(true))))
 }
 
 fn nonnegative_number_from_value(value: &ValueRef) -> VortexResult<u64> {

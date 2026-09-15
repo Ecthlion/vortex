@@ -69,8 +69,34 @@ impl Debug for TableFilterSetRef {
 lifetime_wrapper!(TableFilter, duckdb_vx_table_filter, |_| {});
 
 impl TableFilterRef {
+    fn kind(&self) -> cpp::DUCKDB_VX_TABLE_FILTER_TYPE {
+        unsafe { cpp::duckdb_vx_table_filter_get_type(self.as_ptr()) }
+    }
+
+    /// Whether DuckDB still gets the right answer when the scan does not apply this filter.
+    pub fn is_optional(&self) -> bool {
+        self.kind() == cpp::DUCKDB_VX_TABLE_FILTER_TYPE::DUCKDB_VX_TABLE_FILTER_TYPE_OPTIONAL_FILTER
+    }
+
+    /// Whether this filter is a join's bloom filter, or optionally wraps one.
+    ///
+    /// Answering this without [`TableFilterRef::as_class`] avoids extracting the filter, which
+    /// hands out an owned handle to the bloom filter.
+    pub fn is_bloom_filter(&self) -> bool {
+        match self.kind() {
+            cpp::DUCKDB_VX_TABLE_FILTER_TYPE::DUCKDB_VX_TABLE_FILTER_TYPE_BLOOM_FILTER => true,
+            cpp::DUCKDB_VX_TABLE_FILTER_TYPE::DUCKDB_VX_TABLE_FILTER_TYPE_OPTIONAL_FILTER => {
+                unsafe {
+                    TableFilter::borrow(cpp::duckdb_vx_table_filter_get_optional(self.as_ptr()))
+                }
+                .is_bloom_filter()
+            }
+            _ => false,
+        }
+    }
+
     pub fn as_class(&self) -> TableFilterClass<'_> {
-        match unsafe { cpp::duckdb_vx_table_filter_get_type(self.as_ptr()) } {
+        match self.kind() {
             cpp::DUCKDB_VX_TABLE_FILTER_TYPE::DUCKDB_VX_TABLE_FILTER_TYPE_CONSTANT_COMPARISON => {
                 let mut out = cpp::duckdb_vx_table_filter_constant {
                     value: ptr::null_mut(),
