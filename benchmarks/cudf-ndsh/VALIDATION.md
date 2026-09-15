@@ -1,77 +1,31 @@
 # Validation
 
-Checkpoint: 2026-09-15. Chunked-I/O source: `98b3d12746`.
-Full-matrix baseline source: `91142e2c18`. Pinned cuDF:
+Checkpoint: 2026-09-15. Full-matrix build/run at clean
+`b414dd8307ee25d595382c9d1e8bf6fb15520624` (docs-only changes beyond chunked-I/O
+source `98b3d12746`). Pinned cuDF:
 `5339497a1a17d799687cbf189fb113411fb015ca`, Release (`-O3 -DNDEBUG`).
 Hardware/toolchain: NVIDIA GH200, driver **595.71.05**, NVCC **13.0.88**, GCC **14.3.0**.
 [Current state](PROGRESS.md) · [Setup and commands](README.md)
 
-## Chunked-I/O optimization (SF1)
-
-Nsight identified large host reads as the main bottleneck: the final Q6 warm read
-spent 3.698 ms in one 47.98 MB `pread`, versus 0.093 ms executing decode kernels.
-These are instrumented observations, not benchmark timings.
-
-`98b3d12746` splits large reads into 4 MiB chunks on the existing I/O runtime, with
-at most 32 concurrent host reads per open file. Completed chunks transfer directly
-into one GPU allocation. Fixtures, encodings, projections, and cuDF operations are
-unchanged.
-
-The following uninstrumented CPU-wall means are in **ms**. Before and after use
-`--min-samples 100 --timeout 5`; Parquet is from the after run. Queries include reads.
-
-| Query | Cache | Workload | Vortex before | Vortex after | Parquet | Parquet / after |
-| ----- | ----- | -------- | ------------: | -----------: | ------: | --------------: |
-| Q1    | warm  | read     |         6.298 |        4.141 |  14.062 |           3.40× |
-| Q1    | cold  | read     |         6.070 |        4.466 |  18.887 |           4.23× |
-| Q1    | warm  | query    |        10.686 |        8.618 |  18.876 |           2.19× |
-| Q1    | cold  | query    |        10.412 |        8.938 |  23.809 |           2.66× |
-| Q6    | warm  | read     |         4.036 |        1.875 |   7.937 |           4.23× |
-| Q6    | cold  | read     |         3.017 |        2.141 |  11.113 |           5.19× |
-| Q6    | warm  | query    |         4.568 |        2.435 |   8.429 |           3.46× |
-| Q6    | cold  | query    |         3.809 |        2.728 |  11.625 |           4.26× |
-
-All 16 states passed correctness checks. Q1 has 4,497,687 matches/four groups;
-**Q6 still has zero matches and SUM NULL**, so its full-query timings do not establish
-nonempty-query performance. Vortex after-run CPU relative SD ranges from 1.5–6.2%;
-before-run cold measurements were noisier (8.0–13.8%). Five-second sampling limits
-can emit timeout warnings while still producing valid results.
-
-Validation: targeted Release consumers built; **15 adapter tests and 33 focused
-CUDA tests passed**, with no ignored tests. Rust filters were `pinned::tests` and
-`pooled_read_at::file::tests`, using `cargo test --locked --offline -p vortex-cuda
---lib --features _test-harness`, the CMake-selected Release toolchain/target, and
-`--test-threads=1`.
-
-Artifacts under ignored `build/cudf-ndsh-perf-20260914/`:
-
-- `baseline-sf1-q{1,6}.json` and `chunked-sf1-q{1,6}.json`.
-- `baseline-build.json`, `baseline-binaries/`, and `chunked-provenance.json`
-  (source/binary hashes; benchmarks ran before the source commit).
-- Baseline profile files: `baseline-q6-{warm,cold}.sqlite`, `baseline-q1-warm.sqlite`;
-  range-scoped analysis: `derived-final-read-analysis.json`.
-- Commands/logs: `logs/20260914T203030.285386Z/` (before) and
-  `logs/20260914T204642.079773Z/` (after and adapter checks).
-- `focused-tests-summary.json` and `focused-tests-sanitized-{build,pinned,pooled}.json`
-  record exact test commands and results.
-
-Q5/Q9/Q10 measurements with this change, SF10, and current memcheck remain pending.
-The remaining-query rebuild was interrupted; inspect it before resuming. The
-original work directory now contains incrementally rebuilt artifacts, so its old
-`build.json` no longer describes all binaries. Use a fresh work directory for the
-tracked clean-build recipe; preserved baseline binaries remain in the experiment directory.
-
 ## Current build status
 
-At baseline `91142e2c18`, the [build recipe](README.md#build-from-a-clean-checkout)
-produced fresh Release cuDF and CUDA-enabled Vortex, plus **all seven executables**. After the Python runner
-was interrupted, its CMake child finished. An incremental target build passed
-(**0.5 s, exit 0**); source and toolchain checks then allowed recovery of the binary
-hash record through `reproduce.py` helpers. `resumed_from` identifies the original logs.
+At clean `b414dd8307`, **all seven targets built incrementally in 12.7 s**. The
+original pinned Release `libcudf.so` hash is unchanged. Prepared cuDF/dependency
+revisions were checked, and the selected toolchain matches NVCC 13.0.88 / GCC 14.3.0
+on GH200 with driver 595.71.05.
 
-Three in-branch build/runtime fixes are included: `1ab26426d8` resolves the NVCC
-realpath before Cargo tool lookup; `a9d705465e` declares explicit NVTX/KvikIO links;
-`91142e2c18` initializes the smoke test with `cudaSetDevice` before its stream check.
+After that successful build, `build.json` was refreshed with the actual source
+identity, toolchain, and binary hashes: `build_method=incremental`, with
+`incremental_from` retaining the prior record. `recipe.json` still describes the
+initial configure, not a fresh configure at this checkpoint. The tracked `run`
+requires the recorded clean source revision and matching binary/library hashes.
+Use a fresh work directory for the [build recipe](README.md#build-from-a-clean-checkout)
+when changing source, compiler settings, or CMake definitions; provenance updates
+alone are not a substitute for a build.
+
+Included build/runtime fixes: `1ab26426d8` resolves the NVCC realpath before Cargo
+tool lookup; `a9d705465e` declares explicit NVTX/KvikIO links; `91142e2c18` initializes
+the smoke test with `cudaSetDevice` before its stream check.
 
 NVCC **13.0.88** is validated with the full SDK described in the README. The recipe's
 12.8 minimum does not imply compiler compatibility: tested NVCC **12.8.93** has a
@@ -83,35 +37,35 @@ build. Compatibility probes are under ignored
 
 ## Current Release SF1 run
 
-This is the last **complete five-query baseline**, before the chunked-I/O change
-above. Successful command from the Vortex root:
+The **complete optimized five-query matrix** covers Q1/Q5/Q6/Q9/Q10,
+Parquet/Vortex × read/full-query × warm/cold, including all three Q9 amount engines.
+Successful command from the Vortex root:
 
 ```sh
 python3 -B benchmarks/cudf-ndsh/reproduce.py run \
   --work-dir=/home/ubuntu/vortex/build/cudf-ndsh-repro-cuda130-release-v2 \
-  --scale-factor=1 --timeout=1200 --min-samples=3 --sample-timeout=30
+  --scale-factor=1 --timeout=1200 --min-samples=100 --sample-timeout=5
 ```
 
 Artifacts below are relative to ignored `build/cudf-ndsh-repro-cuda130-release-v2/`:
 
-- Initial build: `logs/20260914T171459.140647Z/`.
-- Completion/provenance recovery: `logs/20260914T172951.677938Z/`.
-- Successful run: `logs/20260914T173000.589177Z/`.
-- Results: `results/20260914T173000.589488Z/sf1-q{1,5,6,9,10}.json`, with
-  `build.json` (hashes/toolchain/`resumed_from`) and `run.json` in the same directory.
+- Incremental build: `logs/20260915T054809.795368Z/`.
+- Successful run: `logs/20260915T054834.964399Z/`.
+- Results: `results/20260915T054834.964684Z/sf1-q{1,5,6,9,10}.json`, with
+  refreshed `build.json` and `run.json` in the same directory.
 
-Recorded checks at this checkpoint (not rerun for this documentation update):
+Recorded checks from this run (not rerun for this documentation update):
 
 | Check                                              | Result                                    |
 | -------------------------------------------------- | ----------------------------------------- |
-| Fresh Release cuDF + Vortex / executables          | Built / 7 of 7 built                      |
-| Build smoke / adapter tests                        | Passed / 15 passed                        |
-| Offline harness / CUDA CMake tests                 | 38 passed / 8 passed                      |
+| Incremental build                                  | All 7 targets passed in 12.7 s            |
+| Build smoke / adapter tests                        | Passed again / 15 passed; no skips        |
 | SF1 read/query × format × cache × Q9 engine matrix | 56 unique, valid passing states; no skips |
-| Sampling                                           | 20–1,376 samples/state; 31,226 total      |
+| Sampling                                           | 100–1,040 samples/state; 20,893 total     |
 
-No runtime hard errors occurred. **No current-source memcheck was run**; sanitizer
-results below are historical only.
+The **33 focused CUDA tests passed for `98b3d12746`** and remain relevant to this
+unchanged source; they were **not rerun today**. Current-source memcheck, SF10, and
+post-change profiles remain pending. Sanitizer results below are historical only.
 
 ### Dataset and match counts
 
@@ -126,8 +80,10 @@ Exact projected values and independent CPU references passed for both formats:
 | Q9 (all engines) |       64,353 | 175 nation/year groups |
 | Q10              |            0 | 0 customers            |
 
-Q6/Q10 are degenerate: their timings establish execution/read behavior, **not
-meaningful nonempty full-query performance**.
+Match counts are unchanged. Q6/Q10 are degenerate: their timings establish
+execution/read behavior and empty-result correctness, **not meaningful nonempty
+full-query performance**. Despite the SF1 timing threshold being met, the full
+SF1/SF10 goal is **not yet established**.
 
 ### CPU-wall timings
 
@@ -138,32 +94,70 @@ eviction, not all caches**, with `O_DIRECT` Vortex data reads versus native Parq
 
 | Query / engine | Cache | Parquet read | Vortex read | Parquet query | Vortex query |
 | -------------- | ----- | -----------: | ----------: | ------------: | -----------: |
-| Q1             | warm  |       14.068 |       6.348 |        18.760 |       10.800 |
-| Q1             | cold  |       18.808 |       5.593 |        23.676 |       10.167 |
-| Q5             | warm  |       17.512 |       8.423 |        20.514 |       11.242 |
-| Q5             | cold  |       22.463 |       9.167 |        25.540 |       12.088 |
-| Q6             | warm  |        7.914 |       4.105 |         8.390 |        4.604 |
-| Q6             | cold  |       11.074 |       3.241 |        11.658 |        3.807 |
-| Q9 binaryop    | warm  |       27.020 |       8.510 |        30.128 |       11.536 |
-| Q9 AST         | warm  |       26.999 |       8.491 |        29.984 |       11.453 |
-| Q9 transform   | warm  |       27.007 |       8.503 |        30.020 |       11.516 |
-| Q9 binaryop    | cold  |       32.746 |       9.322 |        36.044 |       12.125 |
-| Q9 AST         | cold  |       32.865 |       9.248 |        35.877 |       12.160 |
-| Q9 transform   | cold  |       32.749 |       9.279 |        36.090 |       12.268 |
-| Q10            | warm  |       26.096 |      11.065 |        27.366 |       12.393 |
-| Q10            | cold  |       30.724 |      10.872 |        32.125 |       11.882 |
+| Q1             | warm  |       14.032 |       3.904 |        18.835 |        8.422 |
+| Q1             | cold  |       18.872 |       4.420 |        23.812 |        8.955 |
+| Q5             | warm  |       17.613 |       5.998 |        20.494 |        8.898 |
+| Q5             | cold  |       22.494 |       7.323 |        25.421 |       10.145 |
+| Q6             | warm  |        7.890 |       1.772 |         8.395 |        2.279 |
+| Q6             | cold  |       11.096 |       2.191 |        11.648 |        2.733 |
+| Q9 binaryop    | warm  |       26.837 |       6.027 |        30.012 |        9.122 |
+| Q9 binaryop    | cold  |       32.766 |       7.726 |        36.170 |       10.724 |
+| Q9 AST         | warm  |       26.896 |       6.047 |        29.955 |        8.932 |
+| Q9 AST         | cold  |       32.864 |       7.700 |        35.998 |       10.665 |
+| Q9 transform   | warm  |       26.915 |       6.034 |        29.954 |        9.012 |
+| Q9 transform   | cold  |       32.867 |       7.690 |        36.080 |       10.723 |
+| Q10            | warm  |       26.084 |       8.161 |        27.399 |        9.284 |
+| Q10            | cold  |       30.815 |       9.122 |        32.265 |       10.643 |
 
 Q9 read is repeated under three engine labels; these are not three distinct read
-implementations. Across the 28 labeled Parquet/Vortex comparisons, speedups range
-from **1.74× to 3.55×**, with **24/28 ≥2×**. The four below target are warm Q1 query
-(1.74×), Q5 query (1.82×), Q6 read (1.93×) and Q6 query (1.82×).
+implementations. **All 28 labeled Parquet/Vortex pairs reach ≥2×**, with speedups
+ranging from **2.24× to 5.06×**. Ratios use unrounded CPU-wall means.
 
-Median CPU relative standard deviation is **1.30%**; 8 states exceed 5%, including
-3 above 10%: Vortex Q1 cold read **11.52%**, Q6 cold read **11.45%**, and Q6 cold
-query **10.39%**. Two NVBench sampling-timeout warnings still emitted valid passes:
-Parquet Q9 binaryop warm read (**1,109 samples, 0.59% CPU SD**) and Parquet Q9 AST
-warm query (**1,000 samples, 0.75% CPU SD**). These hit the 30-second sampling limit
-above NVBench's 0.50% GPU-noise threshold, not the runner's 1,200-second command limit.
+CPU relative standard deviation has median **1.25%**, maximum **3.01%**;
+**no states exceed 5%**. There were **35 NVBench sampling-limit warnings** at the
+5-second limit with a 0.5% GPU-noise target. All warned states still report **PASS**;
+these are sampling warnings, not runner failures or the 1,200-second command timeout.
+
+## Historical SF1 measurements
+
+The pre-optimization full matrix at `91142e2c18` passed all 56 states, with 24/28
+labeled pairs ≥2× (1.74–3.55×). It used `--min-samples=3 --sample-timeout=30`:
+20–1,376 samples/state, 31,226 total; median CPU relative SD 1.30%, eight states >5%,
+and two sampling-limit warnings. Offline harness / CUDA CMake checks passed 38 / 8.
+Results and build/run records remain under
+`build/cudf-ndsh-repro-cuda130-release-v2/results/20260914T173000.589488Z/`.
+The initial build and completion logs are `logs/20260914T171459.140647Z/` and
+`logs/20260914T172951.677938Z/` in that work directory; the prior build record's
+`resumed_from` identifies recovery after an interrupted runner. These are historical,
+not the current binary identity or timing baseline.
+
+The focused experiment for `98b3d12746` reduced Q1/Q6 Vortex latency by **14–54%**:
+all 16 states passed, with all eight comparisons >2×. Direct NVBench runs used
+`--min-samples 100 --timeout 5`; Vortex after-run CPU relative SD was 1.5–6.2%,
+versus 8.0–13.8% for before-run cold states. Q6 remained empty. Targeted Release
+consumers built, and **15 adapter tests plus 33 focused CUDA tests passed**, with no
+ignored tests. Rust filters were `pinned::tests` and `pooled_read_at::file::tests`,
+using `cargo test --locked --offline -p vortex-cuda --lib --features _test-harness`,
+the CMake-selected Release toolchain/target, and `--test-threads=1`.
+
+The pre-change Nsight Q6 warm read spent 3.698 ms in one 47.98 MB `pread`, versus
+0.093 ms executing decode kernels. These are instrumented observations, not benchmark
+timings. The optimization splits large reads into 4 MiB chunks, at most 32 concurrent
+host reads per file, transferring completed chunks into one GPU allocation.
+Fixtures, encodings, projections, cuDF operations, and the timing/cache contract
+are unchanged. No post-change profile has been collected.
+
+Focused artifacts under ignored `build/cudf-ndsh-perf-20260914/`:
+
+- `baseline-sf1-q{1,6}.json` and `chunked-sf1-q{1,6}.json`.
+- `baseline-build.json`, `baseline-binaries/`, and `chunked-provenance.json`
+  (source/binary hashes; benchmarks ran before the source commit).
+- Baseline profiles: `baseline-q6-{warm,cold}.sqlite`, `baseline-q1-warm.sqlite`;
+  range-scoped analysis: `derived-final-read-analysis.json`.
+- Logs: `logs/20260914T203030.285386Z/` (before) and
+  `logs/20260914T204642.079773Z/` (after and adapter checks).
+- `focused-tests-summary.json` and `focused-tests-sanitized-{build,pinned,pooled}.json`
+  record exact test commands and results.
 
 ## Historical isolated build
 
@@ -196,7 +190,7 @@ Records under ignored `build/cudf-ndsh-sf1-rebased/`:
 
 ## Historical source checks
 
-These checks preceded the rebase and are not validation of `91142e2c18`:
+These checks preceded the rebase and do not validate the current source:
 
 | Check                                                           | Result                    |
 | --------------------------------------------------------------- | ------------------------- |
@@ -348,4 +342,5 @@ cuDF and adds `NDSH_DATA_GENERATOR_TEST`. Its changes affect all NDS-H consumers
 including Vortex OFF. Selecting this dataset requires regenerated paired fixtures
 and separately labeled baselines.
 
-All benchmark JSON, logs, Nsight reports, and SQLite exports are ignored.
+All required sources are tracked. Runtime benchmark artifacts, including JSON,
+logs, binaries, Nsight reports, and SQLite exports, are ignored.

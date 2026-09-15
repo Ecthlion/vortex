@@ -2,7 +2,9 @@
 
 **Goal:** [Benchmark-only upstream POC](https://github.com/NVIDIA/cudf/issues/23877#issuecomment-5457730105)
 comparing Vortex with Parquet: **≥2× for both end-to-end projected reads and queries
-across Q1/Q5/Q6/Q9/Q10 at SF1/SF10, warm and cold**. The goal is **not met**.
+across Q1/Q5/Q6/Q9/Q10 at SF1/SF10, warm and cold**. The full goal is **not yet
+established**: optimized SF1 meets the timing threshold, but Q6/Q10 results are empty
+and current-source SF10 remains pending.
 
 [Setup](benchmarks/cudf-ndsh/README.md) · [Validation](benchmarks/cudf-ndsh/VALIDATION.md) · [Progress](benchmarks/cudf-ndsh/PROGRESS.md)
 
@@ -16,16 +18,15 @@ synthetic cases check correctness outside timing. See the README for the
 
 ## Next steps
 
-**Chunked I/O at `98b3d12746` improves Q1/Q6 SF1 latency by 14–54%**; all eight
-warm/cold read/query comparisons exceed 2× Parquet. The last complete five-query
-baseline is `91142e2c18` (56 passing states, 24/28 comparisons ≥2×). Q6/Q10 have
-empty results with the original generator. See
-[Validation](benchmarks/cudf-ndsh/VALIDATION.md).
+**Optimized SF1 is complete at `b414dd8307`** (chunked-I/O source `98b3d12746`):
+all 56 warm/cold read/query states pass, with all 28 labeled Parquet/Vortex pairs
+≥2× (**2.24–5.06×**). Smoke and 15 adapter tests pass again, with no skips.
+See [Validation](benchmarks/cudf-ndsh/VALIDATION.md#current-release-sf1-run) for the
+current timings, sampling caveats, and provenance.
 
-1. Finish Q5/Q9/Q10 SF1 comparisons with the improved I/O path and validate memcheck
-   when requested.
+1. Run current-source memcheck validation when requested.
 2. Collect SF10 warm/cold read/query baselines. Label the generator choice and match
    counts; use nondegenerate results for full-query performance claims.
-3. Profile bottlenecks and optimize. Scale to SF100 once these matrices are stable,
-   accounting for Vortex and RMM memory separately.
+3. Collect post-change profiles, then optimize measured bottlenecks. Scale to SF100
+   once these matrices are stable, accounting for Vortex and RMM memory separately.
 4. Publish validated revisions and prerequisites, then prepare the upstream POC.

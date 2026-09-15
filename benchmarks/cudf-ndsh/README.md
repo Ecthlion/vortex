@@ -18,10 +18,13 @@ Native Parquet-pushdown/output benchmarks remain separate.
 - [`vortex.cmake`](vortex.cmake) builds the harness and Vortex library from the same
   checkout. [`tests/`](tests/) contains the adapter and build-smoke executables.
 
-**Release SF1 full-matrix baseline: `91142e2c18`**, 56 passing states on GH200 with
-CUDA 13.0.88 and GCC 14.3.0. The chunked-I/O update at `98b3d12746` improves Q1/Q6
-latency by 14–54%; the other three queries await new measurements.
-See [Validation](VALIDATION.md) for timings, provenance, and limitations.
+**Optimized Release SF1 full matrix: `b414dd8307`** (chunked-I/O source `98b3d12746`):
+all 56 warm/cold read/query states pass, and all 28 labeled format pairs reach ≥2×
+(2.24–5.06×). Smoke and 15 adapter tests pass again, with no skips. The full
+SF1/SF10 goal remains open: original-generator Q6/Q10 results are empty,
+and current-source SF10, memcheck, and post-change profiles remain pending.
+See [Validation](VALIDATION.md#current-release-sf1-run) for timings, provenance, and
+sampling caveats.
 
 ## I/O and timing contract
 
@@ -124,6 +127,10 @@ binary/library hashes, runs smoke and adapter checks, then runs Q1/Q5/Q6/Q9/Q10
 **sequentially on device 0**.
 Each query covers Parquet/Vortex × read/full-query × warm/cold; Q9 covers all three existing
 amount engines. Correctness checks and fixture generation remain outside timing.
+The current `build.json` was refreshed after a successful incremental build at clean
+`b414dd8307`, with actual identity and binary hashes; `recipe.json` retains the
+initial configure. This does not replace rebuilding in a fresh work directory for
+changed source/configuration.
 Use `--scale-factor 10` for SF10, or `--queries 6` for a focused run.
 
 Commands, selected environment and tool versions go under `<work-dir>/logs/`;

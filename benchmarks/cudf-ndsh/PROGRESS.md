@@ -11,24 +11,26 @@ GPU decompression, and independent correctness checks. The README defines the
 [dataset choices](README.md#dataset-and-correctness), and
 [tracked Release build/run recipe](README.md#build-from-a-clean-checkout).
 
-**Chunked-I/O optimization `98b3d12746`: Q1/Q6 pass all 16 SF1 states**, plus 15
-adapter tests and 33 focused CUDA tests. Splitting large reads into 4 MiB chunks
-reduces Vortex latency by 14–54%; all eight Q1/Q6 comparisons now exceed 2× Parquet.
-Toolchain: Release, CUDA 13.0.88 / GCC 14.3.0 on GH200.
+**Optimized SF1 is complete at clean `b414dd8307`** (docs-only changes beyond
+chunked-I/O source `98b3d12746`). All five queries, including all three Q9 engines,
+pass all **56 warm/cold read/query states**; all **28 labeled format pairs are ≥2×**
+(2.24–5.06×). The seven-target incremental build succeeded in 12.7 s; smoke and
+15 adapter tests pass again, with no skips. The 33 focused CUDA tests from
+`98b3d12746` remain relevant but were not rerun today.
 
-The last complete five-query baseline is `91142e2c18`: all 56 states pass, with
-24/28 comparisons reaching 2×. Q5/Q9/Q10 await measurements with the new I/O path.
-The original generator produces empty Q6/Q10 results; those full-query timings
-are not representative of nonempty queries. [Validation](VALIDATION.md) records
-results, profiles, and provenance.
+Toolchain checked: Release, NVCC 13.0.88 / GCC 14.3.0 on GH200, driver 595.71.05.
+The original generator still produces empty Q6/Q10 results, so their full-query
+timings do not establish nonempty-query performance. The full SF1/SF10 goal remains
+open. [Validation](VALIDATION.md#current-release-sf1-run) records current
+timings, sampling caveats, and provenance; earlier measurements are historical.
 
 ## Next steps
 
-1. Finish Q5/Q9/Q10 SF1 comparisons and profile the improved read path. The last
-   remaining-query build was interrupted; inspect its process/log state before resuming.
+1. Collect post-change profiles of the improved read path; the full SF1 matrix is done.
 2. Run current-source memcheck validation when requested, then collect SF10 baselines.
-   Run GPU benchmarks sequentially and report generator choice and match counts. Use nondegenerate results for full-query
-   performance claims; collect generator-fixed comparisons separately if selected.
+   Run GPU benchmarks sequentially and report generator choice and match counts.
+   Use nondegenerate results for full-query performance claims; collect generator-fixed
+   comparisons separately if selected.
 3. Profile full reads and queries using the
    [profiling safety guard](VALIDATION.md#profile-evidence-and-safety), then optimize
    the measured bottlenecks. Scale to SF100 once matrices are stable, with separate
@@ -48,9 +50,14 @@ results, profiles, and provenance.
   `build/cudf-ndsh-build`, whose dependencies have advanced and whose objects are
   mixed-era. Historical isolated-build artifacts remain under
   `build/cudf-ndsh-sf1-rebased/`; they are not inputs to the new recipe.
-- Complete baseline results: `build/cudf-ndsh-repro-cuda130-release-v2/results/20260914T173000.589488Z/`.
-  The build directory has since been rebuilt incrementally; its old `build.json` no longer
-  describes all binaries. Use a fresh work directory for `reproduce.py build`.
-- Optimization results and preserved baseline binaries: `build/cudf-ndsh-perf-20260914/`.
-- Benchmark JSON, logs, binaries, Nsight reports, and SQLite exports are ignored.
+- Current SF1 results: `build/cudf-ndsh-repro-cuda130-release-v2/results/20260915T054834.964684Z/`.
+  After the successful incremental build, `build.json` was refreshed at clean
+  `b414dd8307` with actual identity and binary hashes; `run` requires the recorded
+  clean revision. `recipe.json` still describes the initial configure. Use a fresh
+  work directory for `reproduce.py build` after source/configuration changes.
+- Historical optimization results and preserved baseline binaries:
+  `build/cudf-ndsh-perf-20260914/`; earlier full-matrix provenance is linked in
+  [Validation](VALIDATION.md#historical-sf1-measurements).
+- All required sources are tracked. Benchmark JSON, logs, binaries, Nsight reports,
+  and SQLite exports are ignored.
   Old profiles contain sensitive environment metadata; follow the profiling safety guard.
