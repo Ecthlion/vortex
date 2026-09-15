@@ -1,15 +1,70 @@
 # Validation
 
-Checkpoint: 2026-09-14. Built/run Vortex source: `91142e2c18`
-(full revision `91142e2c18733e2c45515271439c3934d3fd2f9e`). Pinned cuDF:
+Checkpoint: 2026-09-15. Chunked-I/O source: `98b3d12746`.
+Full-matrix baseline source: `91142e2c18`. Pinned cuDF:
 `5339497a1a17d799687cbf189fb113411fb015ca`, Release (`-O3 -DNDEBUG`).
 Hardware/toolchain: NVIDIA GH200, driver **595.71.05**, NVCC **13.0.88**, GCC **14.3.0**.
 [Current state](PROGRESS.md) · [Setup and commands](README.md)
 
+## Chunked-I/O optimization (SF1)
+
+Nsight identified large host reads as the main bottleneck: the final Q6 warm read
+spent 3.698 ms in one 47.98 MB `pread`, versus 0.093 ms executing decode kernels.
+These are instrumented observations, not benchmark timings.
+
+`98b3d12746` splits large reads into 4 MiB chunks on the existing I/O runtime, with
+at most 32 concurrent host reads per open file. Completed chunks transfer directly
+into one GPU allocation. Fixtures, encodings, projections, and cuDF operations are
+unchanged.
+
+The following uninstrumented CPU-wall means are in **ms**. Before and after use
+`--min-samples 100 --timeout 5`; Parquet is from the after run. Queries include reads.
+
+| Query | Cache | Workload | Vortex before | Vortex after | Parquet | Parquet / after |
+| ----- | ----- | -------- | ------------: | -----------: | ------: | --------------: |
+| Q1    | warm  | read     |         6.298 |        4.141 |  14.062 |           3.40× |
+| Q1    | cold  | read     |         6.070 |        4.466 |  18.887 |           4.23× |
+| Q1    | warm  | query    |        10.686 |        8.618 |  18.876 |           2.19× |
+| Q1    | cold  | query    |        10.412 |        8.938 |  23.809 |           2.66× |
+| Q6    | warm  | read     |         4.036 |        1.875 |   7.937 |           4.23× |
+| Q6    | cold  | read     |         3.017 |        2.141 |  11.113 |           5.19× |
+| Q6    | warm  | query    |         4.568 |        2.435 |   8.429 |           3.46× |
+| Q6    | cold  | query    |         3.809 |        2.728 |  11.625 |           4.26× |
+
+All 16 states passed correctness checks. Q1 has 4,497,687 matches/four groups;
+**Q6 still has zero matches and SUM NULL**, so its full-query timings do not establish
+nonempty-query performance. Vortex after-run CPU relative SD ranges from 1.5–6.2%;
+before-run cold measurements were noisier (8.0–13.8%). Five-second sampling limits
+can emit timeout warnings while still producing valid results.
+
+Validation: targeted Release consumers built; **15 adapter tests and 33 focused
+CUDA tests passed**, with no ignored tests. Rust filters were `pinned::tests` and
+`pooled_read_at::file::tests`, using `cargo test --locked --offline -p vortex-cuda
+--lib --features _test-harness`, the CMake-selected Release toolchain/target, and
+`--test-threads=1`.
+
+Artifacts under ignored `build/cudf-ndsh-perf-20260914/`:
+
+- `baseline-sf1-q{1,6}.json` and `chunked-sf1-q{1,6}.json`.
+- `baseline-build.json`, `baseline-binaries/`, and `chunked-provenance.json`
+  (source/binary hashes; benchmarks ran before the source commit).
+- Baseline profile files: `baseline-q6-{warm,cold}.sqlite`, `baseline-q1-warm.sqlite`;
+  range-scoped analysis: `derived-final-read-analysis.json`.
+- Commands/logs: `logs/20260914T203030.285386Z/` (before) and
+  `logs/20260914T204642.079773Z/` (after and adapter checks).
+- `focused-tests-summary.json` and `focused-tests-sanitized-{build,pinned,pooled}.json`
+  record exact test commands and results.
+
+Q5/Q9/Q10 measurements with this change, SF10, and current memcheck remain pending.
+The remaining-query rebuild was interrupted; inspect it before resuming. The
+original work directory now contains incrementally rebuilt artifacts, so its old
+`build.json` no longer describes all binaries. Use a fresh work directory for the
+tracked clean-build recipe; preserved baseline binaries remain in the experiment directory.
+
 ## Current build status
 
-The [build recipe](README.md#build-from-a-clean-checkout) produced fresh Release
-cuDF and CUDA-enabled Vortex, plus **all seven executables**. After the Python runner
+At baseline `91142e2c18`, the [build recipe](README.md#build-from-a-clean-checkout)
+produced fresh Release cuDF and CUDA-enabled Vortex, plus **all seven executables**. After the Python runner
 was interrupted, its CMake child finished. An incremental target build passed
 (**0.5 s, exit 0**); source and toolchain checks then allowed recovery of the binary
 hash record through `reproduce.py` helpers. `resumed_from` identifies the original logs.
@@ -28,7 +83,8 @@ build. Compatibility probes are under ignored
 
 ## Current Release SF1 run
 
-Successful command from the Vortex root:
+This is the last **complete five-query baseline**, before the chunked-I/O change
+above. Successful command from the Vortex root:
 
 ```sh
 python3 -B benchmarks/cudf-ndsh/reproduce.py run \

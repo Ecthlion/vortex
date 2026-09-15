@@ -18,9 +18,10 @@ Native Parquet-pushdown/output benchmarks remain separate.
 - [`vortex.cmake`](vortex.cmake) builds the harness and Vortex library from the same
   checkout. [`tests/`](tests/) contains the adapter and build-smoke executables.
 
-**Release SF1 passes at `91142e2c18`** on GH200 with CUDA 13.0.88 and GCC 14.3.0:
-all seven executables built, smoke and 15 adapter checks passed, and all 56 benchmark
-states passed. See [Validation](VALIDATION.md) for timings, provenance, and limitations.
+**Release SF1 full-matrix baseline: `91142e2c18`**, 56 passing states on GH200 with
+CUDA 13.0.88 and GCC 14.3.0. The chunked-I/O update at `98b3d12746` improves Q1/Q6
+latency by 14–54%; the other three queries await new measurements.
+See [Validation](VALIDATION.md) for timings, provenance, and limitations.
 
 ## I/O and timing contract
 
@@ -28,10 +29,13 @@ states passed. See [Validation](VALIDATION.md) for timings, provenance, and limi
 - Write: 16,777,216-row cuDF chunks → compact host Arrow → CPU-compressed CUDA-flat
   blocks. Explicit row blocks disable byte coalescing and outer layout dictionaries.
 - Read: pooled cacheable pinned-host staging → HtoD → GPU decode → retained Arrow
-  Device imports → one final owning cuDF materialization. The adapter uses device 0,
-  local files, flat typed columns, and ordered top-level projections, with up to 8 GiB
+  Device imports → one final owning cuDF materialization. Large file reads use 4 MiB
+  chunks, up to 32 concurrent host reads per file, and one destination GPU allocation.
+  The adapter uses device 0, local files, flat typed columns, and ordered top-level
+  projections, with up to 8 GiB
   retained in CUDA's default memory pool between synchronized reads. Peak read memory
-  includes retained Vortex batches and the owning result; chunking is row-based.
+  includes retained Vortex batches and the owning result. File blocks and output
+  batches are row-based.
 - `cache=warm` uses buffered reads with the existing OS page cache. `cache=cold`
   measures **OS-page-cache coldness**: before every manual cold callback's timed
   portion, each selected-format file receives `fdatasync` + `POSIX_FADV_DONTNEED`,
