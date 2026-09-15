@@ -10,7 +10,6 @@
 #include <cudf/utilities/error.hpp>
 #include <cudf/wrappers/timestamps.hpp>
 
-#include <algorithm>
 #include <cstdint>
 
 namespace ndsh {
@@ -27,17 +26,12 @@ inline q6_reference_result q6_cpu_reference(cudf::table_view projected, cuda::st
   if (projected.num_rows() == 0) return result;
   using enum cudf::type_id;
   detail::reference_schema(projected, {FLOAT64, FLOAT64, TIMESTAMP_DAYS, INT8});
-  for (cudf::size_type offset = 0; offset < projected.num_rows();) {
-    auto const count = std::min<cudf::size_type>(1 << 20, projected.num_rows() - offset);
-    auto values = [&](auto type, int index) {
-      return detail::reference_host_copy(
-        projected.column(index).data<decltype(type)>() + offset, count, stream);
-    };
-    auto const price    = values(double{}, 0);
-    auto const discount = values(double{}, 1);
-    auto const shipdate = values(cudf::timestamp_D{}, 2);
-    auto const quantity = values(int8_t{}, 3);
-    for (cudf::size_type i = 0; i < count; ++i) {
+  detail::for_reference_batches(projected, stream, [&](detail::reference_batch const& batch) {
+    auto const price    = batch.values<double>(0);
+    auto const discount = batch.values<double>(1);
+    auto const shipdate = batch.values<cudf::timestamp_D>(2);
+    auto const quantity = batch.values<int8_t>(3);
+    for (cudf::size_type i = 0; i < batch.count; ++i) {
       auto const date = shipdate[i].time_since_epoch().count();
       auto const d    = static_cast<float>(discount[i]);
       auto const q    = static_cast<float>(quantity[i]);
@@ -47,8 +41,7 @@ inline q6_reference_result q6_cpu_reference(cudf::table_view projected, cuda::st
         result.revenue += price[i] * discount[i];
       }
     }
-    offset += count;
-  }
+  });
   return result;
 }
 }  // namespace ndsh

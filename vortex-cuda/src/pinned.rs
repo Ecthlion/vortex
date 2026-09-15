@@ -459,66 +459,46 @@ mod tests {
     }
 
     #[rstest]
-    #[case::nonzero_range(3..9, 2..8)]
-    #[case::empty_at_end(16..16, 4..4)]
+    #[case::nonzero_range(3, 9, 2..8, false)]
+    #[case::empty_at_end(16, 16, 4..4, false)]
+    #[case::reversed(6, 2, 2..6, true)]
+    #[case::end_past_logical_length(4, 11, 2..9, true)]
+    #[case::start_past_logical_length(11, 11, 2..2, true)]
+    #[case::destination_too_short(2, 6, 2..5, true)]
+    #[case::destination_too_long(2, 6, 2..7, true)]
+    #[case::extreme_end(0, usize::MAX, 2..6, true)]
     #[crate::test]
     fn copy_to_device_subview(
-        #[case] source_range: Range<usize>,
-        #[case] destination_range: Range<usize>,
-    ) -> VortexResult<()> {
-        let (pool, stream) = setup()?;
-        let data: Vec<u8> = (0..16).collect();
-        let mut pinned = pool.get(data.len())?;
-        pinned.as_mut_slice().copy_from_slice(&data);
-
-        let mut expected = [0xA5u8; 12];
-        let mut destination = stream
-            .clone_htod(&expected)
-            .map_err(|e| vortex_err!("Failed to initialize destination: {e}"))?;
-        expected[destination_range.clone()].copy_from_slice(&data[source_range.clone()]);
-        pinned.copy_to_device(
-            &stream,
-            source_range,
-            &mut destination.slice_mut(destination_range),
-        )?;
-
-        let host = CudaDeviceBuffer::new(destination).copy_to_host_sync(Alignment::of::<u8>())?;
-        assert_eq!(host.as_ref(), &expected[..]);
-        Ok(())
-    }
-
-    #[rstest]
-    #[case::reversed(6, 2, 4)]
-    #[case::end_past_logical_length(4, 11, 7)]
-    #[case::start_past_logical_length(11, 11, 0)]
-    #[case::destination_too_short(2, 6, 3)]
-    #[case::destination_too_long(2, 6, 5)]
-    #[case::extreme_end(0, usize::MAX, 4)]
-    #[crate::test]
-    fn copy_to_device_rejects_invalid_input(
         #[case] start: usize,
         #[case] end: usize,
-        #[case] destination_len: usize,
+        #[case] destination_range: Range<usize>,
+        #[case] reject: bool,
     ) -> VortexResult<()> {
         let (pool, stream) = setup()?;
-        let mut pinned = pool.get(10)?;
-        pinned.as_mut_slice().fill(0xAB);
-        let expected = [0xA5u8; 16];
+        let data: Vec<u8> = if reject {
+            vec![0xAB; 10]
+        } else {
+            (0..16).collect()
+        };
+        let mut pinned = pool.get(data.len())?;
+        pinned.as_mut_slice().copy_from_slice(&data);
+        let mut expected = vec![0xA5u8; if reject { 16 } else { 12 }];
         let mut destination = stream
             .clone_htod(&expected)
             .map_err(|e| vortex_err!("Failed to initialize destination: {e}"))?;
-
-        assert!(
-            pinned
-                .copy_to_device(
-                    &stream,
-                    start..end,
-                    &mut destination.slice_mut(2..2 + destination_len),
-                )
-                .is_err()
+        let result = pinned.copy_to_device(
+            &stream,
+            start..end,
+            &mut destination.slice_mut(destination_range.clone()),
         );
-        assert!(pool.inflight.lock().is_empty());
-        assert_eq!(pool.stats().puts, 1);
+        if reject {
+            assert!(result.is_err());
+            assert!(pool.inflight.lock().is_empty());
+            assert_eq!(pool.stats().puts, 1);
+        } else {
+            result?;
+            expected[destination_range].copy_from_slice(&data[start..end]);
+        }
         let host = CudaDeviceBuffer::new(destination).copy_to_host_sync(Alignment::of::<u8>())?;
         assert_eq!(host.as_ref(), &expected[..]);
         Ok(())

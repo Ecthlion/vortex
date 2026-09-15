@@ -121,42 +121,14 @@ struct q5_files {
   explicit q5_files(double scale_factor)
   {
     check_q5_boundaries();
-    cuda::stream_ref const stream = cudf::get_default_stream();
-    ndsh::vortex_io io{stream.get()};
-    {
-      ndsh::q5_reference_builder builder;
-      for_each_generated_table(
-        scale_factor, q5_tables, [&](std::string const& name, table_with_names const& generated) {
-          tables.write(name, generated, io);
-          auto const& columns  = q5_projections.at(name);
-          auto const projected = generated.select(columns);
-          builder.add_table(name, projected, stream);
-          ndsh::check_file_projections(tables, name, projected, columns, io);
-          CUDF_CUDA_TRY(cudaDeviceSynchronize());
-        });
-      reference = builder.finish();
-    }
-
-    for (bool use_vortex : {false, true}) {
-      auto result = execute_q5(
-        [&](std::string const& name,
-            std::vector<std::string> const& columns,
-            std::unique_ptr<cudf::ast::operation> const&) {
-          return ndsh::read_local_file(tables.path(name, use_vortex), use_vortex, io, columns);
-        },
-        true);
-      ndsh::check_q5_result(reference, *result, stream);
-    }
-    CUDF_CUDA_TRY(cudaDeviceSynchronize());
+    ndsh::make_reference_files<ndsh::q5_reference_builder>(
+      scale_factor, tables, reference, q5_tables, q5_projections, false,
+      [&](auto&& read, cuda::stream_ref stream) {
+        auto result = execute_q5(read, true);
+        ndsh::check_q5_result(reference, *result, stream);
+      });
   }
 };
-
-q5_files const& q5_fixture(double scale_factor)
-{
-  // Share only files and the CPU result across format/workload states at this SF.
-  static std::map<double, q5_files> fixtures;
-  return fixtures.try_emplace(scale_factor, scale_factor).first->second;
-}
 
 void ndsh_q5_local(nvbench::state& state)
 {
@@ -166,7 +138,7 @@ void ndsh_q5_local(nvbench::state& state)
   CUDF_EXPECTS(format == "parquet" || format == "vortex", "Unknown Q5 format");
   CUDF_EXPECTS(workload == "read" || workload == "q5", "Unknown Q5 workload");
   auto const use_vortex         = format == "vortex";
-  auto const& files             = q5_fixture(state.get_float64("scale_factor"));
+  auto const& files             = ndsh::local_fixture<q5_files>(state.get_float64("scale_factor"));
   cuda::stream_ref const stream = cudf::get_default_stream();
   state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.get()));
   auto const memory = cudf::memory_stats_logger();

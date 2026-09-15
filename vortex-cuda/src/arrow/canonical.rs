@@ -1802,7 +1802,49 @@ mod tests {
         let buffer = private_data.buffers[buffer_idx]
             .as_ref()
             .vortex_expect("buffer should be present");
+        assert!(buffer.is_on_device());
         Ok(buffer.to_host_sync())
+    }
+
+    // Unlike ensure_on_device, exact-sized uploads expose missing padding and partial-word
+    // overreads, including when the resulting device buffer is byte-sliced.
+    fn upload_unpadded(
+        bytes: &ByteBuffer,
+        ctx: &mut CudaExecutionCtx,
+    ) -> VortexResult<BufferHandle> {
+        let mut allocation = ctx.device_alloc::<u8>(bytes.len())?;
+        ctx.stream()
+            .memcpy_htod(bytes.as_ref(), &mut allocation)
+            .map_err(|err| vortex_err!("Failed to upload unpadded test buffer: {err}"))?;
+        Ok(BufferHandle::new_device(Arc::new(CudaDeviceBuffer::new(
+            allocation,
+        ))))
+    }
+
+    fn assert_bitmap_padding(
+        buffer: &BufferHandle,
+        logical_bytes: usize,
+        exact_allocation: bool,
+    ) -> VortexResult<ByteBuffer> {
+        assert!(buffer.is_on_device());
+        assert_eq!(buffer.len(), logical_bytes);
+        let pointer = buffer.cuda_device_ptr()?;
+        assert!(pointer.is_multiple_of(size_of::<u32>() as u64));
+        let padded_bytes = logical_bytes.next_multiple_of(CUDF_VALIDITY_BUFFER_PADDING);
+        let backing = cuda_backing_allocation(buffer)?;
+        let start = usize::try_from(pointer - backing.cuda_device_ptr()?)?;
+        // Sliced exports may retain a larger allocation; repacked outputs must be exact-sized.
+        if exact_allocation {
+            assert_eq!(backing.len(), padded_bytes);
+        }
+        assert!(start + padded_bytes <= backing.len());
+        let bytes = backing.try_to_host_sync()?;
+        assert!(
+            bytes[start + logical_bytes..start + padded_bytes]
+                .iter()
+                .all(|byte| *byte == 0)
+        );
+        Ok(bytes.slice_unaligned(start..start + logical_bytes))
     }
 
     // Assert Arrow Binary export uses the standard null bitmap, i32 offsets, and values layout.
@@ -2312,27 +2354,31 @@ mod tests {
     }
 
     #[rstest]
+    #[case::host(3, false)]
+    #[case::device(3, true)]
+    #[case::empty(0, false)]
     #[crate::test]
-    async fn test_export_bool(#[values(false, true)] on_device: bool) -> VortexResult<()> {
+    async fn test_export_bool(#[case] len: usize, #[case] on_device: bool) -> VortexResult<()> {
         let mut ctx = CudaSession::create_execution_ctx(&crate::cuda_session())?;
 
-        let array = BoolArray::from_iter([true, false, true]).into_array();
+        let array = BoolArray::from_iter([true, false, true].into_iter().take(len)).into_array();
         let array = if on_device {
             upload(array, &mut ctx).await?
         } else {
             array
         };
-        let input_values = array.buffer_handles()[0].clone();
+        let input_values = on_device.then(|| array.buffer_handles()[0].clone());
         let mut device_array = array.export_device_array(&mut ctx).await?;
 
-        assert_eq!(device_array.array.length, 3);
+        assert_eq!(device_array.array.length, i64::try_from(len)?);
+        assert_eq!(device_array.array.offset, 0);
         assert_eq!(device_array.array.null_count, 0);
         assert_eq!(device_array.array.n_buffers, 2);
         assert_eq!(device_array.array.n_children, 0);
         assert!(device_array.array.release.is_some());
         assert_eq!(device_array.device_type, ARROW_DEVICE_CUDA);
 
-        if on_device {
+        if let Some(input_values) = input_values {
             // SAFETY: The live export owns PrivateData until release below.
             let private = unsafe { &*device_array.array.private_data.cast::<PrivateData>() };
             let values = private.buffers[1]
@@ -2365,12 +2411,7 @@ mod tests {
         let source_len = start + len + suffix_len;
         let source_bits = BitBuffer::from_iter((0..source_len).map(|idx| idx % 5 < 2));
         let source_bytes = source_bits.clone().into_inner().2;
-        // Exact-sized allocations expose both misaligned slices and missing consumer padding.
-        let mut allocation = ctx.device_alloc::<u8>(source_bytes.len())?;
-        ctx.stream()
-            .memcpy_htod(source_bytes.as_ref(), &mut allocation)
-            .map_err(|err| vortex_err!("Failed to upload test bool values: {err}"))?;
-        let values = BufferHandle::new_device(Arc::new(CudaDeviceBuffer::new(allocation)));
+        let values = upload_unpadded(&source_bytes, &mut ctx)?;
         let valid_bits = BitBuffer::from_iter((0..source_len).map(|idx| idx % 3 != 0));
         let validity = if nullable {
             let bits = ctx
@@ -2397,76 +2438,31 @@ mod tests {
         assert_eq!(exported.array.n_buffers, 2);
         // SAFETY: The export owns live PrivateData until release below.
         let private = unsafe { &*exported.array.private_data.cast::<PrivateData>() };
-        let values = private.buffers[1]
-            .as_ref()
-            .ok_or_else(|| vortex_err!("expected exported bool values"))?;
-        assert!(values.is_on_device());
-        assert!(
-            values
-                .cuda_device_ptr()?
-                .is_multiple_of(size_of::<u32>() as u64),
-            "cuDF reads BOOL values through an aligned u32 pointer"
-        );
         let logical_bytes = (offset + len).div_ceil(8);
         let padded_bytes = logical_bytes.next_multiple_of(CUDF_VALIDITY_BUFFER_PADDING);
-        assert_eq!(values.len(), logical_bytes);
-        let backing = cuda_backing_allocation(values)?;
-        let allocation_offset =
-            usize::try_from(values.cuda_device_ptr()? - backing.cuda_device_ptr()?)?;
-        assert!(
-            allocation_offset + padded_bytes <= backing.len(),
-            "BOOL values must remain readable through the cuDF-padded end"
-        );
-        let backing_bytes = backing.try_to_host_sync()?;
-        assert!(
-            backing_bytes[allocation_offset + logical_bytes..allocation_offset + padded_bytes]
-                .iter()
-                .all(|byte| *byte == 0)
-        );
-        assert_eq!(
-            BitBuffer::new(values.try_to_host_sync()?, offset + len).slice(offset..offset + len),
-            source_bits.slice(range.clone())
-        );
-        if nullable {
-            let validity = private.buffers[0]
+        for (index, expected) in [(1, source_bits), (0, valid_bits)] {
+            if index == 0 && !nullable {
+                assert!(private.buffers[0].is_none());
+                continue;
+            }
+            let buffer = private.buffers[index]
                 .as_ref()
-                .ok_or_else(|| vortex_err!("expected exported bool validity"))?;
-            assert!(
-                validity
-                    .cuda_device_ptr()?
-                    .is_multiple_of(size_of::<u32>() as u64),
-                "cuDF reads validity through an aligned u32 pointer"
-            );
-            assert_eq!(validity.len(), logical_bytes);
-            assert!(validity.has_zeroed_tail_padding(logical_bytes, padded_bytes)?);
+                .ok_or_else(|| vortex_err!("expected exported bool buffer {index}"))?;
+            let bytes = assert_bitmap_padding(buffer, logical_bytes, false)?;
+            if index == 0 {
+                assert!(buffer.has_zeroed_tail_padding(logical_bytes, padded_bytes)?);
+            }
             assert_eq!(
-                BitBuffer::new(validity.try_to_host_sync()?, offset + len)
-                    .slice(offset..offset + len),
-                valid_bits.slice(range.clone())
+                BitBuffer::new(bytes, offset + len).slice(offset..offset + len),
+                expected.slice(range.clone())
             );
-            assert_eq!(
-                exported.array.null_count,
-                i64::try_from(range.filter(|idx| idx % 3 == 0).count())?
-            );
-        } else {
-            assert!(private.buffers[0].is_none());
-            assert_eq!(exported.array.null_count, 0);
         }
-        // SAFETY: This is the sole release of the successfully exported array.
-        unsafe { release_exported_array(&raw mut exported.array) };
-        Ok(())
-    }
-
-    #[crate::test]
-    async fn test_export_empty_bool() -> VortexResult<()> {
-        let mut ctx = CudaSession::create_execution_ctx(&crate::cuda_session())?;
-        let mut exported = BoolArray::from_iter(std::iter::empty::<bool>())
-            .into_array()
-            .export_device_array(&mut ctx)
-            .await?;
-        assert_eq!(exported.array.length, 0);
-        assert_eq!(exported.array.offset, 0);
-        assert_eq!(exported.array.null_count, 0);
+        let null_count = if nullable {
+            range.filter(|idx| idx % 3 == 0).count()
+        } else {
+            0
+        };
+        assert_eq!(exported.array.null_count, i64::try_from(null_count)?);
         // SAFETY: This is the sole release of the successfully exported array.
         unsafe { release_exported_array(&raw mut exported.array) };
         Ok(())
@@ -3614,14 +3610,8 @@ mod tests {
                 )),
         );
         let (_, _, input_bytes) = source.into_inner();
-        // Allocate exactly the input extent, without the usual upload padding, so a GPU
-        // memory checker can detect word loads that cross the final partial byte range.
-        let mut allocation = ctx.device_alloc::<u8>(input_bytes.len())?;
-        ctx.stream()
-            .memcpy_htod(input_bytes.as_ref(), &mut allocation)
-            .map_err(|err| vortex_err!("Failed to upload test bitmap: {err}"))?;
-        let input_buffer = BufferHandle::new_device(Arc::new(CudaDeviceBuffer::new(allocation)))
-            .slice(byte_offset..input_bytes.len());
+        let input_buffer =
+            upload_unpadded(&input_bytes, &mut ctx)?.slice(byte_offset..input_bytes.len());
         assert_eq!(
             input_buffer.cuda_device_ptr()? % 8,
             u64::try_from(byte_offset)?
@@ -3633,14 +3623,10 @@ mod tests {
 
         let expected =
             BitBuffer::from_iter(std::iter::repeat_n(false, arrow_offset).chain(logical_bits));
-        assert_eq!(output.len(), output_bits.div_ceil(8));
-        assert_eq!(output.try_to_host_sync()?, expected.into_inner().2);
-        let backing_bytes = cuda_backing_allocation(&output)?.try_to_host_sync()?;
         assert_eq!(
-            backing_bytes.len(),
-            output.len().next_multiple_of(CUDF_VALIDITY_BUFFER_PADDING)
+            assert_bitmap_padding(&output, output_bits.div_ceil(8), true)?,
+            expected.into_inner().2
         );
-        assert!(backing_bytes[output.len()..].iter().all(|byte| *byte == 0));
 
         Ok(())
     }
@@ -3689,21 +3675,11 @@ mod tests {
             exported.array.null_count,
             i64::try_from(range.clone().filter(|idx| idx % 3 == 0).count())?
         );
-        // SAFETY: The exported array owns live PrivateData until release below.
-        let private_data = unsafe { &*exported.array.private_data.cast::<PrivateData>() };
-        let bitmap = private_data.buffers[0]
-            .as_ref()
-            .ok_or_else(|| vortex_err!("expected exported validity bitmap"))?;
-        assert!(bitmap.is_on_device());
         assert_eq!(
-            BitBuffer::new(bitmap.try_to_host_sync()?, range.len()),
+            BitBuffer::new(private_data_buffer_bytes(&exported.array, 0)?, range.len()),
             valid_bits.slice(range.clone())
         );
-        let values = private_data.buffers[1]
-            .as_ref()
-            .ok_or_else(|| vortex_err!("expected exported values"))?;
-        assert!(values.is_on_device());
-        let values = values.try_to_host_sync()?;
+        let values = private_data_buffer_bytes(&exported.array, 1)?;
         if boolean_values {
             assert_eq!(
                 BitBuffer::new(values, range.len()),

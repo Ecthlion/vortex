@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  message(FATAL_ERROR "CUDF_NDSH_WITH_VORTEX requires Linux and a CUDA toolkit")
+  message(FATAL_ERROR "CUDF_WITH_VORTEX requires Linux and a CUDA toolkit")
 endif()
 
 # The harness and library come from this checkout. cuDF owns the compiler and toolkit configuration.

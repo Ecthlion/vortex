@@ -120,13 +120,6 @@ struct q6_files {
   }
 };
 
-q6_files const& q6_fixture(double scale_factor)
-{
-  // Cache only files/host results, so all format/workload states use identical rows.
-  static std::map<double, q6_files> fixtures;
-  return fixtures.try_emplace(scale_factor, scale_factor).first->second;
-}
-
 void ndsh_q6_local(nvbench::state& state)
 {
   auto const format   = state.get_string("format");
@@ -135,7 +128,7 @@ void ndsh_q6_local(nvbench::state& state)
   CUDF_EXPECTS(format == "parquet" || format == "vortex", "Unknown Q6 format");
   CUDF_EXPECTS(workload == "read" || workload == "q6", "Unknown Q6 workload");
   auto const use_vortex         = format == "vortex";
-  auto const& files             = q6_fixture(state.get_float64("scale_factor"));
+  auto const& files             = ndsh::local_fixture<q6_files>(state.get_float64("scale_factor"));
   cuda::stream_ref const stream = cudf::get_default_stream();
   state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.get()));
   auto const memory = cudf::memory_stats_logger();

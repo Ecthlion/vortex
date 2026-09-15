@@ -186,11 +186,12 @@ std::array const columns{
   column_spec{"all_valid", NANOARROW_TYPE_INT32, cudf::type_id::INT32},
   column_spec{"all_null", NANOARROW_TYPE_INT32, cudf::type_id::INT32}};
 
-std::vector<std::string> column_names()
+std::vector<std::string> column_names(std::vector<std::size_t> const& selected = {})
 {
   std::vector<std::string> names;
-  for (auto const& spec : columns) {
-    names.emplace_back(spec.name);
+  auto const count = selected.empty() ? columns.size() : selected.size();
+  for (std::size_t c = 0; c < count; ++c) {
+    names.emplace_back(columns[selected.empty() ? c : selected[c]].name);
   }
   return names;
 }
@@ -472,6 +473,9 @@ void check_table(cudf::io::table_with_metadata const& actual,
 {
   require(actual.tbl != nullptr, "Reader returned no owning table");
   require(actual.tbl->num_rows() == expected.array->length, "Row count differs");
+  require(actual.metadata.num_rows_per_source ==
+            std::vector<std::size_t>{static_cast<std::size_t>(expected.array->length)},
+          "Row metadata differs");
   check_types(actual.tbl->view(), selected);
   auto const count = selected.empty() ? columns.size() : selected.size();
   require(actual.metadata.schema_info.size() == count, "Metadata column count differs");
@@ -497,9 +501,14 @@ void check_table(cudf::io::table_with_metadata const& actual,
 cudf::io::table_with_metadata read_completed(ndsh::vortex_io const& io,
                                              std::string const& path,
                                              cudaStream_t stream,
-                                             std::optional<std::size_t> batch_rows)
+                                             std::optional<std::size_t> batch_rows,
+                                             std::vector<std::size_t> const& selected = {})
 {
-  auto result = batch_rows ? io.read_vortex(path, *batch_rows) : io.read_vortex(path);
+  auto result = batch_rows
+                  ? io.read_vortex(path, *batch_rows,
+                                   selected.empty() ? std::vector<std::string>{}
+                                                    : column_names(selected))
+                  : io.read_vortex(path);
   // Check before any test-side synchronization could hide an unfinished consumer stream.
   check_cuda(cudaStreamQuery(stream), "read_vortex must complete the consumer stream");
   return result;
@@ -527,15 +536,18 @@ void write_source(ndsh::vortex_io const& io,
   }
 }
 
-void round_trip(temporary_directory const& directory,
-                cudaStream_t stream,
-                std::string const& name,
-                cudf::size_type rows,
-                cudf::size_type slice_begin,
-                std::optional<cudf::size_type> chunk_rows,
-                std::vector<std::optional<std::size_t>> const& batches)
+struct round_trip_case {
+  char const* name;
+  cudf::size_type rows;
+  cudf::size_type slice_begin;
+  std::optional<cudf::size_type> chunk_rows;
+  std::vector<std::optional<std::size_t>> batches;
+};
+
+void round_trip(temporary_directory const& directory, cudaStream_t stream, round_trip_case const& test)
 {
-  auto const path = directory.file(name + ".vortex");
+  auto const& [name, rows, slice_begin, chunk_rows, batches] = test;
+  auto const path = directory.file(std::string{name} + ".vortex");
   {
     ndsh::vortex_io writer{stream};
     write_source(writer, path, stream, 0, rows, slice_begin, chunk_rows);
@@ -609,11 +621,9 @@ void test_async_resource(temporary_directory const& directory, cudaStream_t stre
       for (auto const batch_rows : {64U, 7U, 0U}) {
         results.push_back(read_completed(io, path, stream, batch_rows));
       }
-      auto empty            = make_source(stream, 0, 0);
       auto const empty_path = directory.file("async-resource-empty.vortex");
-      io.write_vortex(empty_path, empty->view(), column_names(), 7);
-      auto result = read_completed(io, empty_path, stream, 7);
-      check_table(result, make_fixture(0, 0), stream);
+      write_source(io, empty_path, stream, 0, 0, 0, 7);
+      check_table(read_completed(io, empty_path, stream, 7), make_fixture(0, 0), stream);
     }
     source.reset();
     require(std::filesystem::remove(path), "Failed to remove async-resource file");
@@ -653,76 +663,51 @@ void test_owned_reads(temporary_directory const& directory, cudaStream_t stream)
 }
 
 template <typename Function>
-void expect_error(char const* label, Function&& function)
+void expect_error(char const* label, Function&& function, bool match_message = false)
 {
   try {
     function();
-  } catch (std::exception const&) {
+  } catch (std::exception const& error) {
+    require(!match_message || std::string_view{error.what()}.find(label) != std::string_view::npos,
+            std::string{"Unexpected error: "} + error.what());
     return;
   }
   throw std::runtime_error(std::string{label} + ": expected an exception");
 }
 
-template <typename Function>
-void expect_error_containing(char const* message, Function&& function)
-{
-  try {
-    function();
-  } catch (std::exception const& error) {
-    require(std::string_view{error.what()}.find(message) != std::string_view::npos,
-            std::string{"Unexpected error: "} + error.what());
-    return;
-  }
-  throw std::runtime_error(std::string{"Expected an exception containing: "} + message);
-}
-
 void test_projection(temporary_directory const& directory,
                      cudaStream_t stream,
-                     cudf::size_type rows)
+                     cudf::size_type rows,
+                     bool invalid = false)
 {
-  std::vector<std::size_t> const selected{11, 16, 0, 8, 18, 12};
   auto source     = make_source(stream, 0, rows);
-  auto expected   = make_fixture(0, rows, selected);
   auto const path = directory.file("projection-" + std::to_string(rows) + ".vortex");
   ndsh::vortex_io io{stream};
   io.write_vortex(path, source->view(), column_names(), 13);
+  if (invalid) {
+    expect_error("unknown CUDA scan column",
+                 [&] { static_cast<void>(io.read_vortex(path, 7, {"i32", "missing"})); }, true);
+    check_table(read_completed(io, path, stream, 7, {3}), make_fixture(0, rows, {3}), stream, {3});
+    expect_error("duplicate CUDA scan column",
+                 [&] { static_cast<void>(io.read_vortex(path, 7, {"i32", "i32"})); }, true);
+    check_table(read_completed(io, path, stream, 64), make_fixture(0, rows), stream);
+    return;
+  }
+  std::vector<std::size_t> const selected{11, 16, 0, 8, 18, 12};
+  auto expected = make_fixture(0, rows, selected);
   for (auto const batch_rows : {7U, 0U, 64U}) {
-    auto result = io.read_vortex(
-      path,
-      batch_rows,
-      {"utf8.text", "decimal_negative_scale", "bool flag", "u64", "all_null", "date_days"});
-    check_cuda(cudaStreamQuery(stream), "projected read must complete the consumer stream");
+    auto result = read_completed(io, path, stream, batch_rows, selected);
     check_table(result, expected, stream, selected);
-    require(result.metadata.num_rows_per_source ==
-              std::vector<std::size_t>{static_cast<std::size_t>(rows)},
-            "Projected row metadata differs");
     for (std::size_t c = 0; c < selected.size(); ++c) {
       require(result.metadata.schema_info[c].is_nullable ==
                 source->view().column(static_cast<cudf::size_type>(selected[c])).nullable(),
               "Projected nullability metadata differs");
     }
   }
+
 }
 
-void test_projection_errors(temporary_directory const& directory, cudaStream_t stream)
-{
-  auto source     = make_source(stream, 0, 37);
-  auto const path = directory.file("projection-errors.vortex");
-  ndsh::vortex_io io{stream};
-  io.write_vortex(path, source->view(), column_names(), 13);
-  expect_error_containing("unknown CUDA scan column",
-                          [&] { static_cast<void>(io.read_vortex(path, 7, {"i32", "missing"})); });
-  auto subset = io.read_vortex(path, 7, {"i32"});
-  check_cuda(cudaStreamQuery(stream), "projected read after error must complete the stream");
-  check_table(subset, make_fixture(0, 37, {3}), stream, {3});
-  expect_error_containing("duplicate CUDA scan column",
-                          [&] { static_cast<void>(io.read_vortex(path, 7, {"i32", "i32"})); });
-  auto all = io.read_vortex(path, 64, {});
-  check_cuda(cudaStreamQuery(stream), "all-column read after error must complete the stream");
-  check_table(all, make_fixture(0, 37), stream);
-}
-
-void test_zero_columns(temporary_directory const& directory, cudaStream_t stream)
+void test_errors(temporary_directory const& directory, cudaStream_t stream)
 {
   nanoarrow::UniqueSchema schema;
   ArrowSchemaInit(schema.get());
@@ -730,65 +715,52 @@ void test_zero_columns(temporary_directory const& directory, cudaStream_t stream
   for (auto const flags : {int64_t{0}, int64_t{ARROW_FLAG_NULLABLE}}) {
     schema->flags = flags;
     // Rejection is schema-level, independent of whether any batches/rows exist.
-    expect_error_containing("read_vortex requires at least one column",
-                            [&] { ndsh::detail::check_flat_schema(*schema.get()); });
+    expect_error("read_vortex requires at least one column",
+                 [&] { ndsh::detail::check_flat_schema(*schema.get()); }, true);
   }
   auto empty = make_fixture(0, 0);
   ndsh::detail::check_flat_schema(*empty.schema.get());
 
-  ndsh::vortex_io io{stream};
-  auto const path = directory.file("zero-columns.vortex");
-  expect_error_containing("write_vortex requires at least one column",
-                          [&] { io.write_vortex(path, cudf::table_view{}, {}); });
-  require(!std::filesystem::exists(path), "Rejected zero-column write created a file");
-}
-
-void test_nul_column_names(temporary_directory const& directory, cudaStream_t stream)
-{
   auto source = make_source(stream, 0, 9);
   auto names  = column_names();
   ndsh::vortex_io io{stream};
+  auto const zero_path = directory.file("zero-columns.vortex");
+  expect_error("write_vortex requires at least one column",
+               [&] { io.write_vortex(zero_path, cudf::table_view{}, {}); }, true);
+  require(!std::filesystem::exists(zero_path), "Rejected zero-column write created a file");
+
   auto const path = directory.file("nul-column-name.vortex");
   for (auto const& name : {std::string{"a\0b", 3}, std::string{"\0a", 2}, std::string{"a\0", 2}}) {
     names.back() = name;
-    expect_error_containing("column names must not contain NUL bytes",
-                            [&] { io.write_vortex(path, source->view(), names, 3); });
+    expect_error("column names must not contain NUL bytes",
+                 [&] { io.write_vortex(path, source->view(), names, 3); }, true);
     require(!std::filesystem::exists(path), "Rejected column name created a file");
   }
-  io.write_vortex(path, source->view(), column_names(), 3);
-  auto result = read_completed(io, path, stream, 64);
-  check_table(result, make_fixture(0, 9), stream);
-}
+  names = column_names();
+  io.write_vortex(path, source->view(), names, 3);
+  check_table(read_completed(io, path, stream, 64), make_fixture(0, 9), stream);
 
-void test_errors(temporary_directory const& directory, cudaStream_t stream)
-{
-  auto source = make_source(stream, 0, 9);
-  auto names  = column_names();
-  ndsh::vortex_io io{stream};
-  expect_error("zero chunk_rows", [&] {
-    io.write_vortex(directory.file("invalid-zero.vortex"), source->view(), names, 0);
-  });
-  expect_error("negative chunk_rows", [&] {
-    io.write_vortex(directory.file("invalid-negative.vortex"), source->view(), names, -1);
-  });
-  auto too_few = names;
-  too_few.pop_back();
-  expect_error("too few column names", [&] {
-    io.write_vortex(directory.file("invalid-few.vortex"), source->view(), too_few, 3);
-  });
-  auto too_many = names;
-  too_many.emplace_back("extra");
-  expect_error("too many column names", [&] {
-    io.write_vortex(directory.file("invalid-many.vortex"), source->view(), too_many, 3);
-  });
+  for (auto const chunk_rows : {0, -1}) {
+    auto const name = chunk_rows == 0 ? "invalid-zero.vortex" : "invalid-negative.vortex";
+    expect_error(name, [&] {
+      io.write_vortex(directory.file(name), source->view(), names, chunk_rows);
+    });
+  }
+  for (auto const count : {names.size() - 1, names.size() + 1}) {
+    auto invalid_names = names;
+    invalid_names.resize(count, "extra");
+    auto const name = count < names.size() ? "invalid-few.vortex" : "invalid-many.vortex";
+    expect_error(name, [&] {
+      io.write_vortex(directory.file(name), source->view(), invalid_names, 3);
+    });
+  }
   auto const missing = directory.file("does-not-exist.vortex");
   require(!std::filesystem::exists(missing), "Missing-path test unexpectedly has a file");
   expect_error("missing read path", [&] { static_cast<void>(io.read_vortex(missing, 3)); });
 
   auto const valid = directory.file("after-errors.vortex");
   io.write_vortex(valid, source->view(), names, 3);
-  auto result = read_completed(io, valid, stream, 2);
-  check_table(result, make_fixture(0, 9), stream);
+  check_table(read_completed(io, valid, stream, 2), make_fixture(0, 9), stream);
 }
 
 }  // namespace
@@ -813,32 +785,23 @@ int main()
         [&] { test_projection(directory, stream.get(), 37); });
     run("projected typed empty table", [&] { test_projection(directory, stream.get(), 0); });
     run("invalid projection and context reuse",
-        [&] { test_projection_errors(directory, stream.get()); });
+        [&] { test_projection(directory, stream.get(), 37, true); });
     run("bounded string host staging", [&] { test_staged_string_bytes(stream.get()); });
-    run("zero-column schema and write rejection",
-        [&] { test_zero_columns(directory, stream.get()); });
-    run("embedded NUL column names", [&] { test_nul_column_names(directory, stream.get()); });
     run("explicit async resource stream completion",
         [&] { test_async_resource(directory, stream.get()); });
-    run("default chunk and batch sizes", [&] {
-      round_trip(directory, stream.get(), "defaults", 37, 0, std::nullopt, {std::nullopt});
-    });
-    run("multiple write/read chunks",
-        [&] { round_trip(directory, stream.get(), "chunks", 257, 0, 31, {1, 7, 43, 0, 512}); });
-    run("non-byte-aligned sliced input", [&] {
-      round_trip(directory, stream.get(), "sliced", 69, 5, 11, {1, 7, 23, 0});
-      round_trip(directory, stream.get(), "word-boundary", 520, 0, 520, {13, 507, 0});
-    });
-    run("single row with empty string and all-null column",
-        [&] { round_trip(directory, stream.get(), "single", 1, 0, 1, {1, 0}); });
-    run("empty table preserves schema",
-        [&] { round_trip(directory, stream.get(), "empty", 0, 0, 7, {std::nullopt, 1, 0}); });
-    run("low-cardinality logical values", [&] {
-      round_trip(directory, stream.get(), "low-cardinality", 8193, 0, 2048, {127, 1024, 0});
-    });
+    for (auto const& test : std::array<round_trip_case, 7>{{
+           {"defaults", 37, 0, std::nullopt, {std::nullopt}},
+           {"chunks", 257, 0, 31, {1, 7, 43, 0, 512}},
+           {"sliced", 69, 5, 11, {1, 7, 23, 0}},
+           {"word-boundary", 520, 0, 520, {13, 507, 0}},
+           {"single", 1, 0, 1, {1, 0}},
+           {"empty", 0, 0, 7, {std::nullopt, 1, 0}},
+           {"low-cardinality", 8193, 0, 2048, {127, 1024, 0}}}}) {
+      run(test.name, [&] { round_trip(directory, stream.get(), test); });
+    }
     run("results outlive sources, repeated reads, contexts, and files",
         [&] { test_owned_reads(directory, stream.get()); });
-    run("invalid arguments, missing path, and context reuse",
+    run("zero columns, NUL names, invalid arguments, missing path, and context reuse",
         [&] { test_errors(directory, stream.get()); });
     std::cout << "vortex_io: " << passed << " tests passed on CUDA device 0 (non-default stream)\n";
     return 0;

@@ -85,23 +85,20 @@ def git_output(path: Path, *args: str) -> str:
 
 def environment(args: argparse.Namespace) -> dict[str, str]:
     # Preserve the caller's build setup without collecting unrelated credentials.
-    selected = {name: os.environ[name] for name in BUILD_ENVIRONMENT if name in os.environ}
-    selected.setdefault("PATH", os.defpath)
-    selected.update(
-        {
-            "HOME": str(Path.home()),
-            "LANG": "C",
-            "LC_ALL": "C",
-            "GIT_EDITOR": "true",
-            "GIT_TERMINAL_PROMPT": "0",
-            "PYTHONNOUSERSITE": "1",
-            "PYTHONDONTWRITEBYTECODE": "1",
-            "TMPDIR": str(args.work_dir / "tmp"),
-            "CARGO_BUILD_JOBS": str(args.cargo_jobs),
-            "FLATC": str(args.work_dir / "flatc-build/flatc"),
-        }
-    )
-    return selected
+    return {
+        "PATH": os.defpath,
+        **{name: os.environ[name] for name in BUILD_ENVIRONMENT if name in os.environ},
+        "HOME": str(Path.home()),
+        "LANG": "C",
+        "LC_ALL": "C",
+        "GIT_EDITOR": "true",
+        "GIT_TERMINAL_PROMPT": "0",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "TMPDIR": str(args.work_dir / "tmp"),
+        "CARGO_BUILD_JOBS": str(args.cargo_jobs),
+        "FLATC": str(args.work_dir / "flatc-build/flatc"),
+    }
 
 
 class Runner:
@@ -207,7 +204,7 @@ def configure_command(args: argparse.Namespace, lock: dict) -> list[str | Path]:
         "BUILD_TESTS": "OFF",
         "BUILD_BENCHMARKS": "ON",
         "BUILD_SHARED_LIBS": "ON",
-        "CUDF_NDSH_WITH_VORTEX": "ON",
+        "CUDF_WITH_VORTEX": "ON",
         "FETCHCONTENT_SOURCE_DIR_VORTEX": ROOT,
         "FETCHCONTENT_SOURCE_DIR_RAPIDS-CMAKE": work / "rapids-cmake",
         "RAPIDS_CMAKE_CPM_OVERRIDE_VERSION_FILE": HERE / "build-lock.json",
@@ -279,8 +276,7 @@ def record_toolchain(runner: Runner) -> dict:
             }
     result = {"cache": selected, "tools": tools}
     save(runner.logs / "toolchain.json", result)
-    nvcc = tools["CMAKE_CUDA_COMPILER"]["version"]
-    version = re.search(r"release\s+(\d+)\.(\d+)", nvcc)
+    version = re.search(r"release\s+(\d+)\.(\d+)", tools["CMAKE_CUDA_COMPILER"]["version"])
     if not version or tuple(map(int, version.groups())) < (12, 8):
         raise RuntimeError("This benchmark recipe requires an NVIDIA CUDA toolkit >= 12.8")
     return result
@@ -307,13 +303,13 @@ def build(args: argparse.Namespace, lock: dict, runner: Runner, recipe: dict):
     else:
         if git_output(cudf, "status", "--porcelain"):
             raise RuntimeError("cuDF checkout is not pristine")
-        runner.run("patch", ["git", "-C", cudf, "apply", HERE / "upstream.patch"])
+        # Index new files too, so source_state() records their contents rather than only their names.
+        runner.run("patch", ["git", "-C", cudf, "apply", "--index", HERE / "upstream.patch"])
         save(source_record, source_state(cudf))
-    cmake = "cmake"
     runner.run(
         "flatc-configure",
         [
-            cmake,
+            "cmake",
             "-S",
             flatc,
             "-B",
@@ -330,7 +326,7 @@ def build(args: argparse.Namespace, lock: dict, runner: Runner, recipe: dict):
     )
     runner.run(
         "flatc-build",
-        [cmake, "--build", runner.work / "flatc-build", "--target", "flatc", "--parallel", args.jobs],
+        ["cmake", "--build", runner.work / "flatc-build", "--target", "flatc", "--parallel", args.jobs],
     )
     if lock["flatc"]["version"] not in runner.run("flatc-version", [runner.env["FLATC"], "--version"]):
         raise RuntimeError("Unexpected Vortex flatc version")
@@ -343,7 +339,7 @@ def build(args: argparse.Namespace, lock: dict, runner: Runner, recipe: dict):
     toolchain = record_toolchain(runner)
     runner.run(
         "cudf-build",
-        [cmake, "--build", runner.work / "cudf-build", "--target", *TARGETS, "--parallel", args.jobs],
+        ["cmake", "--build", runner.work / "cudf-build", "--target", *TARGETS, "--parallel", args.jobs],
     )
     if identity() != recipe:
         raise RuntimeError("Vortex source changed during the build")
@@ -458,11 +454,7 @@ def benchmark(args: argparse.Namespace, recipe: dict):
         runner.run(name, [binaries / name], results)
     for query in args.queries:
         output = results / f"sf{args.scale_factor:g}-q{query}.json"
-        runner.run(
-            f"sf{args.scale_factor:g}-q{query}",
-            benchmark_command(binaries / f"NDSH_Q{query:02}_NVBENCH", query, args, output),
-            results,
-        )
+        runner.run(output.stem, benchmark_command(binaries / f"NDSH_Q{query:02}_NVBENCH", query, args, output), results)
         validate_results(json.loads(output.read_text()), query, args.scale_factor)
         print(f"Results: {output}", flush=True)
     print(f"Completed SF{args.scale_factor:g} matrix: {results}", flush=True)

@@ -122,44 +122,16 @@ struct q9_files {
   explicit q9_files(double scale_factor)
   {
     check_q9_cases();
-    cuda::stream_ref const stream = cudf::get_default_stream();
-    ndsh::vortex_io io{stream.get()};
-    {
-      ndsh::q9_reference_builder builder;
-      for_each_generated_table(
-        scale_factor, q9_tables, [&](std::string const& name, table_with_names const& generated) {
-          auto const& columns = q9_projections.at(name);
-          CUDF_EXPECTS(
-            generated.table().num_columns() > static_cast<cudf::size_type>(columns.size()),
-            "Q9 fixture requires full generated table: " + name);
-          tables.write(name, generated, io);
-          auto const projected = generated.select(columns);
-          builder.add_table(name, projected, stream);
-          ndsh::check_file_projections(tables, name, projected, columns, io);
-          CUDF_CUDA_TRY(cudaDeviceSynchronize());
-        });
-      reference = builder.finish();
-    }
-
-    for (bool use_vortex : {false, true}) {
-      for (auto const engine : {engine_type::BINARYOP, engine_type::AST, engine_type::TRANSFORM}) {
-        auto result =
-          execute_q9(engine, [&](std::string const& name, std::vector<std::string> const& columns) {
-            return ndsh::read_local_file(tables.path(name, use_vortex), use_vortex, io, columns);
-          });
-        ndsh::check_q9_result(reference, *result, stream);
-      }
-    }
-    CUDF_CUDA_TRY(cudaDeviceSynchronize());
+    ndsh::make_reference_files<ndsh::q9_reference_builder>(
+      scale_factor, tables, reference, q9_tables, q9_projections, true,
+      [&](auto&& read, cuda::stream_ref stream) {
+        for (auto const engine : {engine_type::BINARYOP, engine_type::AST, engine_type::TRANSFORM}) {
+          auto result = execute_q9(engine, read);
+          ndsh::check_q9_result(reference, *result, stream);
+        }
+      });
   }
 };
-
-q9_files const& q9_fixture(double scale_factor)
-{
-  // Share only full-table files and the CPU result across format/workload/engine states at this SF.
-  static std::map<double, q9_files> fixtures;
-  return fixtures.try_emplace(scale_factor, scale_factor).first->second;
-}
 
 void ndsh_q9_local(nvbench::state& state)
 {
@@ -170,7 +142,7 @@ void ndsh_q9_local(nvbench::state& state)
   CUDF_EXPECTS(format == "parquet" || format == "vortex", "Unknown Q9 format");
   CUDF_EXPECTS(workload == "read" || workload == "q9", "Unknown Q9 workload");
   auto const use_vortex         = format == "vortex";
-  auto const& files             = q9_fixture(state.get_float64("scale_factor"));
+  auto const& files             = ndsh::local_fixture<q9_files>(state.get_float64("scale_factor"));
   cuda::stream_ref const stream = cudf::get_default_stream();
   state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.get()));
   auto const memory = cudf::memory_stats_logger();

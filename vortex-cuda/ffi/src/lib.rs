@@ -337,18 +337,17 @@ pub unsafe extern "C-unwind" fn vx_cuda_scan_path_arrow_device_stream_projected(
         // SAFETY: The caller keeps the borrowed options and column views alive for this call.
         let options = unsafe { scan_options(options) }?;
         let columns = unsafe { scan_columns(columns, ncolumns) }?;
-        let path = unsafe { path.as_str() }?.to_owned();
+        let path = unsafe { path.as_str() }?;
         let session = session_with_cuda(unsafe { vx_session_ref(session) }?);
-        let array_stream = ffi_runtime().block_on(async {
-            let file = session
+        let file = ffi_runtime().block_on(
+            session
                 .open_options()
                 .with_cuda()
                 .with_read_at_options(options.read_at_options)
-                .open_path(path)
-                .await?;
-            let scan = projected_scan(&file, columns, options.batch_rows)?;
-            Ok::<_, vortex::error::VortexError>(scan.into_array_stream()?.boxed())
-        })?;
+                .open_path(path),
+        )?;
+        let scan = projected_scan(&file, columns, options.batch_rows)?;
+        let array_stream = scan.into_array_stream()?.boxed();
         let ctx = scan_export_ctx(session, &options)?;
         let device_stream = ArrowDeviceArrayStream::new(array_stream, ctx, ffi_runtime());
 

@@ -6,13 +6,10 @@
 #pragma once
 
 #include "reference_io.hpp"
-#include "utilities.hpp"
 
 #include <cudf/utilities/error.hpp>
 #include <cudf/wrappers/timestamps.hpp>
 
-#include <algorithm>
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -34,63 +31,48 @@ class q5_reference_builder {
   void add_table(std::string const& name, cudf::table_view projected, cuda::stream_ref stream)
   {
     if (name == "part" || name == "partsupp") return;
-    static constexpr std::array<char const*, 6> tables{
-      "region", "nation", "supplier", "customer", "orders", "lineitem"};
-    CUDF_EXPECTS(next_table_ < tables.size() && name == tables[next_table_],
-                 "Q5 requires region, nation, supplier, customer, orders, lineitem in order");
     using enum cudf::type_id;
-    if (name == "region") {
-      detail::reference_schema(projected, {INT8, STRING});
-    } else if (name == "nation") {
-      detail::reference_schema(projected, {INT8, INT8, STRING});
-    } else if (name == "supplier" || name == "customer") {
-      detail::reference_schema(projected, {INT32, INT8});
-    } else if (name == "orders") {
-      detail::reference_schema(projected, {INT32, INT32, TIMESTAMP_DAYS});
-    } else {
-      detail::reference_schema(projected, {INT32, INT32, FLOAT64, FLOAT64});
-    }
+    detail::reference_input_schema(projected, name, next_table_,
+      {{"region", {INT8, STRING}},
+       {"nation", {INT8, INT8, STRING}},
+       {"supplier", {INT32, INT8}},
+       {"customer", {INT32, INT8}},
+       {"orders", {INT32, INT32, TIMESTAMP_DAYS}},
+       {"lineitem", {INT32, INT32, FLOAT64, FLOAT64}}});
     // Check even discarded dimension rows, so filtering cannot conceal duplicate primary keys.
     std::unordered_set<int32_t> primary_keys;
     auto unique = [&](int32_t key) {
       CUDF_EXPECTS(primary_keys.insert(key).second, "Duplicate Q5 primary key in " + name);
     };
-    for (cudf::size_type begin = 0; begin < projected.num_rows();) {
-      auto const count = std::min<cudf::size_type>(1 << 20, projected.num_rows() - begin);
-      auto values      = [&](auto type, int index) {
-        return detail::reference_host_copy(
-          projected.column(index).data<decltype(type)>() + begin, count, stream);
-      };
+    detail::for_reference_batches(projected, stream, [&](detail::reference_batch const& batch) {
       if (name == "region") {
-        auto const keys = values(int8_t{}, 0);
-        auto const names =
-          detail::reference_host_strings(projected.column(1), begin, count, stream);
-        for (cudf::size_type i = 0; i < count; ++i) {
+        auto const keys  = batch.values<int8_t>(0);
+        auto const names = batch.strings(1);
+        for (cudf::size_type i = 0; i < batch.count; ++i) {
           unique(keys[i]);
           if (names[i] == "ASIA") regions_.insert(keys[i]);
         }
       } else if (name == "nation") {
-        auto const keys    = values(int8_t{}, 0);
-        auto const regions = values(int8_t{}, 1);
-        auto const names =
-          detail::reference_host_strings(projected.column(2), begin, count, stream);
-        for (cudf::size_type i = 0; i < count; ++i) {
+        auto const keys    = batch.values<int8_t>(0);
+        auto const regions = batch.values<int8_t>(1);
+        auto const names   = batch.strings(2);
+        for (cudf::size_type i = 0; i < batch.count; ++i) {
           unique(keys[i]);
           if (regions_.contains(regions[i])) nations_.emplace(keys[i], names[i]);
         }
       } else if (name == "supplier" || name == "customer") {
-        auto const keys    = values(int32_t{}, 0);
-        auto const nations = values(int8_t{}, 1);
+        auto const keys    = batch.values<int32_t>(0);
+        auto const nations = batch.values<int8_t>(1);
         auto& dimension    = name == "supplier" ? suppliers_ : customers_;
-        for (cudf::size_type i = 0; i < count; ++i) {
+        for (cudf::size_type i = 0; i < batch.count; ++i) {
           unique(keys[i]);
           if (nations_.contains(nations[i])) dimension.emplace(keys[i], nations[i]);
         }
       } else if (name == "orders") {
-        auto const customers = values(int32_t{}, 0);
-        auto const keys      = values(int32_t{}, 1);
-        auto const dates     = values(cudf::timestamp_D{}, 2);
-        for (cudf::size_type i = 0; i < count; ++i) {
+        auto const customers = batch.values<int32_t>(0);
+        auto const keys      = batch.values<int32_t>(1);
+        auto const dates     = batch.values<cudf::timestamp_D>(2);
+        for (cudf::size_type i = 0; i < batch.count; ++i) {
           unique(keys[i]);
           auto const date = dates[i].time_since_epoch().count();
           // 1994-01-01 inclusive through 1995-01-01 exclusive, in epoch days.
@@ -99,11 +81,11 @@ class q5_reference_builder {
           if (customer != customers_.end()) orders_.emplace(keys[i], customer->second);
         }
       } else {
-        auto const orders    = values(int32_t{}, 0);
-        auto const suppliers = values(int32_t{}, 1);
-        auto const prices    = values(double{}, 2);
-        auto const discounts = values(double{}, 3);
-        for (cudf::size_type i = 0; i < count; ++i) {
+        auto const orders    = batch.values<int32_t>(0);
+        auto const suppliers = batch.values<int32_t>(1);
+        auto const prices    = batch.values<double>(2);
+        auto const discounts = batch.values<double>(3);
+        for (cudf::size_type i = 0; i < batch.count; ++i) {
           auto const order = orders_.find(orders[i]);
           if (order == orders_.end()) continue;
           auto const supplier = suppliers_.find(suppliers[i]);
@@ -113,8 +95,7 @@ class q5_reference_builder {
           result_.revenue[nations_.at(order->second)] += prices[i] * (1.0 - discounts[i]);
         }
       }
-      begin += count;
-    }
+    });
     if (name == "orders") customers_.clear();
     ++next_table_;
   }
@@ -138,24 +119,14 @@ inline void check_q5_result(q5_reference_result const& expected,
                             cuda::stream_ref stream)
 {
   std::vector<std::string> const names{"n_name", "revenue"};
-  CUDF_EXPECTS(actual.column_names().size() == 2 && actual.table().num_columns() == 2,
-               "Expected exactly two Q5 output columns");
-  for (auto const& name : names) {
-    CUDF_EXPECTS(std::count(actual.column_names().begin(), actual.column_names().end(), name) == 1,
-                 "Missing or duplicate Q5 output column: " + name);
-  }
-  auto const table = actual.select(names);
-  detail::reference_schema(table, {cudf::type_id::STRING, cudf::type_id::FLOAT64});
-  CUDF_EXPECTS(static_cast<std::size_t>(table.num_rows()) == expected.revenue.size(),
-               "Q5 group count mismatch");
+  auto const table = detail::reference_output(
+    actual, names, {cudf::type_id::STRING, cudf::type_id::FLOAT64}, expected.revenue.size(), false);
   std::unordered_set<std::string> seen;
   double previous = std::numeric_limits<double>::infinity();
-  for (cudf::size_type begin = 0; begin < table.num_rows();) {
-    auto const count     = std::min<cudf::size_type>(1 << 20, table.num_rows() - begin);
-    auto const countries = detail::reference_host_strings(table.column(0), begin, count, stream);
-    auto const revenues =
-      detail::reference_host_copy(table.column(1).data<double>() + begin, count, stream);
-    for (cudf::size_type i = 0; i < count; ++i) {
+  detail::for_reference_batches(table, stream, [&](detail::reference_batch const& batch) {
+    auto const countries = batch.strings(0);
+    auto const revenues  = batch.values<double>(1);
+    for (cudf::size_type i = 0; i < batch.count; ++i) {
       auto const group = expected.revenue.find(countries[i]);
       CUDF_EXPECTS(group != expected.revenue.end() && seen.insert(countries[i]).second,
                    "Unexpected or duplicate Q5 country: " + countries[i]);
@@ -164,7 +135,6 @@ inline void check_q5_result(q5_reference_result const& expected,
       CUDF_EXPECTS(value <= previous, "Q5 revenues are not sorted descending");
       previous = value;
     }
-    begin += count;
-  }
+  });
 }
 }  // namespace ndsh

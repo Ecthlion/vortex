@@ -184,4 +184,53 @@ inline void check_file_projections(local_table_files const& files,
     check_projection(expected, *input, columns);
   }
 }
+
+// Setup only: the generator retains each full table until its callback has drained both readers.
+// Reference dimensions are released before reading query results, just as the generated owners are.
+template <typename Builder, typename Reference, typename Validate>
+void make_reference_files(double scale_factor,
+                           local_table_files& tables,
+                           Reference& reference,
+                           std::vector<std::string> const& names,
+                           std::map<std::string, std::vector<std::string>> const& projections,
+                           bool require_full_tables,
+                           Validate&& validate)
+{
+  cuda::stream_ref const stream = cudf::get_default_stream();
+  vortex_io io{stream.get()};
+  {
+    Builder builder;
+    for_each_generated_table(
+      scale_factor, names, [&](std::string const& name, table_with_names const& generated) {
+        auto const& columns = projections.at(name);
+        if (require_full_tables) {
+          CUDF_EXPECTS(
+            generated.table().num_columns() > static_cast<cudf::size_type>(columns.size()),
+            "Fixture requires full generated table: " + name);
+        }
+        tables.write(name, generated, io);
+        auto const projected = generated.select(columns);
+        builder.add_table(name, projected, stream);
+        check_file_projections(tables, name, projected, columns, io);
+        CUDF_CUDA_TRY(cudaDeviceSynchronize());
+      });
+    reference = builder.finish();
+  }
+  for (bool use_vortex : {false, true}) {
+    validate(
+      [&](std::string const& name, std::vector<std::string> const& columns, auto const&...) {
+        return read_local_file(tables.path(name, use_vortex), use_vortex, io, columns);
+      },
+      stream);
+  }
+  CUDF_CUDA_TRY(cudaDeviceSynchronize());
+}
+
+// One cache per fixture type: retain only files/host results, constructed lazily in place per SF.
+template <typename Files>
+Files const& local_fixture(double scale_factor)
+{
+  static std::map<double, Files> fixtures;
+  return fixtures.try_emplace(scale_factor, scale_factor).first->second;
+}
 }  // namespace ndsh

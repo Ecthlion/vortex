@@ -146,46 +146,14 @@ struct q10_files {
   explicit q10_files(double scale_factor)
   {
     check_q10_cases();
-    cuda::stream_ref const stream = cudf::get_default_stream();
-    ndsh::vortex_io io{stream.get()};
-    {
-      ndsh::q10_reference_builder builder;
-      for_each_generated_table(
-        scale_factor, q10_tables, [&](std::string const& name, table_with_names const& generated) {
-          auto const& columns = q10_projections.at(name);
-          CUDF_EXPECTS(
-            generated.table().num_columns() > static_cast<cudf::size_type>(columns.size()),
-            "Q10 fixture requires full generated table: " + name);
-          tables.write(name, generated, io);
-          auto const projected = generated.select(columns);
-          builder.add_table(name, projected, stream);
-          ndsh::check_file_projections(tables, name, projected, columns, io);
-          CUDF_CUDA_TRY(cudaDeviceSynchronize());
-        });
-      reference = builder.finish();
-    }
-
-    for (bool use_vortex : {false, true}) {
-      auto result = execute_q10(
-        [&](std::string const& name,
-            std::vector<std::string> const& columns,
-            std::unique_ptr<cudf::ast::operation> const&) {
-          return ndsh::read_local_file(tables.path(name, use_vortex), use_vortex, io, columns);
-        },
-        true);
-
-      ndsh::check_q10_result(reference, *result, stream);
-    }
-    CUDF_CUDA_TRY(cudaDeviceSynchronize());
+    ndsh::make_reference_files<ndsh::q10_reference_builder>(
+      scale_factor, tables, reference, q10_tables, q10_projections, true,
+      [&](auto&& read, cuda::stream_ref stream) {
+        auto result = execute_q10(read, true);
+        ndsh::check_q10_result(reference, *result, stream);
+      });
   }
 };
-
-q10_files const& q10_fixture(double scale_factor)
-{
-  // Share only full-table files and the CPU result across format/workload states at this SF.
-  static std::map<double, q10_files> fixtures;
-  return fixtures.try_emplace(scale_factor, scale_factor).first->second;
-}
 
 void ndsh_q10_local(nvbench::state& state)
 {
@@ -195,7 +163,7 @@ void ndsh_q10_local(nvbench::state& state)
   CUDF_EXPECTS(format == "parquet" || format == "vortex", "Unknown Q10 format");
   CUDF_EXPECTS(workload == "read" || workload == "q10", "Unknown Q10 workload");
   auto const use_vortex         = format == "vortex";
-  auto const& files             = q10_fixture(state.get_float64("scale_factor"));
+  auto const& files             = ndsh::local_fixture<q10_files>(state.get_float64("scale_factor"));
   cuda::stream_ref const stream = cudf::get_default_stream();
   state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.get()));
   auto const memory = cudf::memory_stats_logger();

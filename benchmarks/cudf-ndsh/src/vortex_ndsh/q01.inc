@@ -102,13 +102,6 @@ struct q1_files {
   }
 };
 
-q1_files const& q1_fixture(double scale_factor)
-{
-  // Retain only files and host references, shared by every format/workload state for this SF.
-  static std::map<double, q1_files> fixtures;
-  return fixtures.try_emplace(scale_factor, scale_factor).first->second;
-}
-
 void ndsh_q1_local(nvbench::state& state)
 {
   auto const format   = state.get_string("format");
@@ -117,7 +110,7 @@ void ndsh_q1_local(nvbench::state& state)
   CUDF_EXPECTS(format == "parquet" || format == "vortex", "Unknown Q1 format");
   CUDF_EXPECTS(workload == "read" || workload == "q1", "Unknown Q1 workload");
   auto const use_vortex         = format == "vortex";
-  auto const& files             = q1_fixture(state.get_float64("scale_factor"));
+  auto const& files             = ndsh::local_fixture<q1_files>(state.get_float64("scale_factor"));
   cuda::stream_ref const stream = cudf::get_default_stream();
   state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.get()));
   auto const memory = cudf::memory_stats_logger();

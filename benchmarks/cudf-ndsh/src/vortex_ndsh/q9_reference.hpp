@@ -6,13 +6,10 @@
 #pragma once
 
 #include "reference_io.hpp"
-#include "utilities.hpp"
 
 #include <cudf/utilities/error.hpp>
 #include <cudf/wrappers/timestamps.hpp>
 
-#include <algorithm>
-#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -50,61 +47,45 @@ class q9_reference_builder {
  public:
   void add_table(std::string const& name, cudf::table_view projected, cuda::stream_ref stream)
   {
-    static constexpr std::array<char const*, 6> tables{
-      "nation", "supplier", "partsupp", "orders", "part", "lineitem"};
-    CUDF_EXPECTS(next_table_ < tables.size() && name == tables[next_table_],
-                 "Q9 requires nation, supplier, partsupp, orders, part, lineitem in order");
     using enum cudf::type_id;
-    if (name == "nation") {
-      detail::reference_schema(projected, {INT8, STRING});
-    } else if (name == "supplier") {
-      detail::reference_schema(projected, {INT32, INT8});
-    } else if (name == "partsupp") {
-      detail::reference_schema(projected, {INT32, INT32, FLOAT64});
-    } else if (name == "orders") {
-      detail::reference_schema(projected, {INT32, TIMESTAMP_DAYS});
-    } else if (name == "part") {
-      detail::reference_schema(projected, {INT32, STRING});
-    } else {
-      detail::reference_schema(projected, {INT32, INT32, INT32, FLOAT64, FLOAT64, INT8});
-    }
+    detail::reference_input_schema(projected, name, next_table_,
+      {{"nation", {INT8, STRING}},
+       {"supplier", {INT32, INT8}},
+       {"partsupp", {INT32, INT32, FLOAT64}},
+       {"orders", {INT32, TIMESTAMP_DAYS}},
+       {"part", {INT32, STRING}},
+       {"lineitem", {INT32, INT32, INT32, FLOAT64, FLOAT64, INT8}}});
 
     // Filtered dimensions must also reject duplicates among discarded rows.
     std::unordered_set<int32_t> primary_keys;
 
-    for (cudf::size_type begin = 0; begin < projected.num_rows();) {
-      auto const count = std::min<cudf::size_type>(1 << 20, projected.num_rows() - begin);
-      auto values      = [&](auto type, int index) {
-        return detail::reference_host_copy(
-          projected.column(index).data<decltype(type)>() + begin, count, stream);
-      };
+    detail::for_reference_batches(projected, stream, [&](detail::reference_batch const& batch) {
       if (name == "nation") {
-        auto const keys = values(int8_t{}, 0);
-        auto const names =
-          detail::reference_host_strings(projected.column(1), begin, count, stream);
-        for (cudf::size_type i = 0; i < count; ++i) {
+        auto const keys  = batch.values<int8_t>(0);
+        auto const names = batch.strings(1);
+        for (cudf::size_type i = 0; i < batch.count; ++i) {
           CUDF_EXPECTS(nations_.try_emplace(keys[i], names[i]).second, "Duplicate Q9 nation key");
         }
       } else if (name == "supplier") {
-        auto const keys    = values(int32_t{}, 0);
-        auto const nations = values(int8_t{}, 1);
-        for (cudf::size_type i = 0; i < count; ++i) {
+        auto const keys    = batch.values<int32_t>(0);
+        auto const nations = batch.values<int8_t>(1);
+        for (cudf::size_type i = 0; i < batch.count; ++i) {
           CUDF_EXPECTS(primary_keys.insert(keys[i]).second, "Duplicate Q9 supplier key");
           if (nations_.contains(nations[i])) { suppliers_.emplace(keys[i], nations[i]); }
         }
       } else if (name == "partsupp") {
-        auto const suppliers = values(int32_t{}, 0);
-        auto const parts     = values(int32_t{}, 1);
-        auto const costs     = values(double{}, 2);
-        for (cudf::size_type i = 0; i < count; ++i) {
+        auto const suppliers = batch.values<int32_t>(0);
+        auto const parts     = batch.values<int32_t>(1);
+        auto const costs     = batch.values<double>(2);
+        for (cudf::size_type i = 0; i < batch.count; ++i) {
           auto const key = detail::q9_partsupp_key(suppliers[i], parts[i]);
 
           if (suppliers_.contains(suppliers[i])) { supply_costs_.emplace(key, costs[i]); }
         }
       } else if (name == "orders") {
-        auto const keys  = values(int32_t{}, 0);
-        auto const dates = values(cudf::timestamp_D{}, 1);
-        for (cudf::size_type i = 0; i < count; ++i) {
+        auto const keys  = batch.values<int32_t>(0);
+        auto const dates = batch.values<cudf::timestamp_D>(1);
+        for (cudf::size_type i = 0; i < batch.count; ++i) {
           CUDF_EXPECTS(!orders_.contains(keys[i]), "Duplicate Q9 order key");
           auto const date =
             std::chrono::sys_days{std::chrono::days{dates[i].time_since_epoch().count()}};
@@ -113,21 +94,20 @@ class q9_reference_builder {
           orders_.emplace(keys[i], static_cast<int16_t>(int{calendar.year()}));
         }
       } else if (name == "part") {
-        auto const keys = values(int32_t{}, 0);
-        auto const names =
-          detail::reference_host_strings(projected.column(1), begin, count, stream);
-        for (cudf::size_type i = 0; i < count; ++i) {
+        auto const keys  = batch.values<int32_t>(0);
+        auto const names = batch.strings(1);
+        for (cudf::size_type i = 0; i < batch.count; ++i) {
           CUDF_EXPECTS(primary_keys.insert(keys[i]).second, "Duplicate Q9 part key");
           if (names[i].find("green") != std::string::npos) { green_parts_.insert(keys[i]); }
         }
       } else {
-        auto const suppliers  = values(int32_t{}, 0);
-        auto const parts      = values(int32_t{}, 1);
-        auto const orders     = values(int32_t{}, 2);
-        auto const prices     = values(double{}, 3);
-        auto const discounts  = values(double{}, 4);
-        auto const quantities = values(int8_t{}, 5);
-        for (cudf::size_type i = 0; i < count; ++i) {
+        auto const suppliers  = batch.values<int32_t>(0);
+        auto const parts      = batch.values<int32_t>(1);
+        auto const orders     = batch.values<int32_t>(2);
+        auto const prices     = batch.values<double>(3);
+        auto const discounts  = batch.values<double>(4);
+        auto const quantities = batch.values<int8_t>(5);
+        for (cudf::size_type i = 0; i < batch.count; ++i) {
           if (!green_parts_.contains(parts[i])) continue;
           auto const supplier = suppliers_.find(suppliers[i]);
           auto const order    = orders_.find(orders[i]);
@@ -141,8 +121,7 @@ class q9_reference_builder {
           }
         }
       }
-      begin += count;
-    }
+    });
     ++next_table_;
   }
 
@@ -167,29 +146,21 @@ inline void check_q9_result(q9_reference_result const& expected,
                             cuda::stream_ref stream)
 {
   std::vector<std::string> const names{"nation", "o_year", "sum_profit"};
-  CUDF_EXPECTS(actual.column_names() == names && actual.table().num_columns() == 3,
-               "Unexpected Q9 output columns");
-  auto const table = actual.table();
-  detail::reference_schema(table,
-                           {cudf::type_id::STRING, cudf::type_id::INT16, cudf::type_id::FLOAT64});
-  CUDF_EXPECTS(static_cast<std::size_t>(table.num_rows()) == expected.sum_profit.size(),
-               "Q9 group count mismatch");
+  using enum cudf::type_id;
+  auto const table = detail::reference_output(
+    actual, names, {STRING, INT16, FLOAT64}, expected.sum_profit.size());
   auto group = expected.sum_profit.begin();
-  for (cudf::size_type begin = 0; begin < table.num_rows();) {
-    auto const count   = std::min<cudf::size_type>(1 << 20, table.num_rows() - begin);
-    auto const nations = detail::reference_host_strings(table.column(0), begin, count, stream);
-    auto const years =
-      detail::reference_host_copy(table.column(1).data<int16_t>() + begin, count, stream);
-    auto const profits =
-      detail::reference_host_copy(table.column(2).data<double>() + begin, count, stream);
-    for (cudf::size_type i = 0; i < count; ++i, ++group) {
+  detail::for_reference_batches(table, stream, [&](detail::reference_batch const& batch) {
+    auto const nations = batch.strings(0);
+    auto const years   = batch.values<int16_t>(1);
+    auto const profits = batch.values<double>(2);
+    for (cudf::size_type i = 0; i < batch.count; ++i, ++group) {
       CUDF_EXPECTS(
         group != expected.sum_profit.end() && group->first == std::make_pair(nations[i], years[i]),
         "Q9 ordered group keys mismatch");
       CUDF_EXPECTS(detail::reference_equal(profits[i], group->second), "Q9 sum_profit mismatch");
     }
-    begin += count;
-  }
+  });
   CUDF_EXPECTS(group == expected.sum_profit.end(), "Missing Q9 output groups");
 }
 }  // namespace ndsh

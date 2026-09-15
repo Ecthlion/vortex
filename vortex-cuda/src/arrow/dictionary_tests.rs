@@ -1,13 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-use arrow_schema::DataType;
-use arrow_schema::Field;
-use arrow_schema::ffi::FFI_ArrowSchema;
 use futures::future::BoxFuture;
 use futures::stream;
 use rstest::rstest;
-use vortex::array::ArrayRef;
 use vortex::array::IntoArray;
 use vortex::array::arrays::Constant;
 use vortex::array::arrays::DictArray;
@@ -25,28 +21,11 @@ use vortex::array::validity::Validity;
 use vortex::buffer::BitBuffer;
 use vortex::buffer::Buffer;
 use vortex::buffer::ByteBuffer;
-use vortex::dtype::DType;
-use vortex::dtype::PType;
-use vortex::error::VortexResult;
 use vortex::error::vortex_bail;
-use vortex::error::vortex_err;
-use vortex::io::runtime::BlockingRuntime;
-use vortex::io::runtime::current::CurrentThreadRuntime;
 
-use super::ARROW_DEVICE_CUDA;
-use super::ArrowArray;
-use super::ArrowDeviceArray;
-use super::ArrowDeviceArrayStream;
-use super::DeviceArrayExt;
-use super::DeviceArrayStreamExt;
-use super::LIBC_EIO;
-use super::PrivateData;
-use super::release_device_array;
 use super::tests::last_error;
-use crate::CudaBufferExt;
-use crate::CudaExecutionCtx;
+use super::*;
 use crate::CudaSession;
-use crate::DictionaryExport;
 
 // Keep the compressed encoding tree intact while moving every buffer, including validity, to
 // CUDA. Any unsupported decode must now error, rather than silently using the CPU executor.
@@ -267,29 +246,13 @@ fn test_decode_mixed_dictionary_device_stream(
 }
 
 #[rstest]
+#[case::without_schema(None)]
+#[case::list(Some(0))]
+#[case::fixed_size_list(Some(1))]
+#[case::non_contiguous_list_view(Some(2))]
 #[crate::test]
-async fn test_decode_dictionary_without_schema(
-    #[values(false, true)] strings: bool,
-) -> VortexResult<()> {
-    let session = vortex::array::array_session()
-        .with_some(CudaSession::try_default()?.with_dictionary_export(DictionaryExport::Decode));
-    let mut ctx = CudaSession::create_execution_ctx(&session)?;
-    let (values, expected) = values_and_expected(strings);
-    let array = upload(dictionary(values, PType::U8)?, &mut ctx).await?;
-    let mut exported = array.export_device_array(&mut ctx).await?;
-    let actual = read_plain(&exported.array, expected.dtype())?;
-    assert_arrays_eq!(actual, expected, ctx.execution_ctx());
-    release_device_array(&mut exported);
-    Ok(())
-}
-
-#[rstest]
-#[case::list(0)]
-#[case::fixed_size_list(1)]
-#[case::non_contiguous_list_view(2)]
-#[crate::test]
-async fn test_decode_dictionary_list_child(
-    #[case] layout: usize,
+async fn test_decode_dictionary_array(
+    #[case] layout: Option<usize>,
     #[values(false, true)] strings: bool,
 ) -> VortexResult<()> {
     let session = vortex::array::array_session()
@@ -298,13 +261,14 @@ async fn test_decode_dictionary_list_child(
     let (values, mut expected) = values_and_expected(strings);
     let elements = dictionary(values, PType::U8)?;
     let array = match layout {
-        0 => ListArray::try_new(
+        None => elements,
+        Some(0) => ListArray::try_new(
             elements,
             PrimitiveArray::from_iter([0i32, 2, 4]).into_array(),
             Validity::NonNullable,
         )?
         .into_array(),
-        1 => FixedSizeListArray::try_new(elements, 2, Validity::NonNullable, 2)?.into_array(),
+        Some(1) => FixedSizeListArray::try_new(elements, 2, Validity::NonNullable, 2)?.into_array(),
         _ => {
             expected = expected.take(PrimitiveArray::from_iter([2u32, 3, 0, 1]).into_array())?;
             ListViewArray::new(
@@ -317,34 +281,41 @@ async fn test_decode_dictionary_list_child(
         }
     };
     let array = upload(array, &mut ctx).await?;
-    let mut exported = array.export_device_array_with_schema(&mut ctx).await?;
-    assert_eq!(
-        Field::try_from(&exported.schema)?,
-        Field::new_list(
-            "",
-            Field::new(
-                Field::LIST_FIELD_DEFAULT_NAME,
-                if strings {
-                    DataType::Utf8
-                } else {
-                    DataType::Int32
-                },
-                expected.dtype().is_nullable()
-            ),
-            false,
-        )
-    );
-    assert_eq!(exported.array.array.length, 2);
-    assert_eq!(exported.array.array.n_children, 1);
-    assert_eq!(
-        Buffer::<i32>::from_byte_buffer(buffer(&exported.array.array, 1)?).as_ref(),
-        &[0, 2, 4]
-    );
-    // SAFETY: This live list array owns the single child checked above.
-    let child = unsafe { &**exported.array.array.children };
-    let actual = read_plain(child, expected.dtype())?;
+    let mut exported;
+    let values = if layout.is_some() {
+        let with_schema = array.export_device_array_with_schema(&mut ctx).await?;
+        assert_eq!(
+            Field::try_from(&with_schema.schema)?,
+            Field::new_list(
+                "",
+                Field::new(
+                    Field::LIST_FIELD_DEFAULT_NAME,
+                    if strings {
+                        DataType::Utf8
+                    } else {
+                        DataType::Int32
+                    },
+                    expected.dtype().is_nullable(),
+                ),
+                false,
+            )
+        );
+        exported = with_schema.array;
+        assert_eq!(exported.array.length, 2);
+        assert_eq!(exported.array.n_children, 1);
+        assert_eq!(
+            Buffer::<i32>::from_byte_buffer(buffer(&exported.array, 1)?).as_ref(),
+            &[0, 2, 4]
+        );
+        // SAFETY: This live list array owns the single child checked above.
+        unsafe { &**exported.array.children }
+    } else {
+        exported = array.export_device_array(&mut ctx).await?;
+        &exported.array
+    };
+    let actual = read_plain(values, expected.dtype())?;
     assert_arrays_eq!(actual, expected, ctx.execution_ctx());
-    release_device_array(&mut exported.array);
+    release_device_array(&mut exported);
     Ok(())
 }
 

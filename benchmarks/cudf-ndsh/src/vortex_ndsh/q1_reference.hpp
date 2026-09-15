@@ -6,12 +6,10 @@
 #pragma once
 
 #include "reference_io.hpp"
-#include "utilities.hpp"
 
 #include <cudf/utilities/error.hpp>
 #include <cudf/wrappers/timestamps.hpp>
 
-#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -35,20 +33,15 @@ inline q1_reference_result q1_cpu_reference(cudf::table_view projected, cuda::st
   detail::reference_schema(
     projected, {STRING, STRING, INT8, FLOAT64, FLOAT64, TIMESTAMP_DAYS, INT32, FLOAT64});
   q1_reference_result result;
-  for (cudf::size_type begin = 0; begin < projected.num_rows();) {
-    auto const count = std::min<cudf::size_type>(1 << 20, projected.num_rows() - begin);
-    auto values      = [&](auto type, int index) {
-      return detail::reference_host_copy(
-        projected.column(index).data<decltype(type)>() + begin, count, stream);
-    };
-    auto const flags    = detail::reference_host_strings(projected.column(0), begin, count, stream);
-    auto const statuses = detail::reference_host_strings(projected.column(1), begin, count, stream);
-    auto const quantity = values(int8_t{}, 2);
-    auto const price    = values(double{}, 3);
-    auto const discount = values(double{}, 4);
-    auto const shipdate = values(cudf::timestamp_D{}, 5);
-    auto const tax      = values(double{}, 7);
-    for (cudf::size_type i = 0; i < count; ++i) {
+  detail::for_reference_batches(projected, stream, [&](detail::reference_batch const& batch) {
+    auto const flags    = batch.strings(0);
+    auto const statuses = batch.strings(1);
+    auto const quantity = batch.values<int8_t>(2);
+    auto const price    = batch.values<double>(3);
+    auto const discount = batch.values<double>(4);
+    auto const shipdate = batch.values<cudf::timestamp_D>(5);
+    auto const tax      = batch.values<double>(7);
+    for (cudf::size_type i = 0; i < batch.count; ++i) {
       // 1998-09-02 is 10471 days after 1970-01-01; the boundary is inclusive.
       if (shipdate[i].time_since_epoch().count() > 10471) continue;
       auto& group             = result.groups[{flags[i], statuses[i]}];
@@ -63,8 +56,7 @@ inline q1_reference_result q1_cpu_reference(cudf::table_view projected, cuda::st
       ++group[7];
       ++result.matched;
     }
-    begin += count;
-  }
+  });
   for (auto& [key, group] : result.groups) {
     group[4] = group[0] / group[7];
     group[5] = group[1] / group[7];
@@ -88,35 +80,26 @@ inline void check_q1_result(q1_reference_result const& expected,
                                        "avg_price",
                                        "avg_disc",
                                        "count_order"};
-  CUDF_EXPECTS(actual.column_names().size() == names.size() && actual.table().num_columns() == 10,
-               "Expected exactly ten Q1 output columns");
-  for (auto const& name : names) {
-    CUDF_EXPECTS(std::count(actual.column_names().begin(), actual.column_names().end(), name) == 1,
-                 "Missing or duplicate Q1 output column: " + name);
-  }
-  auto const table = actual.select(names);
   using enum cudf::type_id;
-  detail::reference_schema(
-    table, {STRING, STRING, INT64, FLOAT64, FLOAT64, FLOAT64, FLOAT64, FLOAT64, FLOAT64, INT32});
-  CUDF_EXPECTS(static_cast<std::size_t>(table.num_rows()) == expected.groups.size(),
-               "Q1 group count mismatch");
+  auto const table = detail::reference_output(
+    actual, names,
+    {STRING, STRING, INT64, FLOAT64, FLOAT64, FLOAT64, FLOAT64, FLOAT64, FLOAT64, INT32},
+    expected.groups.size(), false);
   auto group      = expected.groups.begin();
   int64_t matched = 0;
-  for (cudf::size_type begin = 0; begin < table.num_rows();) {
-    auto const count    = std::min<cudf::size_type>(1 << 20, table.num_rows() - begin);
+  detail::for_reference_batches(table, stream, [&](detail::reference_batch const& batch) {
     auto const first    = group;
-    auto const flags    = detail::reference_host_strings(table.column(0), begin, count, stream);
-    auto const statuses = detail::reference_host_strings(table.column(1), begin, count, stream);
-    for (cudf::size_type i = 0; i < count; ++i, ++group) {
+    auto const flags    = batch.strings(0);
+    auto const statuses = batch.strings(1);
+    for (cudf::size_type i = 0; i < batch.count; ++i, ++group) {
       CUDF_EXPECTS(group->first == std::make_pair(flags[i], statuses[i]),
                    "Q1 ordered keys mismatch");
     }
     for (int metric = 0; metric < 8; ++metric) {
       auto check = [&](auto type) {
-        auto const values = detail::reference_host_copy(
-          table.column(metric + 2).data<decltype(type)>() + begin, count, stream);
+        auto const values = batch.values<decltype(type)>(metric + 2);
         auto reference = first;
-        for (cudf::size_type i = 0; i < count; ++i, ++reference) {
+        for (cudf::size_type i = 0; i < batch.count; ++i, ++reference) {
           double const value = values[i], want = reference->second[metric];
           bool const exact = metric == 0 || metric == 7;
           CUDF_EXPECTS(detail::reference_equal(value, want, exact),
@@ -132,8 +115,7 @@ inline void check_q1_result(q1_reference_result const& expected,
         check(double{});
       }
     }
-    begin += count;
-  }
+  });
   CUDF_EXPECTS(matched == expected.matched, "Q1 matched row count mismatch");
 }
 }  // namespace ndsh

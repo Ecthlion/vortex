@@ -1,22 +1,25 @@
+diff --git a/cpp/CMakeLists.txt b/cpp/CMakeLists.txt
+index 27dd802..f94baef 100644
+--- a/cpp/CMakeLists.txt
++++ b/cpp/CMakeLists.txt
+@@ -37,6 +37,7 @@ rapids_cmake_write_version_file(include/cudf/version_config.hpp)
+ option(USE_NVTX "Build with NVTX support" ON)
+ option(BUILD_TESTS "Configure CMake to build tests" ON)
+ option(BUILD_BENCHMARKS "Configure CMake to build benchmarks" OFF)
++option(CUDF_WITH_VORTEX "Enable Vortex benchmark integration" OFF)
+ option(BUILD_SHARED_LIBS "Build cuDF shared libraries" ON)
+ option(CUDF_BUILD_TESTUTIL "Whether to build the test utilities contained in libcudf" ON)
+ mark_as_advanced(CUDF_BUILD_TESTUTIL)
 diff --git a/cpp/benchmarks/CMakeLists.txt b/cpp/benchmarks/CMakeLists.txt
-index 8fa9593..5060ef2 100644
+index 8fa9593..7c7117f 100644
 --- a/cpp/benchmarks/CMakeLists.txt
 +++ b/cpp/benchmarks/CMakeLists.txt
-@@ -129,6 +129,18 @@ ConfigureNVBench(NDSH_Q05_NVBENCH ndsh/q05.cpp ndsh/utilities.cpp)
+@@ -129,6 +129,9 @@ ConfigureNVBench(NDSH_Q05_NVBENCH ndsh/q05.cpp ndsh/utilities.cpp)
  ConfigureNVBench(NDSH_Q06_NVBENCH ndsh/q06.cpp ndsh/utilities.cpp)
  ConfigureNVBench(NDSH_Q09_NVBENCH ndsh/q09.cpp ndsh/utilities.cpp)
  ConfigureNVBench(NDSH_Q10_NVBENCH ndsh/q10.cpp ndsh/utilities.cpp)
-+option(CUDF_NDSH_WITH_VORTEX "Build Vortex comparisons for NDS-H Q1/Q5/Q6/Q9/Q10" OFF)
-+if(CUDF_NDSH_WITH_VORTEX)
-+  if(NOT FETCHCONTENT_SOURCE_DIR_VORTEX
-+     OR NOT EXISTS "${FETCHCONTENT_SOURCE_DIR_VORTEX}/benchmarks/cudf-ndsh/vortex.cmake"
-+     OR IS_DIRECTORY "${FETCHCONTENT_SOURCE_DIR_VORTEX}/benchmarks/cudf-ndsh/vortex.cmake")
-+    message(FATAL_ERROR
-+      "CUDF_NDSH_WITH_VORTEX=ON requires a Vortex checkout containing benchmarks/cudf-ndsh/vortex.cmake. "
-+      "Set -DFETCHCONTENT_SOURCE_DIR_VORTEX=/path/to/vortex "
-+      "(got '${FETCHCONTENT_SOURCE_DIR_VORTEX}').")
-+  endif()
-+  include("${FETCHCONTENT_SOURCE_DIR_VORTEX}/benchmarks/cudf-ndsh/vortex.cmake")
++if(CUDF_WITH_VORTEX)
++  include("${CMAKE_CURRENT_SOURCE_DIR}/../cmake/thirdparty/get_vortex.cmake")
 +endif()
  
  # ##################################################################################################
@@ -673,3 +676,40 @@ index 7864e54..52f20e5 100644
  /**
   * @brief Generate NDS-H tables and write to parquet device buffers
   *
+diff --git a/cpp/cmake/thirdparty/get_vortex.cmake b/cpp/cmake/thirdparty/get_vortex.cmake
+new file mode 100644
+index 0000000..cce1393
+--- /dev/null
++++ b/cpp/cmake/thirdparty/get_vortex.cmake
+@@ -0,0 +1,31 @@
++# =============================================================================
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright the Vortex contributors
++# =============================================================================
++
++if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
++  message(FATAL_ERROR "CUDF_WITH_VORTEX requires Linux and a CUDA toolkit")
++endif()
++
++block()
++  # CPM's DOWNLOAD_ONLY path does not honor FetchContent source overrides itself.
++  if(FETCHCONTENT_SOURCE_DIR_VORTEX)
++    set(vortex_SOURCE_DIR "${FETCHCONTENT_SOURCE_DIR_VORTEX}")
++  else()
++    CPMAddPackage(
++      NAME vortex
++      GIT_REPOSITORY https://github.com/vortex-data/vortex.git
++      GIT_TAG 90723345eeed838405341da9d44e02c94f10e6be
++      DOWNLOAD_ONLY TRUE
++    )
++  endif()
++
++  set(vortex_module "${vortex_SOURCE_DIR}/benchmarks/cudf-ndsh/vortex.cmake")
++  if(NOT EXISTS "${vortex_module}" OR IS_DIRECTORY "${vortex_module}")
++    message(FATAL_ERROR
++      "CUDF_WITH_VORTEX requires Vortex sources containing benchmarks/cudf-ndsh/vortex.cmake "
++      "(got '${vortex_SOURCE_DIR}'). A local checkout can be selected with "
++      "-DFETCHCONTENT_SOURCE_DIR_VORTEX=/path/to/vortex.")
++  endif()
++  include("${vortex_module}")
++endblock()

@@ -38,6 +38,11 @@ fn names(values: &[&str]) -> VortexResult<FieldNames> {
     unsafe { scan_columns(views.as_ptr(), views.len()) }
 }
 
+fn assert_error<T>(result: VortexResult<T>, message: &str) {
+    let error = result.err().expect("expected an error");
+    assert!(error.to_string().contains(message), "{error}");
+}
+
 #[test]
 fn test_projection_names_are_owned_and_zero_count_means_all() -> VortexResult<()> {
     let parsed = {
@@ -84,10 +89,7 @@ fn test_projection_rejects_invalid_names_and_counts() -> VortexResult<()> {
     ] {
         // SAFETY: Invalid pointer/length combinations must be rejected before dereferencing;
         // all remaining views and bytes are live.
-        let error = unsafe { scan_columns(columns, count) }
-            .err()
-            .ok_or_else(|| vortex_err!("expected invalid projection"))?;
-        assert!(error.to_string().contains(message), "{error}");
+        assert_error(unsafe { scan_columns(columns, count) }, message);
     }
     Ok(())
 }
@@ -141,6 +143,45 @@ fn file_bytes(
     Ok(bytes.freeze())
 }
 
+fn open_file(
+    session: &VortexSession,
+    array: ArrayRef,
+    cuda_block_rows: Option<usize>,
+) -> VortexResult<VortexFile> {
+    session
+        .open_options()
+        .open_buffer(file_bytes(session, array, cuda_block_rows)?)
+}
+
+fn scan_lengths(
+    file: &VortexFile,
+    columns: &[&str],
+    batch_rows: usize,
+) -> VortexResult<Vec<usize>> {
+    let batches: Vec<_> = ffi_runtime().block_on(
+        projected_scan(file, names(columns)?, batch_rows)?
+            .into_array_stream()?
+            .try_collect(),
+    )?;
+    Ok(batches.iter().map(|batch| batch.len()).collect())
+}
+
+fn assert_arrow_eq(
+    session: &VortexSession,
+    actual: ArrayRef,
+    expected: ArrayRef,
+) -> VortexResult<()> {
+    let mut ctx = session.create_execution_ctx();
+    let mut to_data = |array| {
+        session
+            .arrow()
+            .execute_arrow(array, None, &mut ctx)
+            .map(|array| array.to_data())
+    };
+    assert_eq!(to_data(actual)?, to_data(expected)?);
+    Ok(())
+}
+
 #[test]
 fn test_cuda_write_strategy_preserves_high_cardinality_row_blocks() -> VortexResult<()> {
     let session = session();
@@ -149,18 +190,8 @@ fn test_cuda_write_strategy_preserves_high_cardinality_row_blocks() -> VortexRes
     let rows = ids.len();
     let input =
         StructArray::try_new(["ids"].into(), vec![ids], rows, Validity::NonNullable)?.into_array();
-    let file = session
-        .open_options()
-        .open_buffer(file_bytes(&session, input, Some(rows))?)?;
-    let batches: Vec<_> = ffi_runtime().block_on(
-        projected_scan(&file, names(&["ids"])?, rows)?
-            .into_array_stream()?
-            .try_collect(),
-    )?;
-    assert_eq!(
-        batches.iter().map(|batch| batch.len()).collect::<Vec<_>>(),
-        [rows]
-    );
+    let file = open_file(&session, input, Some(rows))?;
+    assert_eq!(scan_lengths(&file, &["ids"], rows)?, [rows]);
     Ok(())
 }
 
@@ -169,10 +200,7 @@ fn test_projection_cpu_scan_order_dtype_empty_and_defaults() -> VortexResult<()>
     let session = session();
     for rows in [0, 5] {
         let input = table(rows)?;
-        let file =
-            session
-                .open_options()
-                .open_buffer(file_bytes(&session, input.clone(), None)?)?;
+        let file = open_file(&session, input.clone(), None)?;
         for columns in [vec!["値.x", "ids"], vec!["ids"], vec![]] {
             let expected = if columns.is_empty() {
                 input.clone()
@@ -189,17 +217,7 @@ fn test_projection_cpu_scan_order_dtype_empty_and_defaults() -> VortexResult<()>
                 let stream = scan.into_array_stream()?;
                 assert_eq!(stream.dtype(), expected.dtype());
                 let actual = ffi_runtime().block_on(stream.read_all())?;
-                let mut ctx = session.create_execution_ctx();
-                assert_eq!(
-                    session
-                        .arrow()
-                        .execute_arrow(actual, None, &mut ctx)?
-                        .to_data(),
-                    session
-                        .arrow()
-                        .execute_arrow(expected.clone(), None, &mut ctx)?
-                        .to_data(),
-                );
+                assert_arrow_eq(&session, actual, expected.clone())?;
             }
         }
     }
@@ -209,20 +227,9 @@ fn test_projection_cpu_scan_order_dtype_empty_and_defaults() -> VortexResult<()>
 #[test]
 fn test_projected_scan_batch_rows_preserve_cuda_layout_boundaries() -> VortexResult<()> {
     let session = session();
-    let file = session
-        .open_options()
-        .open_buffer(file_bytes(&session, table(5)?, Some(2))?)?;
-
+    let file = open_file(&session, table(5)?, Some(2))?;
     for columns in [vec!["値.x", "ids"], vec![]] {
-        let batches: Vec<_> = ffi_runtime().block_on(
-            projected_scan(&file, names(&columns)?, 3)?
-                .into_array_stream()?
-                .try_collect(),
-        )?;
-        assert_eq!(
-            batches.iter().map(|batch| batch.len()).collect::<Vec<_>>(),
-            [2, 2, 1]
-        );
+        assert_eq!(scan_lengths(&file, &columns, 3)?, [2, 2, 1]);
     }
     Ok(())
 }
@@ -231,47 +238,26 @@ fn test_projected_scan_batch_rows_preserve_cuda_layout_boundaries() -> VortexRes
 fn test_projection_cpu_rejects_unknown_names_and_non_struct() -> VortexResult<()> {
     let session = session();
     for rows in [0, 5] {
-        let file = session
-            .open_options()
-            .open_buffer(file_bytes(&session, table(rows)?, None)?)?;
+        let file = open_file(&session, table(rows)?, None)?;
         for name in ["missing", "IDS", "値", "値.x.child"] {
-            let error = projected_scan(&file, names(&[name])?, 0)
-                .err()
-                .ok_or_else(|| vortex_err!("expected unknown column error"))?;
-            assert!(
-                error.to_string().contains("unknown CUDA scan column"),
-                "{error}"
+            assert_error(
+                projected_scan(&file, names(&[name])?, 0),
+                "unknown CUDA scan column",
             );
         }
     }
     let input = PrimitiveArray::from_iter([1i32, 2, 3]).into_array();
-    let file = session
-        .open_options()
-        .open_buffer(file_bytes(&session, input.clone(), None)?)?;
-    let error = projected_scan(&file, names(&["ids"])?, 0)
-        .err()
-        .ok_or_else(|| vortex_err!("expected non-struct projection error"))?;
-    assert!(
-        error.to_string().contains("requires a struct file dtype"),
-        "{error}"
+    let file = open_file(&session, input.clone(), None)?;
+    assert_error(
+        projected_scan(&file, names(&["ids"])?, 0),
+        "requires a struct file dtype",
     );
     let actual = ffi_runtime().block_on(
         projected_scan(&file, names(&[])?, 0)?
             .into_array_stream()?
             .read_all(),
     )?;
-    let mut ctx = session.create_execution_ctx();
-    assert_eq!(
-        session
-            .arrow()
-            .execute_arrow(actual, None, &mut ctx)?
-            .to_data(),
-        session
-            .arrow()
-            .execute_arrow(input, None, &mut ctx)?
-            .to_data(),
-    );
-    Ok(())
+    assert_arrow_eq(&session, actual, input)
 }
 
 struct RejectSegments {
@@ -295,9 +281,7 @@ impl SegmentSource for RejectSegments {
 #[test]
 fn test_projection_cpu_never_requests_unselected_column_segments() -> VortexResult<()> {
     let session = session();
-    let file = session
-        .open_options()
-        .open_buffer(file_bytes(&session, table(5)?, None)?)?;
+    let file = open_file(&session, table(5)?, None)?;
     // TableStrategy writes one flat child per column, so child 1 is exactly the unused column.
     let children = file.footer().layout().children()?;
     let forbidden = children[1].segment_ids();
@@ -308,30 +292,16 @@ fn test_projection_cpu_never_requests_unselected_column_segments() -> VortexResu
         rejected: AtomicUsize::new(0),
     });
     let file = file.with_segment_source(Arc::<RejectSegments>::clone(&source));
-    let batches: Vec<_> = ffi_runtime().block_on(
-        projected_scan(&file, names(&["値.x", "ids"])?, 2)?
-            .into_array_stream()?
-            .try_collect(),
-    )?;
-    assert_eq!(
-        batches.iter().map(|batch| batch.len()).collect::<Vec<_>>(),
-        [2, 2, 1]
-    );
+    assert_eq!(scan_lengths(&file, &["値.x", "ids"], 2)?, [2, 2, 1]);
     assert_eq!(source.rejected.load(Ordering::Relaxed), 0);
     // The same reader must fail without projection, proving the guard actually observes reads.
-    let error = ffi_runtime()
-        .block_on(
+    assert_error(
+        ffi_runtime().block_on(
             projected_scan(&file, names(&[])?, 0)?
                 .into_array_stream()?
                 .read_all(),
-        )
-        .err()
-        .ok_or_else(|| vortex_err!("full scan must request unused data"))?;
-    assert!(
-        error
-            .to_string()
-            .contains("unselected column segment requested"),
-        "{error}"
+        ),
+        "unselected column segment requested",
     );
     assert!(source.rejected.load(Ordering::Relaxed) > 0);
     Ok(())
@@ -507,86 +477,57 @@ fn batch_lengths(
 }
 
 #[cuda_test]
-fn test_projection_gpu_local_file_schema_batches_empty_and_defaults() -> VortexResult<()> {
-    let session = session().with_some(CudaSession::try_default()?);
-    for rows in [0, 5] {
-        let file = LocalFile::new(&file_bytes(&session, table(rows)?, Some(0))?)?;
+fn test_projection_gpu_local_file_schema_batches_empty_defaults_and_boundaries() -> VortexResult<()>
+{
+    for (rows, block_rows, batch_rows) in [
+        (0, 0, None),
+        (0, 0, Some(2)),
+        (5, 0, None),
+        (5, 0, Some(2)),
+        (5, 2, Some(3)),
+    ] {
+        let session = session().with_some(CudaSession::try_default()?);
+        let file = LocalFile::new(&file_bytes(&session, table(rows)?, Some(block_rows))?)?;
         let path = file
             .0
             .to_str()
             .ok_or_else(|| vortex_err!("non-UTF-8 test path"))?;
-        for projected in [true, false] {
-            for options in [
-                None,
-                Some(vx_cuda_scan_options {
-                    flags: VX_CUDA_SCAN_FLAG_DECODE_DICTIONARIES,
-                    batch_rows: 2,
-                }),
-            ] {
-                let mut stream = open_stream(&session, path, options.as_ref(), projected);
-                let mut schema = stream_schema(&mut stream)?;
-                let expected_fields = if projected {
-                    vec![
-                        Field::new("値.x", DataType::Int64, true),
-                        Field::new("ids", DataType::UInt32, false),
-                    ]
-                } else {
-                    vec![
-                        Field::new("ids", DataType::UInt32, false),
-                        Field::new("unused", DataType::Float64, false),
-                        Field::new("値.x", DataType::Int64, true),
-                    ]
-                };
-                assert_eq!(Schema::try_from(&schema)?, Schema::new(expected_fields));
-                let lengths = batch_lengths(&mut stream, if projected { 2 } else { 3 })?;
-                assert_eq!(lengths.iter().sum::<i64>(), rows as i64);
-                if rows > 0 && options.is_some() {
-                    assert_eq!(lengths, [2, 2, 1]);
-                }
-                let release = stream
-                    .release
-                    .ok_or_else(|| vortex_err!("missing release"))?;
-                // SAFETY: Both objects are live and released exactly once.
-                unsafe {
-                    release_schema(&mut schema);
-                    release(&raw mut stream);
-                }
+        let options = batch_rows.map(|batch_rows| vx_cuda_scan_options {
+            flags: VX_CUDA_SCAN_FLAG_DECODE_DICTIONARIES,
+            batch_rows,
+        });
+        let streams =
+            [true, false].map(|projected| open_stream(&session, path, options.as_ref(), projected));
+        // Both streams must retain their session state after the caller releases its session.
+        drop(session);
+        for (mut stream, projected) in streams.into_iter().zip([true, false]) {
+            let mut schema = stream_schema(&mut stream)?;
+            let expected_fields = if projected {
+                vec![
+                    Field::new("値.x", DataType::Int64, true),
+                    Field::new("ids", DataType::UInt32, false),
+                ]
+            } else {
+                vec![
+                    Field::new("ids", DataType::UInt32, false),
+                    Field::new("unused", DataType::Float64, false),
+                    Field::new("値.x", DataType::Int64, true),
+                ]
+            };
+            assert_eq!(Schema::try_from(&schema)?, Schema::new(expected_fields));
+            let lengths = batch_lengths(&mut stream, if projected { 2 } else { 3 })?;
+            assert_eq!(lengths.iter().sum::<i64>(), rows as i64);
+            if rows > 0 && options.is_some() {
+                assert_eq!(lengths, [2, 2, 1]);
             }
-        }
-    }
-    Ok(())
-}
-
-#[cuda_test]
-fn test_projection_gpu_preserves_cuda_layout_boundaries() -> VortexResult<()> {
-    let session = session().with_some(CudaSession::try_default()?);
-    let file = LocalFile::new(&file_bytes(&session, table(5)?, Some(2))?)?;
-    let path = file
-        .0
-        .to_str()
-        .ok_or_else(|| vortex_err!("non-UTF-8 test path"))?;
-    let options = vx_cuda_scan_options {
-        flags: VX_CUDA_SCAN_FLAG_DECODE_DICTIONARIES,
-        batch_rows: 3,
-    };
-
-    let streams =
-        [true, false].map(|projected| open_stream(&session, path, Some(&options), projected));
-    // Both streams must retain their session state after the caller releases its session.
-    drop(session);
-    for (mut stream, expected_columns) in streams.into_iter().zip([2, 3]) {
-        let mut schema = stream_schema(&mut stream)?;
-
-        let lengths = batch_lengths(&mut stream, expected_columns)?;
-        assert_eq!(lengths, [2, 2, 1]);
-
-        let release = stream
-            .release
-            .ok_or_else(|| vortex_err!("missing release"))?;
-        // SAFETY: Both objects are live and released exactly once.
-        unsafe {
-            release_schema(&mut schema);
-            release(&raw mut stream);
+            let release = stream
+                .release
+                .ok_or_else(|| vortex_err!("missing release"))?;
+            // SAFETY: Both objects are live and released exactly once.
+            unsafe {
+                release_schema(&mut schema);
+                release(&raw mut stream);
+            }
         }
     }
     Ok(())
