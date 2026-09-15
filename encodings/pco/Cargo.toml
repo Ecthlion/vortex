@@ -36,3 +36,7 @@ vortex-arrow = { workspace = true }
 [[bench]]
 name = "probe"
 harness = false
+
+[[bench]]
+name = "scalar"
+harness = false
