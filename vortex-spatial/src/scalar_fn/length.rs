@@ -65,7 +65,10 @@ fn validate_length_operands(dtypes: &[DType]) -> VortexResult<()> {
 fn list_offsets(list: &ListArray, ctx: &mut ExecutionCtx) -> VortexResult<Vec<usize>> {
     list.offsets()
         .clone()
-        .cast(DType::Primitive(PType::U64, Nullability::NonNullable))?
+        .cast(
+            DType::Primitive(PType::U64, Nullability::NonNullable),
+            ctx.session(),
+        )?
         .execute::<Buffer<u64>>(ctx)?
         .iter()
         .map(|&offset| {

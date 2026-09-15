@@ -119,7 +119,10 @@ fn compact_row_views(
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<(ArrayRef, ArrayRef)> {
     let sizes = row_sizes
-        .cast(DType::Primitive(PType::U64, Nullability::NonNullable))?
+        .cast(
+            DType::Primitive(PType::U64, Nullability::NonNullable),
+            ctx.session(),
+        )?
         .execute::<Buffer<u64>>(ctx)?;
     let mut compact_offsets = BufferMut::<u64>::with_capacity(sizes.len());
     let mut compact_sizes = BufferMut::<u64>::with_capacity(sizes.len());
@@ -197,7 +200,7 @@ fn collect_list_rows(
         .as_ref()
         .clone();
     let storage = ListViewArray::try_new(
-        element_storage.cast(output_element_dtype)?,
+        element_storage.cast(output_element_dtype, ctx.session())?,
         offsets,
         sizes,
         validity,

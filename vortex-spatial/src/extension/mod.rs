@@ -132,7 +132,10 @@ pub(crate) fn flatten_row_offsets(
         let offsets = list
             .offsets()
             .clone()
-            .cast(DType::Primitive(PType::U64, Nullability::NonNullable))?
+            .cast(
+                DType::Primitive(PType::U64, Nullability::NonNullable),
+                ctx.session(),
+            )?
             .execute::<Buffer<u64>>(ctx)?;
         for row_offset in &mut row_offsets {
             *row_offset = usize::try_from(offsets[*row_offset])
