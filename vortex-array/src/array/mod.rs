@@ -30,6 +30,8 @@ pub use erased::*;
 
 mod plugin;
 pub use plugin::*;
+mod probe;
+pub use probe::*;
 
 mod foreign;
 pub(crate) use foreign::*;
@@ -497,7 +499,11 @@ impl<V: VTable> DynArrayData for ArrayData<V> {
         ctx: &mut ExecutionCtx,
     ) -> VortexResult<Scalar> {
         let view = unsafe { ArrayView::new_unchecked(this, &self.data) };
-        <V::OperationsVTable as OperationsVTable<V>>::scalar_at(view, index, ctx)
+        <V::OperationsVTable as OperationsVTable<V>>::probe_scalar(
+            &mut ProbeState::once(view),
+            index,
+            ctx,
+        )
     }
 }
 
