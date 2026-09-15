@@ -247,7 +247,7 @@ fn preserves_physical_type(#[case] input: PrimitiveArray) -> VortexResult<()> {
 }
 
 #[test]
-fn decodes_once_per_cached_page_and_evicts() -> VortexResult<()> {
+fn decodes_each_page_once() -> VortexResult<()> {
     let mut ctx = vortex_array::array_session().create_execution_ctx();
     let input = PrimitiveArray::from_iter(0..4096i32);
     let encoded = Pco::from_primitive(input.as_view(), 3, 128, &mut ctx)?;
@@ -261,8 +261,13 @@ fn decodes_once_per_cached_page_and_evicts() -> VortexResult<()> {
     assert_eq!(state.decoded_pages, 1);
     super::scalar_at(encoded.as_view(), 2048, Some(&mut state), &mut ctx)?;
     assert_eq!(state.decoded_pages, 2);
-    super::scalar_at(encoded.as_view(), 1, Some(&mut state), &mut ctx)?;
-    assert_eq!(state.decoded_pages, 3);
+    for index in [1, 2049, 100, 2100] {
+        assert_eq!(
+            super::scalar_at(encoded.as_view(), index, Some(&mut state), &mut ctx)?,
+            i32::try_from(index)?.into()
+        );
+    }
+    assert_eq!(state.decoded_pages, 2);
     Ok(())
 }
 
