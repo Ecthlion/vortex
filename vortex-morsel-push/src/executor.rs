@@ -5,6 +5,7 @@
 
 use std::ops::Range;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
@@ -83,6 +84,12 @@ const FRONTIER_LOOKAHEAD_PER_THREAD: usize = 0;
 const FRONTIER_SPECULATIVE_PREDICATES_RIGHT: usize = 2;
 const FRONTIER_REFILL_RANGES: usize = 32;
 
+// This experiment admits projection I/O within the existing right bound. Keep it opt-in because
+// selective scans can pay for reads that predicate-only admission would avoid.
+static EXTERNAL_PROJECTION_PREFETCH: LazyLock<bool> = LazyLock::new(|| {
+    std::env::var("VORTEX_MORSEL_FRONTIER_PROJECTION_PREFETCH").as_deref() == Ok("1")
+});
+
 /// Adjacent natural morsels owned by one externally driven PushFrontier scheduler.
 ///
 /// Two ranges are enough to turn independently timed predicate requests into one storage-visible
@@ -146,16 +153,30 @@ impl ExecutorIoPolicy {
         }
     }
 
+    const fn prefetch_projection(self, driver: ExecutorDriver, requested: bool) -> bool {
+        matches!(
+            (self, driver, requested),
+            (Self::Frontier, ExecutorDriver::External, true)
+        )
+    }
+
     fn configure(self, scan: MorselScan, driver: ExecutorDriver) -> MorselScan {
         let settings = self.settings(driver);
         let scan = scan
             .with_lookahead_morsels(settings.lookahead_morsels)
             .with_eager_lookahead(settings.eager_lookahead);
         match settings.frontier_lookahead_per_thread {
-            Some(frontiers) => scan
-                .with_frontier_lookahead_per_thread(frontiers)
-                .with_speculative_predicate_frontiers(settings.speculative_predicate_frontiers)
-                .with_frontier_refill_ranges(settings.frontier_refill_ranges),
+            Some(frontiers) => {
+                let scan = scan.with_frontier_lookahead_per_thread(frontiers);
+                let scan = if self.prefetch_projection(driver, *EXTERNAL_PROJECTION_PREFETCH) {
+                    scan.with_speculative_frontiers(settings.speculative_predicate_frontiers)
+                } else {
+                    scan.with_speculative_predicate_frontiers(
+                        settings.speculative_predicate_frontiers,
+                    )
+                };
+                scan.with_frontier_refill_ranges(settings.frontier_refill_ranges)
+            }
             None => scan,
         }
     }
@@ -1212,6 +1233,19 @@ mod tests {
     use super::coalesce_ranges;
     use super::external_frontier_bundle_parallelism;
     use super::external_frontier_bundle_plan;
+
+    #[rstest::rstest]
+    fn projection_prefetch_requires_external_frontier_opt_in(
+        #[values(ExecutorIoPolicy::EagerLookahead, ExecutorIoPolicy::Frontier)]
+        policy: ExecutorIoPolicy,
+        #[values(ExecutorDriver::Internal, ExecutorDriver::External)] driver: ExecutorDriver,
+    ) {
+        assert!(!policy.prefetch_projection(driver, false));
+        assert_eq!(
+            policy.prefetch_projection(driver, true),
+            policy == ExecutorIoPolicy::Frontier && driver == ExecutorDriver::External
+        );
+    }
 
     #[test]
     fn production_frontier_policy_is_explicit_and_predicate_only() {

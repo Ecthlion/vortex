@@ -195,7 +195,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             differing_indices,
-            [17, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41]
+            [17, 24, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41]
         );
         for ((canonical_idx, canonical_sql), (correctness_idx, correctness_sql)) in
             canonical.iter().zip(&correctness)
@@ -231,6 +231,11 @@ mod tests {
         let correctness = read_clickbench_queries(Some(&correctness_path.to_string_lossy()))?;
 
         let expected_order_suffixes = [
+            (24, "ORDER BY \"EventTime\", \"SearchPhrase\" LIMIT 10"),
+            (
+                30,
+                "ORDER BY c DESC, \"SearchEngineID\", \"ClientIP\" LIMIT 10",
+            ),
             (31, "ORDER BY c DESC, \"WatchID\", \"ClientIP\" LIMIT 10"),
             (32, "ORDER BY c DESC, \"WatchID\", \"ClientIP\" LIMIT 10"),
             (33, "ORDER BY c DESC, \"URL\" LIMIT 10"),

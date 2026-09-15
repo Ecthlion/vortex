@@ -29,6 +29,7 @@ on:
           - "pr-compact"
           - "pr-all"
           - "pr-full"
+          - "pr-frontier"
 
 permissions:
   contents: read
@@ -37,8 +38,14 @@ permissions:
 
 jobs:
   sql:
+    if: inputs.matrix_preset != 'pr-frontier'
     uses: ./.github/workflows/sql-bench-matrix.yml
     secrets: inherit
     with:
       mode: "pr"
       matrix_preset: ${{ inputs.matrix_preset }}
+
+  frontier:
+    if: inputs.matrix_preset == 'pr-frontier'
+    uses: ./.github/workflows/duckdb-frontier-bench.yml
+    secrets: inherit

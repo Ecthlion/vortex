@@ -233,10 +233,8 @@ impl DuckClient {
     }
 
     pub fn new_in_memory() -> Result<Self> {
-        let dir = std::env::temp_dir().join("vortex-duckdb-bench/in-memory");
-        std::fs::create_dir_all(&dir)?;
-        let db_path = dir.join("duckdb.db");
-        let (db, connection) = Self::open_and_setup_database(Some(&db_path), None)?;
+        let db_path = PathBuf::from(":memory:");
+        let (db, connection) = Self::open_and_setup_database(None, None)?;
         Ok(Self {
             db: Some(db),
             connection: Some(connection),

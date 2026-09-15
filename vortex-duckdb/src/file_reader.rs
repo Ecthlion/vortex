@@ -7,9 +7,15 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
 use futures::FutureExt;
+#[cfg(any(unix, windows))]
+use object_store::ObjectStore;
+#[cfg(any(unix, windows))]
+use object_store::ObjectStoreExt;
 use object_store::registry::ObjectStoreRegistry;
 use url::Url;
+use vortex::array::ExecutionCtx;
 use vortex::array::VortexSessionExecute as _;
+use vortex::array::arrays::StructArray;
 use vortex::array::arrays::struct_::StructArrayExt as _;
 use vortex::cloud::Registry;
 use vortex::dtype::DType;
@@ -22,9 +28,14 @@ use vortex::expr::Expression;
 use vortex::file::VortexFile;
 use vortex::file::multi::open_cached;
 use vortex::file::multi::parse_uri_or_path;
+use vortex::io::VortexReadAt;
 use vortex::io::compat::Compat;
 use vortex::io::filesystem::FileSystemRef;
 use vortex::io::object_store::ObjectStoreFileSystem;
+#[cfg(any(unix, windows))]
+use vortex::io::object_store::ObjectStoreReadAt;
+#[cfg(any(unix, windows))]
+use vortex::io::object_store::object_path_from_literal;
 use vortex::io::runtime::BlockingRuntime as _;
 use vortex::layout::LayoutReaderRef;
 use vortex::layout::scan::scan_builder::ScanBuilder;
@@ -96,6 +107,22 @@ fn resolve_filesystem(url: &Url) -> VortexResult<(FileSystemRef, String)> {
         )),
         path.to_string(),
     ))
+}
+
+async fn open_scan_file(url: &Url) -> VortexResult<(Arc<dyn VortexReadAt>, String)> {
+    #[cfg(any(unix, windows))]
+    if url.scheme() == "file" {
+        let path = url.path().to_string();
+        let object_path = object_path_from_literal(&path);
+        let store = Arc::new(object_store::local::LocalFileSystem::new()) as Arc<dyn ObjectStore>;
+        let metadata = store.head(&object_path).await?;
+        // Pin the first matching file payload for the scan, avoiding a new descriptor per range.
+        let read = ObjectStoreReadAt::new(store, object_path, RUNTIME.handle())
+            .into_file_payload_promoting(metadata, *SCAN_DIAGNOSTICS_ENABLED)?;
+        return Ok((Arc::new(read), path));
+    }
+    let (fs, path) = resolve_filesystem(url)?;
+    Ok((fs.open_read(&path).await?, path))
 }
 
 /// Advance the current-thread runtime by running every task that is ready right now.
@@ -215,8 +242,7 @@ impl OpenFileReader {
         let host_parallelism = get_available_parallelism().unwrap_or(1);
         let frontier_bundle_config = q6_frontier_bundle_config_from_env(backend)?;
         let url = parse_uri_or_path(&file_path)?;
-        let (fs, path) = resolve_filesystem(&url)?;
-        let file = fs.open_read(&path).await?;
+        let (file, path) = open_scan_file(&url).await?;
         let file = open_cached(&SESSION, file, &path, None, &|options| options).await?;
         let reader = (backend == ScanBackend::V1)
             .then(|| file.layout_reader())
@@ -420,7 +446,7 @@ pub fn reader_scan(
         };
         let mut ctx = SESSION.create_execution_ctx();
         let array = convert_result(array, &mut ctx)?;
-        local.exporter = Some(ArrayExporter::try_new(&array, &file.cache, ctx)?);
+        local.exporter = Some(new_scan_exporter(file.backend, &array, &file.cache, ctx)?);
     }
     let exporter = local.exporter.as_mut().vortex_expect("no exporter");
 
@@ -429,6 +455,18 @@ pub fn reader_scan(
         local.exporter = None;
     }
     Ok(true)
+}
+
+fn new_scan_exporter(
+    backend: ScanBackend,
+    array: &StructArray,
+    file_cache: &ConversionCache,
+    ctx: ExecutionCtx,
+) -> VortexResult<ArrayExporter> {
+    // Frontier splits do not share decoded arrays. Keep conversion reuse within this output
+    // bundle; the exporters own their converted buffers after construction.
+    let bundle_cache = (backend == ScanBackend::PushFrontier).then(ConversionCache::default);
+    ArrayExporter::try_new(array, bundle_cache.as_ref().unwrap_or(file_cache), ctx)
 }
 
 fn reader_scan_aggregate(global: &GlobalState, local: &mut LocalState) -> VortexResult<bool> {
@@ -492,6 +530,12 @@ pub fn reader_get_progress_in_file(file: &OpenFileReader) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use vortex::array::IntoArray;
+    use vortex::array::VortexSessionExecute as _;
+    use vortex::array::arrays::DictArray;
+    use vortex::array::arrays::StructArray;
+    use vortex::array::arrays::VarBinViewArray;
+    use vortex::buffer::buffer;
     use vortex::error::VortexResult;
     use vortex_morsel_scan::ScanBackend;
 
@@ -499,7 +543,103 @@ mod tests {
     use super::FrontierBundleConfig;
     use super::frontier_bundle_config;
     use super::frontier_bundle_parallelism_for_execution;
+    use super::new_scan_exporter;
     use super::q6_frontier_bundle_enabled;
+    use crate::SESSION;
+    use crate::duckdb::DataChunk;
+    use crate::duckdb::LogicalType;
+    use crate::exporter::ConversionCache;
+
+    #[cfg(unix)]
+    mod local_reader_tests {
+        use std::sync::Arc;
+
+        use futures::StreamExt;
+        use vortex::buffer::Alignment;
+        use vortex::error::VortexResult;
+        use vortex::file::multi::parse_uri_or_path;
+        use vortex::io::ReadAtRequest;
+        use vortex::io::runtime::BlockingRuntime as _;
+
+        use super::super::open_scan_file;
+        use crate::RUNTIME;
+
+        #[test]
+        fn reads_keep_the_open_file_after_path_replacement() -> VortexResult<()> {
+            let directory = tempfile::tempdir()?;
+            let path = directory.path().join("scan.vortex");
+            std::fs::write(&path, b"original file")?;
+            let url = parse_uri_or_path(&path.to_string_lossy())?;
+            RUNTIME.block_on(async {
+                let (read, _) = open_scan_file(&url).await?;
+                let first = read.read_at(0, 8, Alignment::new(1)).await?;
+                assert_eq!(first.to_host().await.as_slice(), b"original");
+
+                std::fs::rename(&path, directory.path().join("previous.vortex"))?;
+                std::fs::write(&path, b"replacement with a different size")?;
+
+                assert_eq!(read.size().await?, 13);
+                let requests: Arc<[ReadAtRequest]> = Arc::from([
+                    ReadAtRequest::new(0, 8, Alignment::new(1)),
+                    ReadAtRequest::new(9, 4, Alignment::new(1)),
+                ]);
+                let mut results = read.read_ranges(requests).collect::<Vec<_>>().await;
+                results.sort_unstable_by_key(|(request, _)| request.offset);
+                assert_eq!(results.len(), 2);
+                for ((_, result), expected) in
+                    results.into_iter().zip([b"original".as_slice(), b"file"])
+                {
+                    assert_eq!(result?.to_host().await.as_slice(), expected);
+                }
+                assert!(read.read_at(12, 2, Alignment::new(1)).await.is_err());
+                Ok(())
+            })
+        }
+
+        #[test]
+        fn rejects_replacement_before_the_first_read() -> VortexResult<()> {
+            let directory = tempfile::tempdir()?;
+            let path = directory.path().join("scan.vortex");
+            std::fs::write(&path, b"original file")?;
+            let url = parse_uri_or_path(&path.to_string_lossy())?;
+            RUNTIME.block_on(async {
+                let (read, _) = open_scan_file(&url).await?;
+                std::fs::rename(&path, directory.path().join("previous.vortex"))?;
+                std::fs::write(&path, b"replacement with a different size")?;
+                assert!(read.read_at(0, 8, Alignment::new(1)).await.is_err());
+                Ok(())
+            })
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::v1(ScanBackend::V1, 1)]
+    #[case::push(ScanBackend::Push, 1)]
+    #[case::frontier(ScanBackend::PushFrontier, 0)]
+    fn scan_exporter_cache_lifetime(
+        #[case] backend: ScanBackend,
+        #[case] retained_per_split: usize,
+    ) -> VortexResult<()> {
+        let cache = ConversionCache::default();
+        for split in 1..=3 {
+            let values = VarBinViewArray::from_iter_str(["a", "b"]).into_array();
+            let field = DictArray::try_new(buffer![1u8, 0, 1].into_array(), values)?.into_array();
+            let array = StructArray::from_fields(&[("field", field)])?;
+            let mut exporter =
+                new_scan_exporter(backend, &array, &cache, SESSION.create_execution_ctx())?;
+            drop(array);
+            assert_eq!(cache.dict_cache.len(), split * retained_per_split);
+
+            let mut chunk = DataChunk::new([LogicalType::varchar()]);
+            assert!(exporter.export(&mut chunk, None)?);
+            assert_eq!(
+                String::try_from(&*chunk)?,
+                "Chunk - [1 Columns]\n- DICTIONARY VARCHAR: 3 = [ b, a, b]\n"
+            );
+            assert!(!exporter.export(&mut chunk, None)?);
+        }
+        Ok(())
+    }
 
     #[test]
     fn q6_frontier_bundle_controls_default_off_and_preserve_push() -> VortexResult<()> {

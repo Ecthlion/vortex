@@ -1,0 +1,108 @@
+# Same-binary DuckDB comparisons on real SF10 and full partitioned ClickBench files.
+name: DuckDB Frontier Comparison
+
+on:
+  workflow_call: { }
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.repository == 'vortex-data/vortex' && github.event_name == 'workflow_dispatch'
+    timeout-minutes: 60
+    runs-on: >-
+      ${{ github.repository == 'vortex-data/vortex'
+          && format('runs-on={0}/runner=bench-dedicated/family=c6id.8xlarge/tag=frontier-build/extras=s3-cache', github.run_id)
+          || 'ubuntu-latest' }}
+    steps:
+      - uses: runs-on/action@v2
+        if: github.repository == 'vortex-data/vortex'
+        with:
+          sccache: s3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          enable-sccache: ${{ github.repository == 'vortex-data/vortex' && 'true' || 'false' }}
+      - name: Build comparison drivers and data generator
+        env:
+          RUSTFLAGS: "-C target-cpu=native -C force-frame-pointers=yes"
+        run: >-
+          cargo build --bin data-gen --bin tpch-attribution --bin clickbench-attribution
+          --profile release_debug --features unstable_encodings
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: frontier-binaries
+          path: |
+            target/release_debug/data-gen
+            target/release_debug/tpch-attribution
+            target/release_debug/clickbench-attribution
+            target/release_debug/build/vortex-duckdb-cache/duckdb-lib-*-prebuilt/libduckdb.so
+
+  bench:
+    needs: build
+    timeout-minutes: 120
+    runs-on: >-
+      ${{ github.repository == 'vortex-data/vortex'
+          && format('runs-on={0}/runner=bench-dedicated/family=c6id.metal/tag=frontier-bench/extras=s3-cache', github.run_id)
+          || 'ubuntu-latest' }}
+    steps:
+      - uses: runs-on/action@v2
+        if: github.repository == 'vortex-data/vortex'
+        with:
+          sccache: s3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Install uv
+        uses: spiraldb/actions/.github/actions/setup-uv@a746510eafaa926484c354541cfc49b2ec06cc63  # 0.18.6
+        with:
+          sync: false
+      - uses: ./.github/actions/setup-duckdb
+      - uses: ./.github/actions/system-info
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+        with:
+          name: frontier-binaries
+          path: target/release_debug/
+      - name: Make binaries executable
+        run: chmod +x target/release_debug/{data-gen,tpch-attribution,clickbench-attribution}
+      - name: Generate real datasets
+        id: generate
+        run: |
+          uv run --project bench-orchestrator vx-bench prepare-data tpch --formats-json '["parquet", "vortex"]' --opt scale-factor=10.0
+          uv run --project bench-orchestrator vx-bench prepare-data clickbench --formats-json '["parquet", "vortex"]'
+      - name: Isolate benchmark CPUs and stabilize clocks
+        id: isolate
+        run: sudo bash scripts/setup-benchmark.sh
+      - name: Compare all TPC-H SF10 queries
+        run: >-
+          bash scripts/bench-taskset.sh python3 scripts/duckdb-frontier-ci.py
+          --suite tpch --data vortex-bench/data/tpch/10.0
+          --binary target/release_debug/tpch-attribution
+          --output frontier-results/tpch --threads 14 --rounds 6
+      - name: Compare all ClickBench queries
+        if: ${{ !cancelled() && steps.isolate.outcome == 'success' }}
+        run: >-
+          bash scripts/bench-taskset.sh python3 scripts/duckdb-frontier-ci.py
+          --suite clickbench --data vortex-bench/data/clickbench_partitioned
+          --binary target/release_debug/clickbench-attribution
+          --output frontier-results/clickbench --threads 14 --rounds 6
+      - name: Publish comparison tables
+        if: always()
+        shell: bash
+        run: |
+          for summary in frontier-results/*/SUMMARY.md; do
+            if [ -f "$summary" ]; then
+              cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        if: always()
+        with:
+          name: duckdb-frontier-results
+          path: frontier-results/
+          if-no-files-found: error

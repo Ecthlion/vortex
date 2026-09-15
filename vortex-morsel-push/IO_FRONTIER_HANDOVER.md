@@ -1,5 +1,43 @@
 # DuckDB push-frontier SF10 handover
 
+> **Q22 correctness correction (2026-09-14):** A subsequent comparison against native DuckDB
+> tables materialized from the same SF10 files found that default V1 and frontier agree with each
+> other but produce an incorrect Q22 result. Disabling `common_subplan` makes all three agree;
+> standalone predicate/aggregate probes corroborate the corrected result. The default-plan bug
+> remains unresolved. The historical matching-result checks below demonstrate agreement between
+> implementations, not independent Q22 correctness. The new full Q1-Q22 comparison applies that
+> optimizer workaround only to Q22, equally across all three arms. See the
+> [new campaign manifest](/private/tmp/duckdb-tpch-memory-tzbkjyb6/MANIFEST.md) and
+> [Q22 evidence](/private/tmp/duckdb-tpch-memory-tzbkjyb6/meta/Q22-FINDING.md).
+
+> **Projection-prefetch follow-up (2026-09-15):** Three new ideas were built and tested on real
+> DuckDB SF10 scans. The retained opt-in `VORTEX_MORSEL_FRONTIER_PROJECTION_PREFETCH=1` admits
+> projection I/O within the existing two-group right bound for external PushFrontier. In the final
+> same-binary Q1–Q22 comparison, the sum of medians is 2947.30 ms V1, 2554.86 ms W8, and 2497.73 ms
+> with prefetch: 2.24% less time than W8 and 15.25% less than V1. Q14/Q15/Q19/Q21 wins repeat;
+> Q9 remains flat and Q6 regresses 5.3%, so the default remains predicate-only W8. Direct event
+> notification and actual four-morsel bundles were reverted. Across six campaigns, 1342 timings
+> and 2852 exact result checks passed. The final code passes 396 tests (2 skipped), 167 tests with
+> prefetch enabled, and targeted Clippy with warnings denied. Full Clippy remains blocked by the
+> unchanged `compress-bench/src/main.rs:408` complexity error. The
+> [iteration report](/private/tmp/duckdb-frontier-wakeup-20260915/REPORT.md) contains all 22 rows,
+> repeated comparisons, I/O evidence, RSS caveats, exact hashes, rejected patches and next steps.
+
+> **Differential follow-up (2026-09-14):** Three further real DuckDB SF10 campaigns tested
+> bundling activation thresholds, conversion-cache lifetime/allocation, and one versus two
+> speculative predicate groups, with matched V1 controls. Across 778 accepted timings, none of
+> the candidates established a reliable improvement over current W8. Experimental runtime
+> changes were reverted. The [experiment report](/private/tmp/duckdb-frontier-differential-tzbkjyb6/REPORT.md)
+> retains the results, rejected patches, checks, and matched Q9 Samply profiles. These selected-query
+> experiments do not replace the historical full-suite acceptance or resource gates below.
+
+> **Q9 scan follow-up (2026-09-14):** Eight repeated real-file profiles per arm localize the
+> weak gain to lineitem: 7.2% less scan worker time, versus 41.3% for partsupp and 30.4% for part.
+> Fresh unprofiled Q9 medians are 332.15 ms V1 and 311.51 ms W8 (6.2% less time). Correctly
+> symbolicated system frames expose frontier's completion-channel spin/yield path as a concrete
+> investigation target; sampled wait weights are not removable wall time. All 64 new result checks
+> pass. See the [Q9 follow-up report](/private/tmp/duckdb-q9-deeper/REPORT.md).
+
 Status: 2026-09-14. This is the canonical handover for the current production-integration
 experiment: DuckDB TPC-H SF10 on the 14-logical-CPU Apple Silicon host, comparing the established
 V1 scan with push-frontier plus the opt-in W8 adjacent-morsel policy. The full retained evidence is
@@ -684,3 +722,35 @@ For detailed historical scheduler implementation notes, see
 [IO_FRONTIER_IMPLEMENTATION.md](IO_FRONTIER_IMPLEMENTATION.md) and
 [IO_FRONTIERS.md](IO_FRONTIERS.md). Their numeric results and default descriptions are historical
 unless repeated in the canonical artifact above.
+
+
+## 2026-09-15: real DuckDB ClickBench follow-up
+
+[ClickBench report and full Q0–Q42 exploratory table](/private/tmp/duckdb-clickbench-frontier-20260915/REPORT.md).
+
+The real partitioned dataset contains 99,997,497 rows in 100 Vortex files (11,616,689,064 bytes). Same-binary V1/W8/projection-prefetch correctness passed all 43 queries against DuckDB reading the corresponding real Parquet files: 129 schema/value comparisons, exact except tightly tolerated floating aggregates. Separate validation SQL resolves ties, including newly observed Q24 and Q30 ambiguities; canonical timing SQL is unchanged. Another 1,025 unchanged-canonical-query comparisons passed.
+
+**No accepted performance result:** the six-round campaign stopped at 764/774 measurements when a competing IDE Cargo job appeared; subsequent snapshots showed substantial IDE CPU use. The entire timing campaign is excluded from acceptance, including its five complete rounds. Their exploratory summed medians (V1 14.050 s, W8 12.688 s, prefetch 12.816 s) are recorded only for hypothesis generation. A clean rerun remains blocked by unrelated indexing/build activity. The updated runner records external CPU and rejects performance runs above one core of aggregate external load.
+
+Five-query scheduling diagnostics showed 339 file plans with only 2–8 natural morsels each, zero paired bundles, and a per-file threshold of 112 candidate pairs. W8 pairing therefore did not activate in these probes. Query-wide available work across files is the next frontier-specific admission experiment. Q28 profiles instead put roughly 79–80% of summed operator time in DuckDB's regex-containing projection, and 8–11% in scans; these are diagnostic worker shares, not recoverable wall time. Q23 uses a narrow top-N scan and a wide sparse fetch, a better frontier-overhead target.
+
+Added a persistent `clickbench-attribution` driver with full-shard checks, Parquet reference support, and optional diagnostics. No further runtime optimization was introduced. Release build, formatting, the DuckDB benchmark test, and targeted strict Clippy pass. Workspace all-feature Clippy remains blocked by the unchanged `compress-bench/src/main.rs:408` cognitive-complexity error. Exact commands, raw results, plans, profiles, source/binary/input hashes, and exclusions are retained in the report's artifact directory.
+
+## Draft PR: independent DuckDB comparison on CI
+
+The `PR SQL Benchmarks` workflow now accepts the manual `pr-frontier` preset. It builds
+`tpch-attribution`, `clickbench-attribution`, and `data-gen`, then compares V1, W8, and projection
+prefetch on dedicated bare-metal CI hardware. The two suites run sequentially: all TPC-H SF10
+queries and all 43 queries over the full 100-shard ClickBench dataset. Each uses 14 DuckDB threads,
+six balanced rounds, immediate warmups, independent Parquet-reference correctness, identical
+V1/frontier plans, input/binary/SQL identity checks, and a no-spill gate. Raw results, plans,
+per-query tables, paired-round intervals, and separate operator profiles are uploaded as
+`duckdb-frontier-results`.
+
+`python3 scripts/duckdb-frontier-ci.py --help` describes local reproduction. TPC-H explicitly
+checks the 59,986,052-row SF10 lineitem table. ClickBench checks all 100 shards and the 99,997,497-row
+reference count. Canonical SQL is timed unchanged; the separate ClickBench correctness fixture
+now also resolves Q24/Q30 ties. The Q22 `common_subplan` workaround remains explicit and equal
+across every arm and the independent reference. The workflow reports measured improvements and
+regressions; it does not make a speedup a prerequisite for job success. CI results are pending
+until the workflow for the published PR head completes.
