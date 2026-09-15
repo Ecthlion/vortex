@@ -222,13 +222,24 @@ pub(crate) trait DynArrayData: 'static + private::Sealed + Send + Sync + Debug {
         ctx: &mut ExecutionCtx,
     ) -> VortexResult<ExecutionResult>;
 
-    /// Execute the scalar at the given index.
+    /// Read a non-null scalar at `index` for a one-off access; nothing is retained.
     ///
-    /// This method panics if the index is out of bounds for the array.
-    fn execute_scalar(
+    /// Kept apart from [`Self::probe_scalar_retained`] so this entry is a bare trampoline into
+    /// the encoding: sharing one function made the one-off path pay the retained branch's
+    /// register saves before its tail call.
+    fn probe_scalar_once(
         &self,
         this: &ArrayRef,
         index: usize,
+        ctx: &mut ExecutionCtx,
+    ) -> VortexResult<Scalar>;
+
+    /// Read a non-null scalar at `index`, keeping preparation in `storage` for later reads.
+    fn probe_scalar_retained(
+        &self,
+        this: &ArrayRef,
+        index: usize,
+        storage: &mut ProbeStorage,
         ctx: &mut ExecutionCtx,
     ) -> VortexResult<Scalar>;
 }
@@ -492,18 +503,32 @@ impl<V: VTable> DynArrayData for ArrayData<V> {
         V::execute(typed, ctx)
     }
 
-    fn execute_scalar(
+    fn probe_scalar_once(
         &self,
         this: &ArrayRef,
         index: usize,
         ctx: &mut ExecutionCtx,
     ) -> VortexResult<Scalar> {
+        // SAFETY: this adapter belongs to the ArrayData<V> stored in `this`.
         let view = unsafe { ArrayView::new_unchecked(this, &self.data) };
         <V::OperationsVTable as OperationsVTable<V>>::probe_scalar(
             &mut ProbeState::once(view),
             index,
             ctx,
         )
+    }
+
+    fn probe_scalar_retained(
+        &self,
+        this: &ArrayRef,
+        index: usize,
+        storage: &mut ProbeStorage,
+        ctx: &mut ExecutionCtx,
+    ) -> VortexResult<Scalar> {
+        // SAFETY: this adapter belongs to the ArrayData<V> stored in `this`.
+        let view = unsafe { ArrayView::new_unchecked(this, &self.data) };
+        let mut state = ProbeState::repeated(view, storage.get_or_init()?);
+        <V::OperationsVTable as OperationsVTable<V>>::probe_scalar(&mut state, index, ctx)
     }
 }
 

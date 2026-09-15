@@ -18,19 +18,24 @@ use crate::vtable::NotSupported;
 /// [`ArrayRef`](crate::ArrayRef)
 /// methods perform common checks before dispatching here.
 pub trait OperationsVTable<V: VTable> {
-    /// Encoding-specific state retained across repeated scalar reads.
+    /// Encoding-specific state retained by repeated scalar access.
     ///
-    /// Built once per retained probe and never for a one-off read. Use `()` when no state is
-    /// needed.
+    /// Built once per repeated probe and never for a one-off read. Preparation belongs in
+    /// [`Self::probe_scalar`]. State owns its preparation and may hold shared buffer or array
+    /// handles. Use `()` when no state is needed.
     type ProbeState: Default + 'static;
 
     /// Read the non-null scalar at `index` of the array in `state`.
     ///
     /// Bounds and validity have been checked; the row is non-null. `state` carries the typed
-    /// view of the array being read. The scalar must retain the source's logical dtype,
-    /// including nullability.
+    /// view of the array and, for a read through a
+    /// [`RepeatedArrayProbe`](crate::RepeatedArrayProbe), the state that probe keeps. Read
+    /// children through [`ProbeState::child_scalar`], or hold a child probe from
+    /// [`ProbeState::slot`]; both follow the read's policy without the encoding having to know
+    /// it. Take encoding state from [`ProbeState::retained`]. The scalar must retain the source's
+    /// logical dtype, including nullability.
     ///
-    /// The default preserves the existing scalar path.
+    /// The default preserves the existing scalar path without adding caching.
     fn probe_scalar(
         state: &mut ProbeState<'_, V>,
         index: usize,

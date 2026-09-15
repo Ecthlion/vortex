@@ -24,6 +24,8 @@ use crate::ArrayRef;
 use crate::Canonical;
 use crate::ExecutionCtx;
 use crate::IntoArray;
+use crate::ProbeValidity;
+use crate::RepeatedArrayProbe;
 use crate::VortexSessionExecute;
 use crate::arrays::BoolArray;
 use crate::arrays::ChunkedArray;
@@ -162,7 +164,21 @@ impl Validity {
         }
     }
 
+    /// Create a retained accessor for repeated lookups.
+    ///
+    /// Mirrors [`ArrayRef::repeated_probe`]. Uniform validity retains nothing; array-backed
+    /// validity keeps a probe over the underlying boolean array. For a single lookup use
+    /// [`Self::execute_is_valid`].
+    pub fn probe(self) -> ProbeValidity {
+        match self {
+            Self::NonNullable | Self::AllValid => ProbeValidity::Constant(true),
+            Self::AllInvalid => ProbeValidity::Constant(false),
+            Self::Array(array) => ProbeValidity::Array(RepeatedArrayProbe::new(array)),
+        }
+    }
+
     /// Returns whether the `index` item is valid, using `ctx` to execute the validity array.
+    // Todo(joe): deprecate this
     #[inline]
     pub fn execute_is_valid(&self, index: usize, ctx: &mut ExecutionCtx) -> VortexResult<bool> {
         Ok(match self {
@@ -177,6 +193,7 @@ impl Validity {
     }
 
     /// Returns whether the `index` item is null, using `ctx` to execute the validity array.
+    // Todo(joe): deprecate this
     #[inline]
     pub fn execute_is_null(&self, index: usize, ctx: &mut ExecutionCtx) -> VortexResult<bool> {
         Ok(!self.execute_is_valid(index, ctx)?)
