@@ -6,6 +6,7 @@ use std::ops::Not;
 use bitvec::view::BitView;
 
 use crate::BitBuffer;
+use crate::BufferAllocatorRef;
 use crate::BufferMut;
 use crate::ByteBufferMut;
 use crate::bit::collect_bool_words;
@@ -119,8 +120,13 @@ impl BitBufferMut {
 
     /// Creates a `BitBufferMut` from a [`BitBuffer`] by copying all of the data over.
     pub fn copy_from(bit_buffer: &BitBuffer) -> Self {
+        Self::copy_from_in(bit_buffer, bit_buffer.inner().allocator().clone())
+    }
+
+    /// Copies a bit buffer with the provided allocator.
+    pub fn copy_from_in(bit_buffer: &BitBuffer, allocator: BufferAllocatorRef) -> Self {
         Self {
-            buffer: ByteBufferMut::copy_from(bit_buffer.inner()),
+            buffer: ByteBufferMut::copy_from_in(bit_buffer.inner(), allocator),
             offset: bit_buffer.offset(),
             len: bit_buffer.len(),
         }
@@ -129,8 +135,14 @@ impl BitBufferMut {
     /// Create a new empty mutable bit buffer with requested capacity (in bits).
     #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
+        Self::with_capacity_in(capacity, BufferAllocatorRef::statically_allocated())
+    }
+
+    /// Create a mutable bit buffer with the provided allocator.
+    #[inline]
+    pub fn with_capacity_in(capacity: usize, allocator: BufferAllocatorRef) -> Self {
         Self {
-            buffer: BufferMut::with_capacity(capacity.div_ceil(8)),
+            buffer: BufferMut::with_capacity_in(capacity.div_ceil(8), allocator),
             offset: 0,
             len: 0,
         }
@@ -161,6 +173,25 @@ impl BitBufferMut {
     #[inline(always)]
     pub fn empty() -> Self {
         Self::with_capacity(0)
+    }
+
+    /// Create an empty mutable bit buffer with the provided allocator.
+    pub fn empty_in(allocator: BufferAllocatorRef) -> Self {
+        Self::with_capacity_in(0, allocator)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn allocator(&self) -> &BufferAllocatorRef {
+        self.buffer.allocator()
+    }
+
+    /// Takes the buffer, leaving an empty buffer with the same allocator.
+    pub fn take(&mut self) -> Self {
+        Self {
+            buffer: self.buffer.take(),
+            offset: std::mem::take(&mut self.offset),
+            len: std::mem::take(&mut self.len),
+        }
     }
 
     /// Create a new mutable buffer with requested `len` and all bits set to `value`.
@@ -196,7 +227,17 @@ impl BitBufferMut {
     /// Calls `f` in the same order and uses the same packing path.
     #[inline]
     pub fn collect_bool<F: FnMut(usize) -> bool>(len: usize, f: F) -> Self {
-        Self::collect_words(len, |words| collect_bool_words(words, len, f))
+        Self::collect_bool_in(len, f, BufferAllocatorRef::statically_allocated())
+    }
+
+    /// Collects predicate results with the provided allocator.
+    #[inline]
+    pub fn collect_bool_in<F: FnMut(usize) -> bool>(
+        len: usize,
+        f: F,
+        allocator: BufferAllocatorRef,
+    ) -> Self {
+        Self::collect_words_in(len, allocator, |words| collect_bool_words(words, len, f))
     }
 
     /// Mutable-buffer form of [`BitBuffer::collect_bool_multiversioned`].
@@ -204,17 +245,29 @@ impl BitBufferMut {
     /// Calls `f` in the same order and uses the same packing path.
     #[inline]
     pub fn collect_bool_multiversioned<F: FnMut(usize) -> bool>(len: usize, f: F) -> Self {
-        Self::collect_words(len, |words| {
+        Self::collect_bool_multiversioned_in(len, f, BufferAllocatorRef::statically_allocated())
+    }
+
+    /// Collects multiversioned predicate results with the provided allocator.
+    #[inline]
+    pub fn collect_bool_multiversioned_in<F: FnMut(usize) -> bool>(
+        len: usize,
+        f: F,
+        allocator: BufferAllocatorRef,
+    ) -> Self {
+        Self::collect_words_in(len, allocator, |words| {
             collect_bool_words_multiversioned(words, len, f)
         })
     }
 
-    /// Allocate a zero-copy word buffer for `len` bits, let `fill` populate it, and wrap it as a
-    /// `BitBufferMut`.
     #[inline]
-    fn collect_words(len: usize, fill: impl FnOnce(&mut [u64])) -> Self {
+    fn collect_words_in(
+        len: usize,
+        allocator: BufferAllocatorRef,
+        fill: impl FnOnce(&mut [u64]),
+    ) -> Self {
         let num_words = len.div_ceil(64);
-        let mut buffer: BufferMut<u64> = BufferMut::with_capacity(num_words);
+        let mut buffer = BufferMut::<u64>::with_capacity_in(num_words, allocator);
         // SAFETY: `fill` (a `collect_bool_words` variant) writes every word in `0..num_words`
         // below before any read; `u64` has no invalid bit patterns and the assignments inside
         // `collect_bool_words` are pure writes.
@@ -588,25 +641,6 @@ impl BitBufferMut {
         self.len += bit_len;
     }
 
-    /// Absorbs a mutable buffer that was previously split off.
-    ///
-    /// If the two buffers were previously contiguous and not mutated in a way that causes
-    /// re-allocation i.e., if other was created by calling split_off on this buffer, then this is
-    /// an O(1) operation that just decreases a reference count and sets a few indices.
-    ///
-    /// Otherwise, this method degenerates to self.append_buffer(&other).
-    pub fn unsplit(&mut self, other: Self) {
-        if (self.offset + self.len).is_multiple_of(8) && other.offset == 0 {
-            // We are aligned and can just append the buffers
-            self.buffer.unsplit(other.buffer);
-            self.len += other.len;
-            return;
-        }
-
-        // Otherwise, we need to append the bits one by one
-        self.append_buffer(&other.freeze())
-    }
-
     /// Freeze the buffer in its current state into an immutable `BoolBuffer`.
     #[inline]
     pub fn freeze(self) -> BitBuffer {
@@ -715,8 +749,10 @@ impl FromIterator<bool> for BitBufferMut {
 
 #[cfg(test)]
 mod tests {
+    use allocator_api2::alloc::Global;
     use rstest::rstest;
 
+    use crate::BufferAllocatorRef;
     use crate::BufferMut;
     use crate::bit::buf_mut::BitBufferMut;
     use crate::bitbuffer;
@@ -735,6 +771,27 @@ mod tests {
             assert!(!bools.value(i));
         }
         assert!(bools.value(9));
+    }
+
+    #[test]
+    fn take_preserves_allocator() {
+        let allocator = BufferAllocatorRef::new(Global);
+        let mut buffer = BitBufferMut::with_capacity_in(4, allocator.clone());
+        buffer.append(true);
+        buffer.append(false);
+        buffer.append(true);
+
+        let taken = buffer.take();
+
+        assert_eq!(
+            (0..taken.len())
+                .map(|index| taken.value(index))
+                .collect::<Vec<_>>(),
+            [true, false, true]
+        );
+        assert!(taken.allocator().ptr_eq(&allocator));
+        assert!(buffer.is_empty());
+        assert!(buffer.allocator().ptr_eq(&allocator));
     }
 
     #[test]

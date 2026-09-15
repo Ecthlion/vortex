@@ -22,7 +22,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  NIGHTLY_TOOLCHAIN: nightly-2026-02-05
+  NIGHTLY_TOOLCHAIN: nightly-2026-09-10
 
 jobs:
   changes:
@@ -56,7 +56,7 @@ jobs:
           - { shard: 5, name: "Encodings 2", packages: "vortex-decimal-byte-parts vortex-fastlanes vortex-fsst", features: "--features _test-harness" }
           - { shard: 6, name: "Encodings 3", packages: "vortex-pco vortex-runend vortex-sequence" }
           - { shard: 7, name: "Encodings 4 & layout", packages: "vortex-sparse vortex-zigzag vortex-zstd vortex-layout" }
-          - { shard: 8, name: "Storage formats & row encoding", packages: "vortex-flatbuffers vortex-proto vortex-btrblocks vortex-row" }
+          - { shard: 8, name: "Storage formats & row encoding", packages: "vortex-btrblocks vortex-row" }
           - { shard: 9, name: "Tensor & spatial", packages: "vortex-tensor vortex-spatial" }
     name: "Benchmark with Codspeed (Shard #${{ matrix.shard }})"
     timeout-minutes: 30
@@ -126,7 +126,7 @@ jobs:
     name: "Benchmark with Codspeed (${{ matrix.features }})"
     timeout-minutes: 60
     runs-on: >-
-      runs-on=${{ github.run_id }}/runner=bench-dedicated/family=${{ matrix.family }}/image=${{ matrix.image }}/disk=large/extras=s3-cache/tag=bench-codspeed-cpu-features-${{ matrix.features }}
+      runs-on=${{ github.run_id }}/runner=bench-dedicated/family=${{ matrix.family }}/image=${{ matrix.image }}/extras=s3-cache/tag=bench-codspeed-cpu-features-${{ matrix.features }}
     steps:
       - uses: runs-on/action@v2
         with:

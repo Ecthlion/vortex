@@ -109,7 +109,7 @@ jobs:
         with:
           sync: false
       - name: Install nextest
-        uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026  # v2
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375  # v2
         with:
           tool: nextest
       - name: Rust Tests
@@ -134,9 +134,8 @@ jobs:
         env:
           MATURIN_PEP517_ARGS: "--profile ci"
         run: |
-          # --all-packages installs the shared dev tooling (basedpyright) from the
-          # root `dev` group; --extra cuda adds the vortex-data-cuda extension.
-          uv run --all-packages --extra cuda basedpyright vortex-python vortex-python-cuda
+          uv sync --all-packages --extra cuda
+          uvx ty check vortex-python vortex-python-cuda
           uv run --all-packages --extra cuda pytest --benchmark-disable vortex-python/test/test_cuda.py vortex-python-cuda/test
 
   cuda-test-sanitizer:

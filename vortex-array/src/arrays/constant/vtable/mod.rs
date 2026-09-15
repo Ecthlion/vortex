@@ -6,7 +6,6 @@ use std::hash::Hash;
 use std::hash::Hasher;
 
 use itertools::Itertools;
-use vortex_buffer::ByteBufferMut;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_error::vortex_ensure;
@@ -40,7 +39,7 @@ use crate::builders::ListViewBuilder;
 use crate::builders::NullBuilder;
 use crate::builders::PrimitiveBuilder;
 use crate::builders::VarBinViewBuilder;
-use crate::builders::builder_with_capacity;
+use crate::builders::builder_with_capacity_in;
 use crate::canonical::Canonical;
 use crate::dtype::DType;
 use crate::dtype::OffsetBuilderPType;
@@ -107,7 +106,7 @@ impl VTable for Constant {
     fn buffer(array: ArrayView<'_, Self>, idx: usize) -> BufferHandle {
         match idx {
             0 => BufferHandle::new_host(
-                ScalarValue::to_proto_bytes::<ByteBufferMut>(array.scalar.value()).freeze(),
+                ScalarValue::to_proto_bytes::<Vec<u8>>(array.scalar.value()).into(),
             ),
             _ => vortex_panic!("ConstantArray buffer index {idx} out of bounds"),
         }
@@ -327,7 +326,8 @@ fn append_repeated_list_run<O: OffsetBuilderPType, S: OffsetBuilderPType>(
         return Ok(());
     };
 
-    let mut elements_builder = builder_with_capacity(scalar.element_dtype(), elements.len());
+    let mut elements_builder =
+        builder_with_capacity_in(scalar.element_dtype(), elements.len(), ctx.allocator());
     for element in &elements {
         elements_builder.append_scalar(element)?;
     }
@@ -364,7 +364,8 @@ fn append_constant_fixed_size_list_run(
     let tile = match elements.iter().all_equal_value() {
         Ok(uniform) => ConstantArray::new(uniform.clone(), elements.len()).into_array(),
         Err(_) => {
-            let mut tile_builder = builder_with_capacity(builder.element_dtype(), elements.len());
+            let mut tile_builder =
+                builder_with_capacity_in(builder.element_dtype(), elements.len(), ctx.allocator());
             for element in &elements {
                 tile_builder.append_scalar(element)?;
             }
@@ -436,7 +437,7 @@ mod tests {
     use crate::assert_arrays_eq;
     use crate::builders::ArrayBuilder;
     use crate::builders::ListBuilder;
-    use crate::builders::builder_with_capacity;
+    use crate::builders::builder_with_capacity_in;
     use crate::dtype::DType;
     use crate::dtype::Nullability;
     use crate::dtype::PType;
@@ -450,7 +451,11 @@ mod tests {
         let mut ctx = crate::array_session().create_execution_ctx();
 
         let expected = constant_canonicalize(array.as_view(), &mut ctx)?.into_array();
-        let mut builder = builder_with_capacity(array.dtype(), array.len());
+        let mut builder = builder_with_capacity_in(
+            array.dtype(),
+            array.len(),
+            vortex_buffer::BufferAllocatorRef::static_ref(),
+        );
         array
             .into_array()
             .append_to_builder(builder.as_mut(), &mut ctx)?;
@@ -586,7 +591,11 @@ mod tests {
         );
         let array = ConstantArray::new(scalar, 1_000);
 
-        let mut builder = builder_with_capacity(array.dtype(), array.len());
+        let mut builder = builder_with_capacity_in(
+            array.dtype(),
+            array.len(),
+            vortex_buffer::BufferAllocatorRef::static_ref(),
+        );
         array
             .into_array()
             .append_to_builder(builder.as_mut(), &mut ctx)?;
@@ -614,8 +623,13 @@ mod tests {
         );
         let array = ConstantArray::new(scalar, 4).into_array();
 
-        let mut builder =
-            ListBuilder::<u32>::with_capacity(element_dtype, Nullability::NonNullable, 0, 0);
+        let mut builder = ListBuilder::<u32>::with_capacity_in(
+            element_dtype,
+            Nullability::NonNullable,
+            0,
+            0,
+            vortex_buffer::BufferAllocatorRef::static_ref(),
+        );
         array.append_to_builder(&mut builder, &mut ctx)?;
 
         assert_arrays_eq!(&builder.finish(), &array, &mut ctx);
@@ -672,7 +686,11 @@ mod tests {
         );
         let array = ConstantArray::new(scalar, 1_000);
 
-        let mut builder = builder_with_capacity(array.dtype(), array.len());
+        let mut builder = builder_with_capacity_in(
+            array.dtype(),
+            array.len(),
+            vortex_buffer::BufferAllocatorRef::static_ref(),
+        );
         array
             .into_array()
             .append_to_builder(builder.as_mut(), &mut ctx)?;
@@ -722,7 +740,11 @@ mod tests {
         );
         let array = ConstantArray::new(scalar, 1_000);
 
-        let mut builder = builder_with_capacity(array.dtype(), array.len());
+        let mut builder = builder_with_capacity_in(
+            array.dtype(),
+            array.len(),
+            vortex_buffer::BufferAllocatorRef::static_ref(),
+        );
         array
             .into_array()
             .append_to_builder(builder.as_mut(), &mut ctx)?;
@@ -753,7 +775,11 @@ mod tests {
         let scalar = Scalar::extension::<Date>(TimeUnit::Days, Scalar::from(Some(42i32)));
         let array = ConstantArray::new(scalar, 1_000);
 
-        let mut builder = builder_with_capacity(array.dtype(), array.len());
+        let mut builder = builder_with_capacity_in(
+            array.dtype(),
+            array.len(),
+            vortex_buffer::BufferAllocatorRef::static_ref(),
+        );
         array
             .into_array()
             .append_to_builder(builder.as_mut(), &mut ctx)?;
