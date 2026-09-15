@@ -247,7 +247,7 @@ fn trace_scan_compare_on_compressed_quantity() -> VortexResult<()> {
     insta::assert_snapshot!(executed.trace.to_string(), @"
     execute_until target=AnyCanonical root=vortex.binary(bool, len=4096)
       iter 0 current=vortex.binary(bool, len=4096) builder_active=false
-    optimize root=vortex.binary(bool, len=4096) session=false
+    optimize root=vortex.binary(bool, len=4096)
       reduce_parent static:DictionaryScalarFnValuesPushDownRule slot=0 parent=vortex.binary(bool, len=4096) child=vortex.dict(i16, len=4096) -> vortex.dict(bool, len=4096)
       done output=vortex.dict(bool, len=4096)
         child_execute_parent session[0]:execute_parent_fn slot=0 parent=vortex.binary(bool, len=4096) child=vortex.decimal_byte_parts(decimal(15,2), len=4096) -> vortex.dict(bool, len=4096)
@@ -299,7 +299,7 @@ fn trace_scan_compare_on_compressed_shipmode() -> VortexResult<()> {
     let [optimized, executed] = optimize_then_execute(lazy, &expected)?;
 
     insta::assert_snapshot!(optimized.trace.to_string(), @"
-    optimize root=vortex.binary(bool, len=4096) session=false
+    optimize root=vortex.binary(bool, len=4096)
       reduce_parent static:DictionaryScalarFnValuesPushDownRule slot=0 parent=vortex.binary(bool, len=4096) child=vortex.dict(utf8, len=4096) -> vortex.dict(bool, len=4096)
       done output=vortex.dict(bool, len=4096)
     ");
@@ -398,20 +398,20 @@ fn trace_scan_filter_on_compressed_table() -> VortexResult<()> {
     let [optimized, executed] = optimize_then_execute(lazy, &expected)?;
 
     insta::assert_snapshot!(optimized.trace.to_string(), @"
-    optimize root=vortex.filter({l_quantity=decimal(15,2), l_shipdate=vortex.date[days](i32), l_shipmode=utf8}, len=43) session=false
-      optimize root=vortex.filter(decimal(15,2), len=43) session=false
-        optimize root=vortex.filter(i16, len=43) session=false
+    optimize root=vortex.filter({l_quantity=decimal(15,2), l_shipdate=vortex.date[days](i32), l_shipmode=utf8}, len=43)
+      optimize root=vortex.filter(decimal(15,2), len=43)
+        optimize root=vortex.filter(i16, len=43)
           reduce_parent static:FilterReduceAdaptor(Dict) slot=0 parent=vortex.filter(i16, len=43) child=vortex.dict(i16, len=4096) -> vortex.dict(i16, len=43)
           done output=vortex.dict(i16, len=43)
         reduce_parent static:DecimalBytePartsFilterPushDownRule slot=0 parent=vortex.filter(decimal(15,2), len=43) child=vortex.decimal_byte_parts(decimal(15,2), len=4096) -> vortex.decimal_byte_parts(decimal(15,2), len=43)
         done output=vortex.decimal_byte_parts(decimal(15,2), len=43)
-      optimize root=vortex.filter(vortex.date[days](i32), len=43) session=false
-        optimize root=vortex.filter(i32, len=43) session=false
+      optimize root=vortex.filter(vortex.date[days](i32), len=43)
+        optimize root=vortex.filter(i32, len=43)
           reduce_parent static:FoRFilterPushDownRule slot=0 parent=vortex.filter(i32, len=43) child=fastlanes.for(i32, len=4096) -> fastlanes.for(i32, len=43)
           done output=fastlanes.for(i32, len=43)
         reduce_parent static:ExtensionFilterPushDownRule slot=0 parent=vortex.filter(vortex.date[days](i32), len=43) child=vortex.ext(vortex.date[days](i32), len=4096) -> vortex.ext(vortex.date[days](i32), len=43)
         done output=vortex.ext(vortex.date[days](i32), len=43)
-      optimize root=vortex.filter(utf8, len=43) session=false
+      optimize root=vortex.filter(utf8, len=43)
         reduce_parent static:FilterReduceAdaptor(Dict) slot=0 parent=vortex.filter(utf8, len=43) child=vortex.dict(utf8, len=4096) -> vortex.dict(utf8, len=43)
         done output=vortex.dict(utf8, len=43)
       reduce FilterStructRule: vortex.filter({l_quantity=decimal(15,2), l_shipdate=vortex.date[days](i32), l_shipmode=utf8}, len=43) -> vortex.struct({l_quantity=decimal(15,2), l_shipdate=vortex.date[days](i32), l_shipmode=utf8}, len=43)
@@ -438,8 +438,8 @@ fn trace_scan_take_on_compressed_table() -> VortexResult<()> {
     let [optimized, executed] = optimize_then_execute(lazy, &expected)?;
 
     insta::assert_snapshot!(optimized.trace.to_string(), @"
-    optimize root=vortex.dict({l_quantity=decimal(15,2), l_shipdate=vortex.date[days](i32), l_shipmode=utf8}, len=64) session=false
-      optimize root=vortex.dict(vortex.date[days](i32), len=64) session=false
+    optimize root=vortex.dict({l_quantity=decimal(15,2), l_shipdate=vortex.date[days](i32), l_shipmode=utf8}, len=64)
+      optimize root=vortex.dict(vortex.date[days](i32), len=64)
         reduce_parent static:TakeReduceAdaptor(Extension) slot=1 parent=vortex.dict(vortex.date[days](i32), len=64) child=vortex.ext(vortex.date[days](i32), len=4096) -> vortex.ext(vortex.date[days](i32), len=64)
         done output=vortex.ext(vortex.date[days](i32), len=64)
       reduce_parent static:TakeReduceAdaptor(Struct) slot=1 parent=vortex.dict({l_quantity=decimal(15,2), l_shipdate=vortex.date[days](i32), l_shipmode=utf8}, len=64) child=vortex.struct({l_quantity=decimal(15,2), l_shipdate=vortex.date[days](i32), l_shipmode=utf8}, len=4096) -> vortex.struct({l_quantity=decimal(15,2), l_shipdate=vortex.date[days](i32), l_shipmode=utf8}, len=64)

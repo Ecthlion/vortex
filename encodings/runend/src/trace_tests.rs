@@ -50,7 +50,7 @@ fn trace_compare_on_runend() -> VortexResult<()> {
 
     let traced = trace_op(|| compared.optimize())?;
     insta::assert_snapshot!(traced.trace.to_string(), @"
-    optimize root=vortex.binary(bool, len=9) session=false
+    optimize root=vortex.binary(bool, len=9)
       reduce_parent static:RunEndScalarFnRule slot=0 parent=vortex.binary(bool, len=9) child=vortex.runend(i32, len=9) -> vortex.runend(bool, len=9)
       done output=vortex.runend(bool, len=9)
     ");

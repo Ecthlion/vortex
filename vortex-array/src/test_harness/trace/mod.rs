@@ -56,7 +56,7 @@
 //! let traced = trace_op(|| filter_array.optimize())?;
 //! assert!(traced.output.is::<Primitive>());
 //! insta::assert_snapshot!(traced.trace.to_string(), @r"
-//! optimize root=vortex.filter(i32, len=4) session=false
+//! optimize root=vortex.filter(i32, len=4)
 //!   reduce TrivialFilterRule: vortex.filter(i32, len=4) -> vortex.primitive(i32, len=4)
 //!   done output=vortex.primitive(i32, len=4)
 //! ");
@@ -205,7 +205,7 @@ fn write_indent(f: &mut fmt::Formatter<'_>, depth: usize) -> fmt::Result {
 /// let traced = trace_op(|| filter_array.optimize())?;
 /// assert!(traced.output.is::<Primitive>());
 /// insta::assert_snapshot!(traced.trace.to_string(), @r"
-/// optimize root=vortex.filter(i32, len=4) session=false
+/// optimize root=vortex.filter(i32, len=4)
 ///   reduce TrivialFilterRule: vortex.filter(i32, len=4) -> vortex.primitive(i32, len=4)
 ///   done output=vortex.primitive(i32, len=4)
 /// ");
