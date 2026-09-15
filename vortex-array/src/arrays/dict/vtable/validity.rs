@@ -31,12 +31,17 @@ impl ValidityVTable<Dict> for Dict {
                     Validity::Array(codes_validity)
                 }
                 (Validity::AllValid | Validity::NonNullable, Validity::Array(values_validity)) => {
-                    // We know codes are all valid, so the cast is free.
-                    let codes = Cast::new(
-                        array.codes().clone(),
-                        array.codes().dtype().as_nonnullable(),
-                    )
-                    .into_array();
+                    // We know codes are all valid, so the cast is free. No session is available
+                    // here, so nullable codes are cast lazily.
+                    let codes = if array.codes().dtype().is_nullable() {
+                        Cast::new(
+                            array.codes().clone(),
+                            array.codes().dtype().as_nonnullable(),
+                        )
+                        .into_array()
+                    } else {
+                        array.codes().clone()
+                    };
                     Validity::Array(
                         unsafe { DictArray::new_unchecked(codes, values_validity) }.into_array(),
                     )

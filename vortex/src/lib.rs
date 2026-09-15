@@ -86,7 +86,7 @@
 //!     .open_options()
 //!     .open_buffer(bytes)?;
 //! let filter = gt(root(), lit(2u64))
-//!     .optimize_recursive(file.dtype())?
+//!     .optimize_recursive(file.dtype(), &session)?
 //!     .bind(file.dtype())?;
 //! let filtered = file
 //!     .scan()?
