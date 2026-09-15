@@ -41,8 +41,8 @@ use vortex::array::arrays::extension::ExtensionArrayExt;
 use vortex::array::arrays::varbinview::BinaryView;
 use vortex::array::validity::Validity;
 use vortex::buffer::BitBuffer;
-use vortex::buffer::BitBufferMut;
 use vortex::buffer::Buffer;
+use vortex::buffer::BufferMut;
 use vortex::dtype::DType;
 use vortex::dtype::Nullability;
 use vortex::dtype::PType;
@@ -405,15 +405,12 @@ fn probe_bool(
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<BitBuffer> {
     // A boolean column has only two keys to hash, whatever its length.
-    let verdicts = [
-        sectors.contains(false.duckdb_hash()),
-        sectors.contains(true.duckdb_hash()),
-    ];
+    let key_hashes = [false.duckdb_hash(), true.duckdb_hash()];
     let values = array.bit_buffer_view();
     let validity = array.validity()?.execute_mask(array.len(), ctx)?;
 
     Ok(probe_rows(array.len(), &validity, sectors, |idx| {
-        verdicts[usize::from(values.value(idx))]
+        key_hashes[usize::from(values.value(idx))]
     }))
 }
 
@@ -428,7 +425,7 @@ fn probe_primitive(
         ($ty:ty) => {{
             let values = array.as_slice::<$ty>();
             probe_rows(array.len(), &validity, sectors, |idx| {
-                sectors.contains(values[idx].duckdb_hash())
+                values[idx].duckdb_hash()
             })
         }};
     }
@@ -467,36 +464,66 @@ fn probe_varbinview(
     };
 
     Ok(probe_rows(array.len(), &validity, sectors, |idx| {
-        sectors.contains(hash_view(&views[idx]))
+        hash_view(&views[idx])
     }))
 }
 
-/// Evaluates `probe_value` for every valid row, and answers an invalid row with the filter's
-/// verdict on the hash DuckDB assigns to a NULL key, which is how DuckDB itself probes one.
+/// How many rows are hashed before any of them is probed.
+///
+/// One word of output, and enough hashes in flight that their sector loads overlap.
+const PROBE_CHUNK: usize = 64;
+
+/// Probes the filter for every row, hashing an invalid row to the value DuckDB assigns a NULL
+/// key, which is how DuckDB itself probes one.
+///
+/// Each sector load is a random access into a filter that is far larger than L1, so the rows are
+/// hashed a chunk at a time and their sectors prefetched together. Waiting for one load before
+/// starting the next costs around half the probe's time.
 fn probe_rows(
     len: usize,
     validity: &Mask,
     sectors: &Sectors<'_>,
-    probe_value: impl Fn(usize) -> bool,
+    hash_row: impl Fn(usize) -> u64,
 ) -> BitBuffer {
     match validity {
-        Mask::AllTrue(_) => {
-            let mut passed = BitBufferMut::new_unset(len);
-            for idx in 0..len {
-                passed.set_to(idx, probe_value(idx));
-            }
-            passed.freeze()
-        }
+        Mask::AllTrue(_) => probe_hashes(len, sectors, hash_row),
         Mask::AllFalse(_) => uniform_verdict(len, sectors.contains(NULL_HASH)),
         Mask::Values(values) => {
-            let null_passes = sectors.contains(NULL_HASH);
-            let mut passed = BitBufferMut::new_unset(len);
-            for (idx, valid) in values.bit_buffer().iter().enumerate() {
-                passed.set_to(idx, if valid { probe_value(idx) } else { null_passes });
-            }
-            passed.freeze()
+            let valid = values.bit_buffer();
+            probe_hashes(len, sectors, |idx| {
+                if valid.value(idx) {
+                    hash_row(idx)
+                } else {
+                    NULL_HASH
+                }
+            })
         }
     }
+}
+
+fn probe_hashes(len: usize, sectors: &Sectors<'_>, hash_row: impl Fn(usize) -> u64) -> BitBuffer {
+    let mut passed = BufferMut::<u8>::with_capacity(len.div_ceil(PROBE_CHUNK) * 8);
+    let mut hashes = [0u64; PROBE_CHUNK];
+
+    for start in (0..len).step_by(PROBE_CHUNK) {
+        let chunk = PROBE_CHUNK.min(len - start);
+
+        for (offset, hash) in hashes[..chunk].iter_mut().enumerate() {
+            *hash = hash_row(start + offset);
+        }
+        for hash in &hashes[..chunk] {
+            sectors.prefetch(*hash);
+        }
+
+        let mut word = 0u64;
+        for (bit, hash) in hashes[..chunk].iter().enumerate() {
+            word |= u64::from(sectors.contains(*hash)) << bit;
+        }
+        // The tail writes a whole word too; the bits past `len` are zero and never read.
+        passed.extend_from_slice(&word.to_le_bytes());
+    }
+
+    BitBuffer::new(passed.freeze(), len)
 }
 
 /// The hash DuckDB would compute for a scalar, matching [`DuckDbHash`] for the array kernels.

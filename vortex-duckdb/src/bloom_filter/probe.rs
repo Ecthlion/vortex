@@ -7,6 +7,10 @@
 //! 64-bit sectors. A key's hash picks one sector with its low bits and four bit positions inside
 //! that sector with four of its bytes; the key is present when all four bits are set.
 
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::_MM_HINT_T0;
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::_mm_prefetch;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
@@ -37,15 +41,32 @@ impl<'a> Sectors<'a> {
         Self { sectors }
     }
 
+    /// Hints the CPU to start loading the sector this hash selects.
+    #[cfg(target_arch = "x86_64")]
+    #[inline]
+    pub fn prefetch(&self, hash: u64) {
+        let sector = self.sectors[self.index(hash)].as_ptr();
+        // SAFETY: `_mm_prefetch` only hints the cache, and never dereferences the address.
+        unsafe { _mm_prefetch(sector.cast::<i8>(), _MM_HINT_T0) };
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    #[inline]
+    pub fn prefetch(&self, _hash: u64) {}
+
+    #[inline]
+    fn index(&self, hash: u64) -> usize {
+        usize::try_from(hash & (self.sectors.len() as u64 - 1))
+            .vortex_expect("a sector index is smaller than the sector count")
+    }
+
     /// Whether the filter might contain a key with this hash.
     ///
     /// False positives are possible; false negatives are not.
     #[inline]
     pub fn contains(&self, hash: u64) -> bool {
-        let index = usize::try_from(hash & (self.sectors.len() as u64 - 1))
-            .vortex_expect("a sector index is smaller than the sector count");
         // The build side of the join sets bits with relaxed atomic ORs, so read them the same way.
-        let sector = self.sectors[index].load(Ordering::Relaxed);
+        let sector = self.sectors[self.index(hash)].load(Ordering::Relaxed);
         let mask = sector_mask(hash);
         sector & mask == mask
     }
