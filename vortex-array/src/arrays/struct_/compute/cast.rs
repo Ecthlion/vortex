@@ -23,23 +23,23 @@ use crate::kernel::ExecuteParentKernel;
 use crate::optimizer::kernels::ArrayKernelsExt;
 use crate::scalar::Scalar;
 use crate::scalar_fn::ScalarFnVTable;
-use crate::scalar_fn::fns::cast::Cast;
+use crate::scalar_fn::fns::cast::KernelCast;
 
 pub(crate) fn initialize(session: &VortexSession) {
     let kernels = session.kernels();
-    kernels.register_execute_parent_kernel(Cast.id(), Struct, StructCastKernel);
+    kernels.register_execute_parent_kernel(KernelCast.id(), Struct, StructCastKernel);
 }
 
 #[derive(Debug)]
 struct StructCastKernel;
 
 impl ExecuteParentKernel<Struct> for StructCastKernel {
-    type Parent = ExactScalarFn<Cast>;
+    type Parent = ExactScalarFn<KernelCast>;
 
     fn execute_parent(
         &self,
         array: ArrayView<'_, Struct>,
-        parent: ScalarFnArrayView<'_, Cast>,
+        parent: ScalarFnArrayView<'_, KernelCast>,
         _child_idx: usize,
         ctx: &mut ExecutionCtx,
     ) -> VortexResult<Option<ArrayRef>> {

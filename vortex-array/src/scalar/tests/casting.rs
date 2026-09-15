@@ -106,7 +106,7 @@ mod tests {
         assert!(
             result
                 .as_ref()
-                .is_err_and(|err| err.to_string().contains("no default cast rule")),
+                .is_err_and(|err| err.to_string().contains("no cast rule")),
             "{result:?}"
         );
         assert!(storage_scalar.cast(&ext_dtype.as_nullable()).is_err());

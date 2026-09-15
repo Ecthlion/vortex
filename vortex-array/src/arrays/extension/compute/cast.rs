@@ -17,7 +17,7 @@ impl CastReduce for Extension {
     /// Handles the two extension casts that need no extension-specific knowledge: unwrapping to
     /// the storage dtype, and changing the nullability of the same extension dtype. Every other
     /// extension cast comes from a session [`CastRule`](crate::scalar_fn::fns::cast::CastRule),
-    /// which the executor consults before this rule.
+    /// consulted when the cast executes.
     fn cast(array: ArrayView<'_, Extension>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
         let ext_dtype = array.ext_dtype();
 

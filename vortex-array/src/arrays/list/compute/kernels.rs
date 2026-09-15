@@ -11,12 +11,12 @@ use crate::arrays::dict::TakeExecuteAdaptor;
 use crate::arrays::filter::FilterExecuteAdaptor;
 use crate::optimizer::kernels::ArrayKernelsExt;
 use crate::scalar_fn::ScalarFnVTable;
-use crate::scalar_fn::fns::cast::Cast;
 use crate::scalar_fn::fns::cast::CastExecuteAdaptor;
+use crate::scalar_fn::fns::cast::KernelCast;
 
 pub(crate) fn initialize(session: &VortexSession) {
     let kernels = session.kernels();
-    kernels.register_execute_parent_kernel(Cast.id(), List, CastExecuteAdaptor(List));
+    kernels.register_execute_parent_kernel(KernelCast.id(), List, CastExecuteAdaptor(List));
     kernels.register_execute_parent_kernel(Filter.id(), List, FilterExecuteAdaptor(List));
     kernels.register_execute_parent_kernel(Dict.id(), List, TakeExecuteAdaptor(List));
 }

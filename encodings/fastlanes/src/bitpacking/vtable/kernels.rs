@@ -14,8 +14,8 @@ use vortex_array::scalar_fn::fns::between::Between;
 use vortex_array::scalar_fn::fns::between::BetweenExecuteAdaptor;
 use vortex_array::scalar_fn::fns::binary::Binary;
 use vortex_array::scalar_fn::fns::binary::CompareExecuteAdaptor;
-use vortex_array::scalar_fn::fns::cast::Cast;
 use vortex_array::scalar_fn::fns::cast::CastExecuteAdaptor;
+use vortex_array::scalar_fn::fns::cast::KernelCast;
 use vortex_session::VortexSession;
 
 use crate::BitPacked;
@@ -27,7 +27,11 @@ pub(crate) fn initialize(session: &VortexSession) {
         BitPacked,
         BetweenExecuteAdaptor(BitPacked),
     );
-    kernels.register_execute_parent_kernel(Cast.id(), BitPacked, CastExecuteAdaptor(BitPacked));
+    kernels.register_execute_parent_kernel(
+        KernelCast.id(),
+        BitPacked,
+        CastExecuteAdaptor(BitPacked),
+    );
     kernels.register_execute_parent_kernel(
         Binary.id(),
         BitPacked,

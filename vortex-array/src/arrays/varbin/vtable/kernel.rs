@@ -13,12 +13,12 @@ use crate::optimizer::kernels::ArrayKernelsExt;
 use crate::scalar_fn::ScalarFnVTable;
 use crate::scalar_fn::fns::binary::Binary;
 use crate::scalar_fn::fns::binary::CompareExecuteAdaptor;
-use crate::scalar_fn::fns::cast::Cast;
 use crate::scalar_fn::fns::cast::CastExecuteAdaptor;
+use crate::scalar_fn::fns::cast::KernelCast;
 
 pub(crate) fn initialize(session: &VortexSession) {
     let kernels = session.kernels();
-    kernels.register_execute_parent_kernel(Cast.id(), VarBin, CastExecuteAdaptor(VarBin));
+    kernels.register_execute_parent_kernel(KernelCast.id(), VarBin, CastExecuteAdaptor(VarBin));
     kernels.register_execute_parent_kernel(Binary.id(), VarBin, CompareExecuteAdaptor(VarBin));
     kernels.register_execute_parent_kernel(Filter.id(), VarBin, FilterExecuteAdaptor(VarBin));
     kernels.register_execute_parent_kernel(Dict.id(), VarBin, TakeExecuteAdaptor(VarBin));

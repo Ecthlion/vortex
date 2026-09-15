@@ -11,8 +11,8 @@ use crate::optimizer::kernels::ArrayKernelsExt;
 use crate::scalar_fn::ScalarFnVTable;
 use crate::scalar_fn::fns::between::Between;
 use crate::scalar_fn::fns::between::BetweenExecuteAdaptor;
-use crate::scalar_fn::fns::cast::Cast;
 use crate::scalar_fn::fns::cast::CastExecuteAdaptor;
+use crate::scalar_fn::fns::cast::KernelCast;
 use crate::scalar_fn::fns::fill_null::FillNull;
 use crate::scalar_fn::fns::fill_null::FillNullExecuteAdaptor;
 use crate::scalar_fn::fns::zip::Zip;
@@ -25,7 +25,11 @@ pub(crate) fn initialize(session: &VortexSession) {
         Primitive,
         BetweenExecuteAdaptor(Primitive),
     );
-    kernels.register_execute_parent_kernel(Cast.id(), Primitive, CastExecuteAdaptor(Primitive));
+    kernels.register_execute_parent_kernel(
+        KernelCast.id(),
+        Primitive,
+        CastExecuteAdaptor(Primitive),
+    );
     kernels.register_execute_parent_kernel(
         FillNull.id(),
         Primitive,

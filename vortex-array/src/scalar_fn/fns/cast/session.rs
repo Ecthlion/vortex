@@ -3,23 +3,24 @@
 
 //! Session-scoped registry of cast rules.
 //!
-//! [`CastRules`] holds the [`CastRule`]s a session consults when it executes a
-//! [`Cast`](super::Cast). Rules are consulted before the built-in casts, so a rule can add a cast
-//! Vortex does not perform by itself (an integer into a string, a storage dtype into an extension
-//! dtype) or replace a built-in cast between built-in dtypes. A rule sees both dtypes, extension
-//! metadata included, so it can accept a cast for some instances of a dtype only, such as
-//! timestamps that share a timezone.
+//! Every cast is a [`CastRule`]. [`CastRules`] holds the rules a session consults when it executes
+//! a [`Cast`](super::Cast): the first rule that accepts the source and target dtypes binds the
+//! cast, and a pair no rule accepts cannot be cast in that session. A rule sees both dtypes,
+//! extension metadata included, so it can accept a cast for some instances of a dtype only, such
+//! as timestamps that share a timezone.
 //!
-//! [`CastSession`] is the session variable that owns the registry. Its [`Default`] installs
-//! vortex-array's own rules, currently the timestamp unit conversion; [`CastSession::empty`]
-//! installs none.
+//! [`CastSession`] is the session variable that owns the registry. Its [`Default`] installs the
+//! [standard rules](super::standard), which are the casts Vortex performs between its own dtypes,
+//! and [`TimestampCast`]. [`CastSession::empty`] installs none, so nothing casts until a rule is
+//! registered. The most recently registered rule is consulted first, so a rule registered into a
+//! default session adds a cast the standard rules do not perform, or replaces one they do.
 //!
-//! Rules apply when a cast executes, which is where the session is known. Two consequences
-//! follow. Binding a cast expression cannot consult the rules, so
-//! [`Cast::return_dtype`](super::Cast) accepts every pair of dtypes and an unsupported cast fails
-//! when it executes. And the optimizer, which has no session either, folds constant and literal
-//! casts with the built-in casts only: a rule that adds a cast is always reached, while a rule
-//! that replaces a built-in cast does not apply to constants the optimizer folded first.
+//! Rules apply when a cast executes, which is where the session is known. Binding a cast
+//! expression therefore cannot consult them, so [`Cast::return_dtype`](super::Cast) accepts every
+//! pair of dtypes and an unsupported cast fails when it executes. Reduce rules and
+//! [`Scalar::cast`](crate::scalar::Scalar::cast) have no session either: they use the rules of
+//! the default session, so a rule registered into another session applies to arrays executed in
+//! that session, not to constants folded before execution.
 
 use std::any::Any;
 use std::fmt::Debug;
@@ -36,6 +37,15 @@ use crate::ArrayRef;
 use crate::ExecutionCtx;
 use crate::dtype::DType;
 use crate::extension::datetime::TimestampCast;
+use crate::scalar_fn::fns::cast::standard::BoolCast;
+use crate::scalar_fn::fns::cast::standard::DecimalCast;
+use crate::scalar_fn::fns::cast::standard::ListCast;
+use crate::scalar_fn::fns::cast::standard::MapCast;
+use crate::scalar_fn::fns::cast::standard::NullCast;
+use crate::scalar_fn::fns::cast::standard::NullabilityCast;
+use crate::scalar_fn::fns::cast::standard::PrimitiveCast;
+use crate::scalar_fn::fns::cast::standard::StorageCast;
+use crate::scalar_fn::fns::cast::standard::StructCast;
 
 /// A cast bound to a concrete source and target dtype.
 ///
@@ -44,13 +54,13 @@ use crate::extension::datetime::TimestampCast;
 /// itself be lazy: the executor keeps evaluating it.
 pub type CastFn = Arc<dyn Fn(ArrayRef, &mut ExecutionCtx) -> VortexResult<ArrayRef> + Send + Sync>;
 
-/// A pluggable cast between dtypes.
+/// A cast between dtypes.
 pub trait CastRule: Debug + Send + Sync + 'static {
     /// Binds a cast from `source` to `target`.
     ///
-    /// Returns `Ok(None)` when this rule does not cover the pair, in which case later rules and
-    /// then the built-in casts are consulted. Returning an error rejects the cast outright, even
-    /// if a later rule or a built-in cast would accept it.
+    /// Returns `Ok(None)` when this rule does not cover the pair, in which case later rules are
+    /// consulted. Returning an error rejects the cast outright, even if a later rule would accept
+    /// it.
     fn bind(&self, source: &DType, target: &DType) -> VortexResult<Option<CastFn>>;
 }
 
@@ -74,7 +84,7 @@ impl CastRules {
     /// Registers a rule.
     ///
     /// The most recently registered rule is consulted first, so a rule registered later replaces
-    /// earlier rules, and the built-in casts, for every pair of dtypes it accepts.
+    /// earlier rules for every pair of dtypes it accepts.
     pub fn register<R: CastRule>(&self, rule: R) {
         let rule: CastRuleRef = Arc::new(rule);
         self.rules.rcu(|rules| {
@@ -87,7 +97,7 @@ impl CastRules {
 
     /// Binds a cast from `source` to `target` using the first rule that accepts the pair.
     ///
-    /// Returns `Ok(None)` when no rule accepts it, leaving the cast to the built-in casts.
+    /// Returns `Ok(None)` when no rule accepts it.
     pub fn bind(&self, source: &DType, target: &DType) -> VortexResult<Option<CastFn>> {
         for rule in self.rules.load().iter() {
             if let Some(cast_fn) = rule.bind(source, target)? {
@@ -115,7 +125,8 @@ pub struct CastSession {
 }
 
 impl CastSession {
-    /// Creates a session variable with no cast rules, so only the built-in casts apply.
+    /// Creates a session variable with no cast rules, so no cast is possible until one is
+    /// registered.
     pub fn empty() -> Self {
         Self {
             rules: CastRules::empty(),
@@ -138,9 +149,19 @@ impl Deref for CastSession {
     }
 }
 
+/// Installs the standard rules and [`TimestampCast`].
 impl Default for CastSession {
     fn default() -> Self {
         let this = Self::empty();
+        this.register(NullabilityCast);
+        this.register(NullCast);
+        this.register(BoolCast);
+        this.register(PrimitiveCast);
+        this.register(DecimalCast);
+        this.register(ListCast);
+        this.register(MapCast);
+        this.register(StructCast);
+        this.register(StorageCast);
         this.register(TimestampCast);
         this
     }
