@@ -31,6 +31,9 @@ pub use erased::*;
 mod plugin;
 pub use plugin::*;
 
+mod representation;
+pub use representation::*;
+
 mod foreign;
 pub(crate) use foreign::*;
 
