@@ -191,8 +191,11 @@ pub trait VTable: 'static + Clone + Sized + Send + Sync + Debug {
     ///
     /// Reductions are opportunistic and may return `Ok(None)` when no cheaper representation is
     /// known.
-    fn reduce(array: ArrayView<'_, Self>) -> VortexResult<Option<ArrayRef>> {
-        _ = array;
+    fn reduce(
+        array: ArrayView<'_, Self>,
+        session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
+        _ = (array, session);
         Ok(None)
     }
 
@@ -203,8 +206,9 @@ pub trait VTable: 'static + Clone + Sized + Send + Sync + Debug {
         array: ArrayView<'_, Self>,
         parent: &ArrayRef,
         child_idx: usize,
+        session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
-        _ = (array, parent, child_idx);
+        _ = (array, parent, child_idx, session);
         Ok(None)
     }
 }

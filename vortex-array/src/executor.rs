@@ -469,7 +469,7 @@ impl Executable for ArrayRef {
         }
         trace_op!(record_single_step_phase_none("canonical", &array));
 
-        if let Some(reduced) = array.reduce()? {
+        if let Some(reduced) = array.reduce(ctx.session())? {
             reduced.statistics().inherit_from(array.statistics());
             trace_op!(record_single_step_applied("reduce", &array, &reduced));
             return Ok(reduced);
@@ -478,7 +478,7 @@ impl Executable for ArrayRef {
 
         for (slot_idx, slot) in array.slots().iter().enumerate() {
             let Some(child) = slot else { continue };
-            if let Some(reduced_parent) = child.reduce_parent(&array, slot_idx)? {
+            if let Some(reduced_parent) = child.reduce_parent(&array, slot_idx, ctx.session())? {
                 reduced_parent.statistics().inherit_from(array.statistics());
                 trace_op!(record_single_step_applied(
                     "reduce_parent",

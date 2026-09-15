@@ -46,10 +46,10 @@ pub fn split_temporal(array: TemporalArray, ctx: &mut ExecutionCtx) -> VortexRes
     let timestamps = temporal_values
         .clone()
         .into_array()
-        .cast(DType::Primitive(
-            PType::I64,
-            temporal_values.dtype().nullability(),
-        ))?
+        .cast(
+            DType::Primitive(PType::I64, temporal_values.dtype().nullability()),
+            ctx.session(),
+        )?
         .execute::<PrimitiveArray>(ctx)?;
 
     let length = timestamps.len();

@@ -440,7 +440,7 @@ mod tests {
         );
 
         assert_eq!(
-            expr.optimize_recursive(&dtype)?,
+            expr.optimize_recursive(&dtype, &array_session())?,
             lit(Scalar::null(DType::Bool(Nullability::Nullable)))
         );
         Ok(())
@@ -454,7 +454,7 @@ mod tests {
             lit(Scalar::null(DType::Utf8(Nullability::Nullable))),
         );
 
-        assert!(expr.optimize_recursive(&dtype).is_err());
+        assert!(expr.optimize_recursive(&dtype, &array_session()).is_err());
     }
 
     #[test]

@@ -8,11 +8,16 @@ use vortex_array::builtins::ArrayBuiltins;
 use vortex_array::dtype::DType;
 use vortex_array::scalar_fn::fns::cast::CastReduce;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::DateTimeParts;
 use crate::array::DateTimePartsArraySlotsExt;
 impl CastReduce for DateTimeParts {
-    fn cast(array: ArrayView<'_, Self>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, Self>,
+        dtype: &DType,
+        session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         if !array.dtype().eq_ignore_nullability(dtype) {
             return Ok(None);
         };
@@ -20,9 +25,10 @@ impl CastReduce for DateTimeParts {
         Ok(Some(
             DateTimeParts::try_new(
                 dtype.clone(),
-                array
-                    .days()
-                    .cast(array.days().dtype().with_nullability(dtype.nullability()))?,
+                array.days().cast(
+                    array.days().dtype().with_nullability(dtype.nullability()),
+                    session,
+                )?,
                 array.seconds().clone(),
                 array.subseconds().clone(),
             )?
@@ -86,7 +92,7 @@ mod tests {
     ) {
         let array = date_time_array(validity);
         let new_dtype = array.dtype().with_nullability(cast_to_nullability);
-        let result = array.cast(new_dtype.clone());
+        let result = array.cast(new_dtype.clone(), &array_session());
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(result.unwrap().dtype(), &new_dtype);
     }
@@ -99,13 +105,16 @@ mod tests {
         let array = date_time_array(validity);
         // Cast to incompatible type - force evaluation via execute::<Canonical>
         let result = array
-            .cast(DType::Bool(Nullability::NonNullable))
+            .cast(DType::Bool(Nullability::NonNullable), ctx.session())
             .and_then(|a| a.execute::<Canonical>(&mut ctx).map(|c| c.into_array()));
         assert!(result.is_err(), "Expected error, got: {result:?}");
 
         // Cast nullable with nulls to non-nullable - force evaluation via execute::<Canonical>
         let result = array
-            .cast(array.dtype().with_nullability(Nullability::NonNullable))
+            .cast(
+                array.dtype().with_nullability(Nullability::NonNullable),
+                ctx.session(),
+            )
             .and_then(|a| a.execute::<Canonical>(&mut ctx).map(|c| c.into_array()));
         assert!(result.is_err(), "Expected error, got: {result:?}");
     }

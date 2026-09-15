@@ -598,7 +598,7 @@ mod tests {
         array: &ArrayRef,
         ctx: &mut CudaExecutionCtx,
     ) -> VortexResult<MaterializedPlan> {
-        match DispatchPlan::new(array, CudaDispatchMode::DynDispatchOnly)? {
+        match DispatchPlan::new(array, CudaDispatchMode::DynDispatchOnly, ctx.session())? {
             DispatchPlan::Fused(plan) => plan.materialize(ctx).await,
             _ => vortex_bail!("array encoding not fusable"),
         }
@@ -606,19 +606,31 @@ mod tests {
 
     #[crate::test]
     fn test_cast_u64_to_i64_is_not_fused() -> VortexResult<()> {
-        let supported = PrimitiveArray::from_iter([0u32, 1])
-            .into_array()
-            .cast(DType::Primitive(PType::I64, Nullability::NonNullable))?;
+        let supported = PrimitiveArray::from_iter([0u32, 1]).into_array().cast(
+            DType::Primitive(PType::I64, Nullability::NonNullable),
+            &array_session(),
+        )?;
         assert!(matches!(
-            DispatchPlan::new(&supported, CudaDispatchMode::DynDispatchOnly)?,
+            DispatchPlan::new(
+                &supported,
+                CudaDispatchMode::DynDispatchOnly,
+                &array_session()
+            )?,
             DispatchPlan::Fused(_)
         ));
 
         let u64_to_i64 = PrimitiveArray::from_iter([0u64, i64::MAX as u64 + 1])
             .into_array()
-            .cast(DType::Primitive(PType::I64, Nullability::NonNullable))?;
+            .cast(
+                DType::Primitive(PType::I64, Nullability::NonNullable),
+                &array_session(),
+            )?;
         assert!(matches!(
-            DispatchPlan::new(&u64_to_i64, CudaDispatchMode::DynDispatchOnly)?,
+            DispatchPlan::new(
+                &u64_to_i64,
+                CudaDispatchMode::DynDispatchOnly,
+                &array_session()
+            )?,
             DispatchPlan::Unfused
         ));
 

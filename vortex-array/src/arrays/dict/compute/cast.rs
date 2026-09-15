@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use super::Dict;
 use super::DictArray;
@@ -15,20 +16,25 @@ use crate::dtype::DType;
 use crate::scalar_fn::fns::cast::CastReduce;
 
 impl CastReduce for Dict {
-    fn cast(array: ArrayView<'_, Dict>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, Dict>,
+        dtype: &DType,
+        session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         // Can have un-reference null values making the cast of values fail without a possible mask.
         // TODO(joe): optimize this, could look at accessible values and fill_null not those?
         if !dtype.is_nullable() && !array.values().validity()?.definitely_no_nulls() {
             return Ok(None);
         }
         // Cast the dictionary values to the target type
-        let casted_values = array.values().cast(dtype.clone())?;
+        let casted_values = array.values().cast(dtype.clone(), session)?;
 
         // If the codes are nullable but we are casting to non nullable dtype we have to remove nullability from codes as well
         let casted_codes = if array.codes().dtype().is_nullable() && !dtype.is_nullable() {
-            array
-                .codes()
-                .cast(array.codes().dtype().with_nullability(dtype.nullability()))?
+            array.codes().cast(
+                array.codes().dtype().with_nullability(dtype.nullability()),
+                session,
+            )?
         } else {
             array.codes().clone()
         };
@@ -79,7 +85,10 @@ mod tests {
 
         let casted = dict
             .into_array()
-            .cast(DType::Primitive(PType::I64, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::I64, Nullability::NonNullable),
+                ctx.session(),
+            )
             .unwrap();
         assert_eq!(
             casted.dtype(),
@@ -98,7 +107,10 @@ mod tests {
 
         let casted = dict
             .into_array()
-            .cast(DType::Primitive(PType::I64, Nullability::Nullable))
+            .cast(
+                DType::Primitive(PType::I64, Nullability::Nullable),
+                &SESSION,
+            )
             .unwrap();
         assert_eq!(
             casted.dtype(),
@@ -124,7 +136,10 @@ mod tests {
         let non_nullable = dict
             .clone()
             .into_array()
-            .cast(DType::Primitive(PType::I32, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::I32, Nullability::NonNullable),
+                ctx.session(),
+            )
             .unwrap();
         assert_eq!(
             non_nullable.dtype(),
@@ -144,7 +159,10 @@ mod tests {
 
         // Cast to Nullable
         let nullable = non_nullable
-            .cast(DType::Primitive(PType::I32, Nullability::Nullable))
+            .cast(
+                DType::Primitive(PType::I32, Nullability::Nullable),
+                ctx.session(),
+            )
             .unwrap();
         assert_eq!(
             nullable.dtype(),
@@ -164,7 +182,10 @@ mod tests {
 
         // Cast back to NonNullable
         let back_to_non_nullable = nullable
-            .cast(DType::Primitive(PType::I32, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::I32, Nullability::NonNullable),
+                ctx.session(),
+            )
             .unwrap();
         assert_eq!(
             back_to_non_nullable.dtype(),
@@ -208,9 +229,10 @@ mod tests {
         );
 
         // Casting to NonNullable should succeed since all logical values are non-null.
-        let result = dict
-            .into_array()
-            .cast(DType::Primitive(PType::F64, Nullability::NonNullable));
+        let result = dict.into_array().cast(
+            DType::Primitive(PType::F64, Nullability::NonNullable),
+            ctx.session(),
+        );
         assert!(
             result.is_ok(),
             "cast to NonNullable should succeed for dict with only unreferenced null values"

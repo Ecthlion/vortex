@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::array::ArrayView;
@@ -38,6 +39,7 @@ impl ArrayParentReduceRule<Masked> for MaskedGetItemRule {
         array: ArrayView<'_, Masked>,
         parent: ScalarFnArrayView<'_, GetItem>,
         _child_idx: usize,
+        _session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         let field = array.child().get_item(parent.options.clone())?;
         Ok(Some(

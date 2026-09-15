@@ -122,7 +122,10 @@ where
     T: ArrowTemporalType,
     T::Native: NativePType,
 {
-    let array = array.cast(DType::Primitive(T::Native::PTYPE, Nullability::Nullable))?;
+    let array = array.cast(
+        DType::Primitive(T::Native::PTYPE, Nullability::Nullable),
+        ctx.session(),
+    )?;
     let primitive = array.execute::<PrimitiveArray>(ctx)?;
     let validity = primitive
         .as_ref()

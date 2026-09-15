@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::ArrayEq;
 use crate::ArrayRef;
@@ -61,6 +62,7 @@ impl ArrayParentReduceRule<Dict> for DictionaryChunkedValuesPullUpRule {
         array: ArrayView<'_, Dict>,
         parent: ArrayView<'_, Chunked>,
         _child_idx: usize,
+        _session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         let values = array.values();
         let codes_dtype = array.codes().dtype().clone();
@@ -105,6 +107,7 @@ impl ArrayParentReduceRule<Dict> for DictionaryScalarFnValuesPushDownRule {
         array: ArrayView<'_, Dict>,
         parent: ArrayView<'_, ScalarFn>,
         child_idx: usize,
+        session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         let scalar_fn = parent.scalar_fn();
         let signature = scalar_fn.signature();
@@ -182,7 +185,9 @@ impl ArrayParentReduceRule<Dict> for DictionaryScalarFnValuesPushDownRule {
         // dtype may still be nullable. Remove that declared nullability while rebuilding the
         // dictionary, then cast its output to the function's declared dtype.
         if !signature.is_strict() && array.codes().dtype().is_nullable() {
-            let non_nullable_codes = array.codes().cast(array.codes().dtype().as_nonnullable())?;
+            let non_nullable_codes = array
+                .codes()
+                .cast(array.codes().dtype().as_nonnullable(), session)?;
 
             // SAFETY: The validity guard proves that the codes contain no nulls. Removing their
             // declared nullability preserves every code, and `transformed_values` has one entry
@@ -193,7 +198,9 @@ impl ArrayParentReduceRule<Dict> for DictionaryScalarFnValuesPushDownRule {
             }
             .into_array();
 
-            return Ok(Some(transformed_dict.cast(parent.dtype().clone())?));
+            return Ok(Some(
+                transformed_dict.cast(parent.dtype().clone(), session)?,
+            ));
         }
 
         // SAFETY: The codes are unchanged and `transformed_values` has one entry for each original
@@ -218,6 +225,7 @@ impl ArrayParentReduceRule<Dict> for DictionaryScalarFnCodesPullUpRule {
         array: ArrayView<'_, Dict>,
         parent: ArrayView<'_, ScalarFn>,
         child_idx: usize,
+        _session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         // Don't attempt to pull up if there are less than 2 siblings.
         if parent.nchildren() < 2 {

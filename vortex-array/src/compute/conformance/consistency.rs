@@ -1307,7 +1307,7 @@ fn test_cast_slice_consistency(array: &ArrayRef, ctx: &mut ExecutionCtx) {
 
         // Try to cast the sliced array (force execution via to_canonical)
         let slice_then_cast = match sliced
-            .cast(target_dtype.clone())
+            .cast(target_dtype.clone(), ctx.session())
             .and_then(|a| a.execute::<Canonical>(ctx).map(|c| c.into_array()))
         {
             Ok(result) => result,
@@ -1357,7 +1357,7 @@ fn test_cast_slice_consistency(array: &ArrayRef, ctx: &mut ExecutionCtx) {
 
         // Also test the other way: cast then slice
         let casted = match array
-            .cast(target_dtype.clone())
+            .cast(target_dtype.clone(), ctx.session())
             .and_then(|a| a.execute::<Canonical>(ctx).map(|c| c.into_array()))
         {
             Ok(result) => result,

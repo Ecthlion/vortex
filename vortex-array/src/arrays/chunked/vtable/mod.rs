@@ -283,7 +283,10 @@ impl VTable for Chunked {
         }
     }
 
-    fn reduce(array: ArrayView<'_, Self>) -> VortexResult<Option<ArrayRef>> {
+    fn reduce(
+        array: ArrayView<'_, Self>,
+        _session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         Ok(match array.nchunks() {
             0 => Some(Canonical::empty(array.dtype()).into_array()),
             1 => Some(array.chunk(0).clone()),
@@ -295,7 +298,8 @@ impl VTable for Chunked {
         array: ArrayView<'_, Self>,
         parent: &ArrayRef,
         child_idx: usize,
+        session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
-        PARENT_RULES.evaluate(array, parent, child_idx)
+        PARENT_RULES.evaluate(array, parent, child_idx, session)
     }
 }

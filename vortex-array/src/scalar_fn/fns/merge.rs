@@ -574,7 +574,7 @@ mod tests {
             DuplicateHandling::RightMost,
         );
 
-        let result = e.optimize(&dtype).unwrap();
+        let result = e.optimize(&dtype, &array_session()).unwrap();
 
         assert!(result.is::<Pack>());
         assert_eq!(

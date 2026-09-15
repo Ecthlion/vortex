@@ -8,12 +8,17 @@ use vortex_array::builtins::ArrayBuiltins;
 use vortex_array::dtype::DType;
 use vortex_array::scalar_fn::fns::cast::CastReduce;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::DecimalByteParts;
 use crate::decimal_byte_parts::DecimalBytePartsArraySlotsExt;
 
 impl CastReduce for DecimalByteParts {
-    fn cast(array: ArrayView<'_, Self>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, Self>,
+        dtype: &DType,
+        session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         // Check if this is just a nullability change
         if !dtype.eq_ignore_nullability(array.dtype()) {
             return Ok(None);
@@ -25,9 +30,10 @@ impl CastReduce for DecimalByteParts {
         };
 
         // Cast the msp array to handle nullability change
-        let new_msp = array
-            .msp()
-            .cast(array.msp().dtype().with_nullability(*target_nullability))?;
+        let new_msp = array.msp().cast(
+            array.msp().dtype().with_nullability(*target_nullability),
+            session,
+        )?;
 
         Ok(Some(
             DecimalByteParts::try_new(new_msp, *target_decimal)?.into_array(),
@@ -65,7 +71,10 @@ mod tests {
         // Cast to nullable decimal
         let casted = array
             .into_array()
-            .cast(DType::Decimal(decimal_dtype, Nullability::Nullable))
+            .cast(
+                DType::Decimal(decimal_dtype, Nullability::Nullable),
+                ctx.session(),
+            )
             .unwrap();
         assert_eq!(
             casted.dtype(),
@@ -90,7 +99,10 @@ mod tests {
         // Cast to non-nullable should fail due to nulls - force evaluation via execute::<Canonical>
         let result = array
             .into_array()
-            .cast(DType::Decimal(decimal_dtype, Nullability::NonNullable))
+            .cast(
+                DType::Decimal(decimal_dtype, Nullability::NonNullable),
+                ctx.session(),
+            )
             .and_then(|a| a.execute::<Canonical>(&mut ctx).map(|c| c.into_array()));
         assert!(result.is_err());
     }

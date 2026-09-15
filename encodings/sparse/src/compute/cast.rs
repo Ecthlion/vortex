@@ -9,15 +9,20 @@ use vortex_array::dtype::DType;
 use vortex_array::scalar::Scalar;
 use vortex_array::scalar_fn::fns::cast::CastReduce;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::Sparse;
 use crate::SparseExt as _;
 
 impl CastReduce for Sparse {
-    fn cast(array: ArrayView<'_, Self>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, Self>,
+        dtype: &DType,
+        session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         let casted_patches = array
             .patches()
-            .map_values(|values| values.cast(dtype.clone()))?;
+            .map_values(|values| values.cast(dtype.clone(), session))?;
 
         let casted_fill = if array.patches().num_patches() == array.len() {
             // When every position is patched the fill scalar is unused and can be undefined.
@@ -73,7 +78,10 @@ mod tests {
 
         let casted = sparse
             .into_array()
-            .cast(DType::Primitive(PType::I64, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::I64, Nullability::NonNullable),
+                ctx.session(),
+            )
             .unwrap();
         assert_eq!(
             casted.dtype(),
@@ -97,7 +105,10 @@ mod tests {
 
         let casted = sparse
             .into_array()
-            .cast(DType::Primitive(PType::I64, Nullability::Nullable))
+            .cast(
+                DType::Primitive(PType::I64, Nullability::Nullable),
+                &SESSION,
+            )
             .unwrap();
         assert_eq!(
             casted.dtype(),
@@ -151,9 +162,10 @@ mod tests {
             Scalar::null_native::<u64>(),
         )?;
 
-        let casted = sparse
-            .into_array()
-            .cast(DType::Primitive(PType::U64, Nullability::NonNullable))?;
+        let casted = sparse.into_array().cast(
+            DType::Primitive(PType::U64, Nullability::NonNullable),
+            ctx.session(),
+        )?;
 
         assert_eq!(
             casted.dtype(),

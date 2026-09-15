@@ -34,6 +34,7 @@ use crate::kernel::ExecuteParentKernel;
 use crate::scalar::BoolScalar;
 use crate::scalar::Scalar;
 use crate::scalar_fn::fns::binary::Binary;
+use crate::scalar_fn::fns::cast::Cast;
 use crate::scalar_fn::fns::operators::Operator;
 use crate::validity::Validity;
 
@@ -733,7 +734,8 @@ fn cast_bool_nullability(array: &ArrayRef, nullability: Nullability) -> VortexRe
     if array.dtype() == &dtype {
         Ok(array.clone())
     } else {
-        array.cast(dtype)
+        // No session is available here; the cast resolves when the result executes.
+        Ok(Cast::new(array.clone(), dtype).into_array())
     }
 }
 

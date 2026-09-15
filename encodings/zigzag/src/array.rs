@@ -146,8 +146,9 @@ impl VTable for ZigZag {
         array: ArrayView<'_, Self>,
         parent: &ArrayRef,
         child_idx: usize,
+        session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
-        RULES.evaluate(array, parent, child_idx)
+        RULES.evaluate(array, parent, child_idx, session)
     }
 }
 

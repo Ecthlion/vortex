@@ -140,11 +140,11 @@ impl ScalarFnVTable for Zip {
         let return_dtype = zip_return_dtype(if_true.dtype(), if_false.dtype())?;
 
         if mask.all_true() {
-            return if_true.cast(return_dtype)?.execute(ctx);
+            return if_true.cast(return_dtype, ctx.session())?.execute(ctx);
         }
 
         if mask.all_false() {
-            return if_false.cast(return_dtype)?.execute(ctx);
+            return if_false.cast(return_dtype, ctx.session())?.execute(ctx);
         }
 
         if !if_true.is_canonical() || !if_false.is_canonical() {
@@ -202,15 +202,15 @@ pub(crate) fn zip_impl(
     let return_type = zip_return_dtype(if_true.dtype(), if_false.dtype())?;
 
     let mask_values = match mask {
-        Mask::AllTrue(_) | Mask::AllFalse(0) => return if_true.cast(return_type),
-        Mask::AllFalse(_) => return if_false.cast(return_type),
+        Mask::AllTrue(_) | Mask::AllFalse(0) => return if_true.cast(return_type, ctx.session()),
+        Mask::AllFalse(_) => return if_false.cast(return_type, ctx.session()),
         Mask::Values(values) => values,
     };
 
     // `append_to_builder` requires exact dtype equality, so normalize branch
     // nullability to the output dtype before appending slices into the builder.
-    let if_true = if_true.cast(return_type.clone())?;
-    let if_false = if_false.cast(return_type.clone())?;
+    let if_true = if_true.cast(return_type.clone(), ctx.session())?;
+    let if_false = if_false.cast(return_type.clone(), ctx.session())?;
 
     zip_impl_with_builder(
         &if_true,

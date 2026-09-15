@@ -170,11 +170,14 @@ fn compress(n: usize, shape: Shape, ctx: &mut ExecutionCtx) -> OnPairArray {
 
 /// Canonicalise a slot child to the decoder's native primitive width.
 fn widen<T: NativePType>(arr: &ArrayRef, ctx: &mut ExecutionCtx) -> Buffer<T> {
-    arr.cast(DType::Primitive(T::PTYPE, arr.dtype().nullability()))
-        .expect("cast")
-        .execute::<PrimitiveArray>(ctx)
-        .expect("execute")
-        .into_buffer::<T>()
+    arr.cast(
+        DType::Primitive(T::PTYPE, arr.dtype().nullability()),
+        ctx.session(),
+    )
+    .expect("cast")
+    .execute::<PrimitiveArray>(ctx)
+    .expect("execute")
+    .into_buffer::<T>()
 }
 
 fn materialise(arr: &OnPairArray, ctx: &mut ExecutionCtx) -> (DecodeInputs, usize) {

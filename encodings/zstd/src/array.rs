@@ -303,8 +303,9 @@ impl VTable for Zstd {
         array: ArrayView<'_, Self>,
         parent: &ArrayRef,
         child_idx: usize,
+        session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
-        crate::rules::RULES.evaluate(array, parent, child_idx)
+        crate::rules::RULES.evaluate(array, parent, child_idx, session)
     }
 }
 

@@ -546,8 +546,8 @@ pub trait ListViewArrayExt: ListViewArraySlotsExt {
         } else {
             PType::I64
         });
-        let offsets = self.offsets().cast(wide_dtype.clone())?;
-        let sizes = self.sizes().cast(wide_dtype)?;
+        let offsets = self.offsets().cast(wide_dtype.clone(), ctx.session())?;
+        let sizes = self.sizes().cast(wide_dtype, ctx.session())?;
         let end = min_max(
             &offsets.binary(sizes, Operator::Add)?,
             ctx,

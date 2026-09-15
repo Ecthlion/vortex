@@ -191,7 +191,7 @@ pub trait PrimitiveArrayExt: TypedArrayRef<Primitive> {
             if min >= i8::MIN as i64 && max <= i8::MAX as i64 {
                 let result = self
                     .as_ref()
-                    .cast(DType::Primitive(PType::I8, nullability))?
+                    .cast(DType::Primitive(PType::I8, nullability), ctx.session())?
                     .execute::<PrimitiveArray>(ctx)?;
                 return Ok(result);
             }
@@ -199,7 +199,7 @@ pub trait PrimitiveArrayExt: TypedArrayRef<Primitive> {
             if min >= i16::MIN as i64 && max <= i16::MAX as i64 {
                 let result = self
                     .as_ref()
-                    .cast(DType::Primitive(PType::I16, nullability))?
+                    .cast(DType::Primitive(PType::I16, nullability), ctx.session())?
                     .execute::<PrimitiveArray>(ctx)?;
                 return Ok(result);
             }
@@ -207,7 +207,7 @@ pub trait PrimitiveArrayExt: TypedArrayRef<Primitive> {
             if min >= i32::MIN as i64 && max <= i32::MAX as i64 {
                 let result = self
                     .as_ref()
-                    .cast(DType::Primitive(PType::I32, nullability))?
+                    .cast(DType::Primitive(PType::I32, nullability), ctx.session())?
                     .execute::<PrimitiveArray>(ctx)?;
                 return Ok(result);
             }
@@ -216,7 +216,7 @@ pub trait PrimitiveArrayExt: TypedArrayRef<Primitive> {
             if max <= u8::MAX as i64 {
                 let result = self
                     .as_ref()
-                    .cast(DType::Primitive(PType::U8, nullability))?
+                    .cast(DType::Primitive(PType::U8, nullability), ctx.session())?
                     .execute::<PrimitiveArray>(ctx)?;
                 return Ok(result);
             }
@@ -224,7 +224,7 @@ pub trait PrimitiveArrayExt: TypedArrayRef<Primitive> {
             if max <= u16::MAX as i64 {
                 let result = self
                     .as_ref()
-                    .cast(DType::Primitive(PType::U16, nullability))?
+                    .cast(DType::Primitive(PType::U16, nullability), ctx.session())?
                     .execute::<PrimitiveArray>(ctx)?;
                 return Ok(result);
             }
@@ -232,7 +232,7 @@ pub trait PrimitiveArrayExt: TypedArrayRef<Primitive> {
             if max <= u32::MAX as i64 {
                 let result = self
                     .as_ref()
-                    .cast(DType::Primitive(PType::U32, nullability))?
+                    .cast(DType::Primitive(PType::U32, nullability), ctx.session())?
                     .execute::<PrimitiveArray>(ctx)?;
                 return Ok(result);
             }

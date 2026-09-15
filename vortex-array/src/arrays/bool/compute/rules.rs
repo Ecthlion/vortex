@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::IntoArray;
@@ -40,6 +41,7 @@ impl ArrayParentReduceRule<Bool> for BoolMaskedValidityRule {
         array: ArrayView<'_, Bool>,
         parent: ArrayView<'_, Masked>,
         child_idx: usize,
+        _session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         if child_idx > 0 {
             return Ok(None);

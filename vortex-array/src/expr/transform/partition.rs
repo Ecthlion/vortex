@@ -8,6 +8,7 @@ use std::hash::Hash;
 use itertools::Itertools;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 use vortex_utils::aliases::hash_map::HashMap;
 
 use crate::dtype::DType;
@@ -43,6 +44,7 @@ pub fn partition<A: AnnotationFn>(
     expr: Expression,
     scope: &DType,
     annotate_fn: A,
+    session: &VortexSession,
 ) -> VortexResult<PartitionedExpr<A::Annotation>>
 where
     A::Annotation: Display,
@@ -50,13 +52,14 @@ where
 {
     // Annotate each expression with the annotations that any of its descendent expressions have.
     let annotations = descendent_annotations(&expr, annotate_fn);
-    partition_annotations(expr.clone(), scope, annotations)
+    partition_annotations(expr.clone(), scope, annotations, session)
 }
 
 pub fn partition_annotations<A>(
     expr: Expression,
     scope: &DType,
     annotations: Annotations<A>,
+    session: &VortexSession,
 ) -> VortexResult<PartitionedExpr<A>>
 where
     A: Display + Clone + Eq + Hash,
@@ -83,7 +86,7 @@ where
             Nullability::NonNullable,
         );
 
-        let expr = expr.optimize_recursive(scope)?;
+        let expr = expr.optimize_recursive(scope, session)?;
         let expr_dtype = expr.return_dtype(scope)?;
 
         partitions.push(expr);
@@ -101,7 +104,7 @@ where
     );
 
     Ok(PartitionedExpr {
-        root: root.optimize_recursive(&root_scope)?,
+        root: root.optimize_recursive(&root_scope, session)?,
         partitions: partitions.into_boxed_slice(),
         partition_names,
         partition_dtypes: partition_dtypes.into_boxed_slice(),
@@ -219,6 +222,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::array_session;
     use crate::dtype::DType;
     use crate::dtype::Nullability::NonNullable;
     use crate::dtype::PType::I32;
@@ -256,8 +260,13 @@ mod tests {
         let fields = dtype.as_struct_fields_opt().unwrap();
 
         let expr = root();
-        let partitioned =
-            partition(expr.clone(), &dtype, make_free_field_annotator(fields)).unwrap();
+        let partitioned = partition(
+            expr.clone(),
+            &dtype,
+            make_free_field_annotator(fields),
+            &array_session(),
+        )
+        .unwrap();
 
         // An un-expanded root expression is annotated by all fields, but since it is a single node
         assert_eq!(partitioned.partitions.len(), 0);
@@ -265,7 +274,13 @@ mod tests {
 
         // Instead, callers must expand the root expression themselves.
         let expr = replace_root_fields(expr, fields);
-        let partitioned = partition(expr, &dtype, make_free_field_annotator(fields)).unwrap();
+        let partitioned = partition(
+            expr,
+            &dtype,
+            make_free_field_annotator(fields),
+            &array_session(),
+        )
+        .unwrap();
 
         assert_eq!(partitioned.partitions.len(), fields.names().len());
     }
@@ -276,7 +291,13 @@ mod tests {
 
         let expr = get_item("y", get_item("a", root()));
 
-        let partitioned = partition(expr, &dtype, make_free_field_annotator(fields)).unwrap();
+        let partitioned = partition(
+            expr,
+            &dtype,
+            make_free_field_annotator(fields),
+            &array_session(),
+        )
+        .unwrap();
         assert_eq!(&partitioned.root, &get_item("a_0", get_item("a", root())));
     }
 
@@ -292,11 +313,19 @@ mod tests {
             ],
             NonNullable,
         );
-        let partitioned = partition(expr, &dtype, make_free_field_annotator(fields)).unwrap();
+        let partitioned = partition(
+            expr,
+            &dtype,
+            make_free_field_annotator(fields),
+            &array_session(),
+        )
+        .unwrap();
 
         let split_a = partitioned.find_partition(&"a".into()).unwrap();
         assert_eq!(
-            &split_a.optimize_recursive(&dtype).unwrap(),
+            &split_a
+                .optimize_recursive(&dtype, &array_session())
+                .unwrap(),
             &pack(
                 [
                     ("a_0", get_item("x", get_item("a", root()))),
@@ -312,7 +341,13 @@ mod tests {
         let fields = dtype.as_struct_fields_opt().unwrap();
 
         let expr = and(get_item("y", get_item("a", root())), lit(1));
-        let partitioned = partition(expr, &dtype, make_free_field_annotator(fields)).unwrap();
+        let partitioned = partition(
+            expr,
+            &dtype,
+            make_free_field_annotator(fields),
+            &array_session(),
+        )
+        .unwrap();
 
         // Whole expr is a single split
         assert_eq!(partitioned.partitions.len(), 1);
@@ -323,7 +358,13 @@ mod tests {
         let fields = dtype.as_struct_fields_opt().unwrap();
 
         let expr = and(get_item("y", get_item("a", root())), get_item("b", root()));
-        let partitioned = partition(expr, &dtype, make_free_field_annotator(fields)).unwrap();
+        let partitioned = partition(
+            expr,
+            &dtype,
+            make_free_field_annotator(fields),
+            &array_session(),
+        )
+        .unwrap();
 
         // One for id.a and id.b
         assert_eq!(partitioned.partitions.len(), 2);
@@ -335,7 +376,13 @@ mod tests {
 
         let expr = merge([col("a"), pack([("b", col("b"))], NonNullable)]);
 
-        let partitioned = partition(expr, &dtype, make_free_field_annotator(fields)).unwrap();
+        let partitioned = partition(
+            expr,
+            &dtype,
+            make_free_field_annotator(fields),
+            &array_session(),
+        )
+        .unwrap();
         let expected = pack(
             [
                 ("x", get_item("x", get_item("a_0", col("a")))),

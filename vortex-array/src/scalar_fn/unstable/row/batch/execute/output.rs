@@ -10,10 +10,10 @@ use crate::ArrayRef;
 use crate::ExecutionCtx;
 use crate::IntoArray;
 use crate::arrays::ConstantArray;
-use crate::builtins::ArrayBuiltins;
 use crate::dtype::DType;
 use crate::scalar::Scalar;
 use crate::scalar_fn::ScalarFnId;
+use crate::scalar_fn::fns::cast::Cast;
 
 impl RowFnExecutionArgs {
     pub(super) fn all_null(&self) -> ArrayRef {
@@ -107,6 +107,7 @@ fn cast_output_nullability(result_dtype: &DType, values: ArrayRef) -> VortexResu
     if values.dtype() == result_dtype {
         Ok(values)
     } else {
-        values.cast(result_dtype.clone())
+        // No session is available here; the cast resolves when the result executes.
+        Ok(Cast::new(values, result_dtype.clone()).into_array())
     }
 }

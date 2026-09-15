@@ -12,6 +12,7 @@ use vortex_array::scalar_fn::fns::cast::CastKernel;
 use vortex_array::scalar_fn::fns::cast::CastReduce;
 use vortex_array::validity::Validity;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::FSST;
 use crate::FSSTArrayExt;
@@ -42,7 +43,11 @@ fn build_with_codes_validity(
 }
 
 impl CastReduce for FSST {
-    fn cast(array: ArrayView<'_, Self>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, Self>,
+        dtype: &DType,
+        _session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         if !array.dtype().eq_ignore_nullability(dtype) {
             return Ok(None);
         }
@@ -125,7 +130,9 @@ mod tests {
         let fsst = fsst_compress(&strings, &compressor, &mut ctx)?;
 
         // Cast to nullable
-        let casted = fsst.into_array().cast(DType::Utf8(Nullability::Nullable))?;
+        let casted = fsst
+            .into_array()
+            .cast(DType::Utf8(Nullability::Nullable), ctx.session())?;
         assert_eq!(casted.dtype(), &DType::Utf8(Nullability::Nullable));
         Ok(())
     }

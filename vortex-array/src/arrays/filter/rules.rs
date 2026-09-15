@@ -3,6 +3,7 @@
 
 use vortex_error::VortexResult;
 use vortex_mask::Mask;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::Canonical;
@@ -53,6 +54,7 @@ impl ArrayParentReduceRule<Filter> for FilterGetItemRule {
         array: ArrayView<'_, Filter>,
         parent: ScalarFnArrayView<'_, GetItem>,
         _child_idx: usize,
+        _session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         let field = array.child().get_item(parent.options.clone())?;
         Ok(Some(field.filter(array.filter_mask().clone())?))
@@ -63,7 +65,11 @@ impl ArrayParentReduceRule<Filter> for FilterGetItemRule {
 struct TrivialFilterRule;
 
 impl ArrayReduceRule<Filter> for TrivialFilterRule {
-    fn reduce(&self, array: ArrayView<'_, Filter>) -> VortexResult<Option<ArrayRef>> {
+    fn reduce(
+        &self,
+        array: ArrayView<'_, Filter>,
+        _session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         match array.filter_mask() {
             Mask::AllTrue(_) => Ok(Some(array.child().clone())),
             Mask::AllFalse(_) => Ok(Some(Canonical::empty(array.dtype()).into_array())),
@@ -77,7 +83,11 @@ impl ArrayReduceRule<Filter> for TrivialFilterRule {
 struct FilterStructRule;
 
 impl ArrayReduceRule<Filter> for FilterStructRule {
-    fn reduce(&self, array: ArrayView<'_, Filter>) -> VortexResult<Option<ArrayRef>> {
+    fn reduce(
+        &self,
+        array: ArrayView<'_, Filter>,
+        _session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         let mask = array.filter_mask();
         let Some(struct_array) = array.child().as_opt::<Struct>() else {
             return Ok(None);

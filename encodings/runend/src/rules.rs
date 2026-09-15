@@ -16,6 +16,7 @@ use vortex_array::optimizer::rules::ParentRuleSet;
 use vortex_array::scalar_fn::fns::cast::CastReduceAdaptor;
 use vortex_array::scalar_fn::fns::fill_null::FillNullReduceAdaptor;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::RunEnd;
 use crate::array::RunEndArrayExt;
@@ -44,6 +45,7 @@ impl ArrayParentReduceRule<RunEnd> for RunEndScalarFnRule {
         run_end: ArrayView<'_, RunEnd>,
         parent: ArrayView<'_, ScalarFn>,
         child_idx: usize,
+        _session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         for (idx, child) in parent.iter_children().enumerate() {
             if idx == child_idx {

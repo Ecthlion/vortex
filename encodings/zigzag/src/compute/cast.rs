@@ -8,18 +8,23 @@ use vortex_array::builtins::ArrayBuiltins;
 use vortex_array::dtype::DType;
 use vortex_array::scalar_fn::fns::cast::CastReduce;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::ZigZag;
 use crate::array::ZigZagArraySlotsExt;
 impl CastReduce for ZigZag {
-    fn cast(array: ArrayView<'_, Self>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, Self>,
+        dtype: &DType,
+        session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         if !dtype.is_signed_int() {
             return Ok(None);
         }
 
         let new_encoded_dtype =
             DType::Primitive(dtype.as_ptype().to_unsigned(), dtype.nullability());
-        let new_encoded = array.encoded().cast(new_encoded_dtype)?;
+        let new_encoded = array.encoded().cast(new_encoded_dtype, session)?;
         Ok(Some(ZigZag::try_new(new_encoded)?.into_array()))
     }
 }
@@ -56,7 +61,10 @@ mod tests {
 
         let casted = zigzag
             .into_array()
-            .cast(DType::Primitive(PType::I64, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::I64, Nullability::NonNullable),
+                &SESSION,
+            )
             .unwrap();
         assert_eq!(
             casted.dtype(),
@@ -86,7 +94,10 @@ mod tests {
 
         let casted = zigzag
             .into_array()
-            .cast(DType::Primitive(PType::I16, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::I16, Nullability::NonNullable),
+                &SESSION,
+            )
             .unwrap();
         assert_eq!(
             casted.encoding_id().as_ref(),
@@ -106,7 +117,10 @@ mod tests {
 
         let casted64 = zigzag16
             .into_array()
-            .cast(DType::Primitive(PType::I64, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::I64, Nullability::NonNullable),
+                &SESSION,
+            )
             .unwrap();
         assert_eq!(
             casted64.encoding_id().as_ref(),
@@ -129,7 +143,10 @@ mod tests {
 
         let casted = zigzag
             .into_array()
-            .cast(DType::Primitive(PType::I64, Nullability::Nullable))
+            .cast(
+                DType::Primitive(PType::I64, Nullability::Nullable),
+                &SESSION,
+            )
             .unwrap();
         assert_eq!(
             casted.dtype(),

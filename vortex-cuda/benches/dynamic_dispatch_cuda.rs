@@ -142,12 +142,13 @@ struct BenchRunner<T> {
 
 impl<T: DeviceRepr + NativePType> BenchRunner<T> {
     fn new(array: &ArrayRef, len: usize, cuda_ctx: &mut CudaExecutionCtx) -> Self {
-        let plan = match DispatchPlan::new(array, CudaDispatchMode::DynDispatchOnly)
-            .vortex_expect("build_dyn_dispatch_plan")
-        {
-            DispatchPlan::Fused(plan) => plan,
-            _ => unreachable!("encoding not fusable"),
-        };
+        let plan =
+            match DispatchPlan::new(array, CudaDispatchMode::DynDispatchOnly, &array_session())
+                .vortex_expect("build_dyn_dispatch_plan")
+            {
+                DispatchPlan::Fused(plan) => plan,
+                _ => unreachable!("encoding not fusable"),
+            };
         let MaterializedPlan {
             dispatch_plan,
             device_buffers,

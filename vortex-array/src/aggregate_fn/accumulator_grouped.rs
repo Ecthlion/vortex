@@ -395,7 +395,9 @@ fn list_view_group_ranges(
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<GroupRanges> {
     let offsets = groups.offsets();
-    let sizes = groups.sizes().cast(offsets.dtype().clone())?;
+    let sizes = groups
+        .sizes()
+        .cast(offsets.dtype().clone(), ctx.session())?;
 
     let ranges = match_each_integer_ptype!(offsets.dtype().as_ptype(), |O| {
         let offsets = offsets.clone().execute::<Buffer<O>>(ctx)?;

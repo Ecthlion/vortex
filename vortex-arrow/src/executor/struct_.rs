@@ -107,10 +107,10 @@ pub(super) fn to_arrow_struct(
     let array = if let Some(fields) = target_fields {
         let vx_fields = ctx.session().arrow().from_arrow_fields(fields)?;
         // We apply a cast to ensure we push down casting where possible into the struct fields.
-        array.cast(DType::Struct(
-            vx_fields,
-            vortex_array::dtype::Nullability::Nullable,
-        ))?
+        array.cast(
+            DType::Struct(vx_fields, vortex_array::dtype::Nullability::Nullable),
+            ctx.session(),
+        )?
     } else {
         array
     };

@@ -524,7 +524,7 @@ fn cast_widens_map_key_value_and_outer_nullability() -> VortexResult<()> {
         .as_map_opt()
         .vortex_expect("target dtype is map")
         .clone();
-    let cast = source.cast(target_dtype)?;
+    let cast = source.cast(target_dtype, &array_session())?;
     let expected = map_array_from_rows(
         target_map_dtype,
         Nullability::Nullable,
@@ -559,7 +559,7 @@ fn cast_can_drop_but_not_create_sortedness_assertion() -> VortexResult<()> {
         false,
         Nullability::Nullable,
     )?;
-    let cast = sorted_source.cast(unsorted_target)?;
+    let cast = sorted_source.cast(unsorted_target, &array_session())?;
     let expected = map_array_from_rows(
         MapDType::try_new(
             DType::Primitive(PType::I32, Nullability::NonNullable),
@@ -597,7 +597,7 @@ fn cast_can_drop_but_not_create_sortedness_assertion() -> VortexResult<()> {
         true,
         Nullability::Nullable,
     )?;
-    assert!(unsorted_source.cast(sorted_target).is_err());
+    assert!(unsorted_source.cast(sorted_target, ctx.session()).is_err());
 
     Ok(())
 }
@@ -624,14 +624,14 @@ fn null_map_cast_cannot_create_sortedness_assertion() -> VortexResult<()> {
     assert!(
         ConstantArray::new(scalar, 2)
             .into_array()
-            .cast(sorted_dtype.clone())
+            .cast(sorted_dtype.clone(), ctx.session())
             .and_then(|array| array.execute::<ArrayRef>(&mut ctx))
             .is_err()
     );
 
     let all_null =
         map_array_from_rows(unsorted_map_dtype, Nullability::Nullable, [None, None])?.into_array();
-    assert!(all_null.cast(sorted_dtype).is_err());
+    assert!(all_null.cast(sorted_dtype, ctx.session()).is_err());
 
     Ok(())
 }

@@ -119,8 +119,9 @@ impl VTable for Delta {
         array: ArrayView<'_, Self>,
         parent: &ArrayRef,
         child_idx: usize,
+        session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
-        rules::RULES.evaluate(array, parent, child_idx)
+        rules::RULES.evaluate(array, parent, child_idx, session)
     }
 
     fn slot_name(_array: ArrayView<'_, Self>, idx: usize) -> String {

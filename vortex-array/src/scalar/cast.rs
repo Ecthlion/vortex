@@ -7,6 +7,7 @@ use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 use vortex_error::vortex_ensure;
+use vortex_session::VortexSession;
 
 use crate::IntoArray;
 use crate::VortexSessionExecute;
@@ -16,28 +17,32 @@ use crate::scalar::Scalar;
 use crate::scalar_fn::fns::cast::CastSessionExt;
 
 impl Scalar {
+    /// Casts this scalar to another data type with the cast rules of the default session.
+    ///
+    /// Prefer [`Scalar::cast_ctx`] wherever a session is available.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sessionless cast is a convenience over the default session"
+    )]
+    pub fn cast(&self, target_dtype: &DType) -> VortexResult<Scalar> {
+        self.cast_ctx(target_dtype, crate::legacy_session())
+    }
+
     /// Casts this scalar to another data type.
     ///
-    /// The cast is resolved from the [`CastRules`](crate::scalar_fn::fns::cast::CastRules) of the
-    /// default session and executed over a one-element constant array, so the standard rules and
-    /// the default extension rules, such as timestamp unit conversion, apply to scalars as well as
-    /// arrays. Rules registered into another session apply only to arrays executed in that
-    /// session.
+    /// The cast is resolved from the [`CastRules`](crate::scalar_fn::fns::cast::CastRules) of
+    /// `session` and executed over a one-element constant array, so the same rules apply to
+    /// scalars as to arrays.
     ///
     /// # Errors
     ///
     /// Returns an error if no rule casts between the two dtypes, or if the value does not fit the
     /// target, such as a null cast to a non-nullable type.
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "Scalar::cast takes no session; the default rules are the best available stand-in"
-    )]
-    pub fn cast(&self, target_dtype: &DType) -> VortexResult<Scalar> {
+    pub fn cast_ctx(&self, target_dtype: &DType, session: &VortexSession) -> VortexResult<Scalar> {
         if self.dtype() == target_dtype {
             return Ok(self.clone());
         }
 
-        let session = crate::legacy_session();
         // The session guard is dropped at the end of the statement, before the cast runs.
         let cast_fn = session.casts().bind(self.dtype(), target_dtype)?;
         let Some(cast_fn) = cast_fn else {

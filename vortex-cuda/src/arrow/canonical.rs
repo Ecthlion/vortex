@@ -392,7 +392,7 @@ async fn export_dictionary_codes(
     let codes = if codes.dtype() == &target_dtype {
         codes
     } else {
-        codes.cast(target_dtype)?
+        codes.cast(target_dtype, ctx.execution_ctx().session())?
     }
     .execute_cuda(ctx)
     .await?;
@@ -1294,7 +1294,10 @@ async fn export_arrow_list_offsets(
     let offsets = if offsets.dtype().as_ptype() == PType::I32 {
         offsets
     } else {
-        offsets.cast(DType::Primitive(PType::I32, Nullability::NonNullable))?
+        offsets.cast(
+            DType::Primitive(PType::I32, Nullability::NonNullable),
+            ctx.execution_ctx().session(),
+        )?
     };
     let offsets = offsets.execute_cuda(ctx).await?;
     let Canonical::Primitive(offsets) = offsets else {

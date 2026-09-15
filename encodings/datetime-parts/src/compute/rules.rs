@@ -25,6 +25,7 @@ use vortex_array::scalar_fn::fns::cast::CastReduceAdaptor;
 use vortex_array::scalar_fn::fns::mask::MaskReduceAdaptor;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::DateTimeParts;
 use crate::array::DateTimePartsArraySlotsExt;
@@ -51,6 +52,7 @@ impl ArrayParentReduceRule<DateTimeParts> for DTPFilterPushDownRule {
         child: ArrayView<'_, DateTimeParts>,
         parent: ArrayView<'_, Filter>,
         child_idx: usize,
+        _session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         debug_assert_eq!(child_idx, 0);
 
@@ -97,6 +99,7 @@ impl ArrayParentReduceRule<DateTimeParts> for DTPComparisonPushDownRule {
         child: ArrayView<'_, DateTimeParts>,
         parent: ArrayView<'_, ScalarFn>,
         child_idx: usize,
+        session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         // Only handle comparison operations (Binary comparisons or Between)
         if parent
@@ -129,7 +132,7 @@ impl ArrayParentReduceRule<DateTimeParts> for DTPComparisonPushDownRule {
                 let len = days.len();
                 let target_dtype = days.dtype();
                 let constant = ConstantArray::new(days_value, len).into_array();
-                new_children.push(constant.cast(target_dtype.clone())?);
+                new_children.push(constant.cast(target_dtype.clone(), session)?);
             }
         }
 

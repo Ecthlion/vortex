@@ -3,6 +3,7 @@
 
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::ExecutionCtx;
@@ -61,6 +62,7 @@ where
         array: ArrayView<'_, V>,
         parent: ScalarFnArrayView<'_, ListContainsExpr>,
         child_idx: usize,
+        _session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         // Only process the element/needle child (index 1), not the list child (index 0).
         if child_idx != 1 {

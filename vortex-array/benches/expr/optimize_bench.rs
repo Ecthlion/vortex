@@ -6,6 +6,7 @@
 
 use divan::Bencher;
 use mimalloc::MiMalloc;
+use vortex_array::array_session;
 use vortex_array::dtype::DType;
 use vortex_array::dtype::Nullability;
 use vortex_array::dtype::PType;
@@ -45,5 +46,5 @@ fn build_or_chain(n: usize) -> Expression {
 fn optimize_or_chain(bencher: Bencher, n: usize) {
     let expr = build_or_chain(n);
     let scope = struct_scope();
-    bencher.bench(|| expr.optimize_recursive(&scope).unwrap());
+    bencher.bench(|| expr.optimize_recursive(&scope, &array_session()).unwrap());
 }

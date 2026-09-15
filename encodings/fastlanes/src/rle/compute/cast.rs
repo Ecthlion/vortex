@@ -9,17 +9,23 @@ use vortex_array::dtype::DType;
 use vortex_array::dtype::Nullability;
 use vortex_array::scalar_fn::fns::cast::CastReduce;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::rle::RLE;
 use crate::rle::RLEArrayExt;
 use crate::rle::RLEArraySlotsExt;
 
 impl CastReduce for RLE {
-    fn cast(array: ArrayView<'_, Self>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, Self>,
+        dtype: &DType,
+        session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         // Cast RLE values.
-        let casted_values = array
-            .values()
-            .cast(DType::Primitive(dtype.as_ptype(), Nullability::NonNullable))?;
+        let casted_values = array.values().cast(
+            DType::Primitive(dtype.as_ptype(), Nullability::NonNullable),
+            session,
+        )?;
 
         // Cast RLE indices such that validity matches the target dtype.
         let casted_indices = array.indices().cast(
@@ -27,6 +33,7 @@ impl CastReduce for RLE {
                 .indices()
                 .dtype()
                 .with_nullability(dtype.nullability()),
+            session,
         )?;
 
         Ok(Some(
@@ -86,7 +93,10 @@ mod tests {
 
         let casted = encoded
             .into_array()
-            .cast(DType::Primitive(PType::U16, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::U16, Nullability::NonNullable),
+                ctx.session(),
+            )
             .unwrap();
         assert_arrays_eq!(
             casted,
@@ -106,7 +116,10 @@ mod tests {
         let encoded = rle(&primitive, &mut ctx);
         let result = encoded
             .into_array()
-            .cast(DType::Primitive(PType::U8, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::U8, Nullability::NonNullable),
+                ctx.session(),
+            )
             .and_then(|a| a.execute::<Canonical>(&mut ctx).map(|c| c.into_array()));
         result.unwrap();
     }

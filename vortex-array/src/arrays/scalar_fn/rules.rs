@@ -3,6 +3,7 @@
 
 use itertools::Itertools;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::IntoArray;
@@ -36,7 +37,11 @@ pub(super) const PARENT_RULES: ParentRuleSet<ScalarFn> = ParentRuleSet::new(&[
 #[derive(Debug)]
 struct ScalarFnPackToStructRule;
 impl ArrayReduceRule<ScalarFn> for ScalarFnPackToStructRule {
-    fn reduce(&self, array: ArrayView<'_, ScalarFn>) -> VortexResult<Option<ArrayRef>> {
+    fn reduce(
+        &self,
+        array: ArrayView<'_, ScalarFn>,
+        _session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         let Some(pack_options) = array.scalar_fn().as_opt::<Pack>() else {
             return Ok(None);
         };
@@ -68,6 +73,7 @@ impl ArrayParentReduceRule<ScalarFn> for ScalarFnSliceReduceRule {
         array: ArrayView<'_, ScalarFn>,
         parent: ArrayView<'_, Slice>,
         _child_idx: usize,
+        _session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         let range = parent.slice_range();
 
@@ -86,7 +92,11 @@ impl ArrayParentReduceRule<ScalarFn> for ScalarFnSliceReduceRule {
 #[derive(Debug)]
 struct ScalarFnAbstractReduceRule;
 impl ArrayReduceRule<ScalarFn> for ScalarFnAbstractReduceRule {
-    fn reduce(&self, array: ArrayView<'_, ScalarFn>) -> VortexResult<Option<ArrayRef>> {
+    fn reduce(
+        &self,
+        array: ArrayView<'_, ScalarFn>,
+        _session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         let node = ArrayReduceNode::new(array.as_ref());
         if let Some(reduced) = array.scalar_fn().reduce_array(&node)? {
             return Ok(Some(reduced.into_array()));
@@ -106,6 +116,7 @@ impl ArrayParentReduceRule<ScalarFn> for ScalarFilterPushdownRule {
         child: ArrayView<'_, ScalarFn>,
         parent: ArrayView<'_, Filter>,
         _child_idx: usize,
+        _session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         let nchildren = child
             .iter_children()
@@ -198,7 +209,7 @@ mod tests {
         let parent = FilterArray::try_new(array.clone().into_array(), mask.clone())?;
 
         let result = ScalarFilterPushdownRule
-            .reduce_parent(array.as_view(), parent.as_view(), 0)?
+            .reduce_parent(array.as_view(), parent.as_view(), 0, &array_session())?
             .ok_or_else(|| vortex_err!("expected filter pushdown"))?;
 
         assert_eq!(values.cached_indices().is_some(), nchildren > 1);
@@ -234,7 +245,7 @@ mod tests {
         )?;
 
         let result = ScalarFilterPushdownRule
-            .reduce_parent(array.as_view(), parent.as_view(), 0)?
+            .reduce_parent(array.as_view(), parent.as_view(), 0, &array_session())?
             .ok_or_else(|| vortex_err!("expected filter pushdown"))?;
 
         assert_eq!(result.as_::<ScalarFn>().nchildren(), 0);

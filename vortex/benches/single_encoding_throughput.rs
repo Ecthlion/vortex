@@ -90,14 +90,14 @@ fn setup_primitive_arrays(len: u64) -> (PrimitiveArray, PrimitiveArray, Primitiv
     let int_array = uint_array
         .clone()
         .into_array()
-        .cast(PType::I32.into())
+        .cast(PType::I32.into(), ctx.session())
         .unwrap()
         .execute::<PrimitiveArray>(&mut ctx)
         .unwrap();
     let float_array = uint_array
         .clone()
         .into_array()
-        .cast(PType::F64.into())
+        .cast(PType::F64.into(), ctx.session())
         .unwrap()
         .execute::<PrimitiveArray>(&mut ctx)
         .unwrap();

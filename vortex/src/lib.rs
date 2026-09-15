@@ -461,7 +461,7 @@ mod test {
         // [read]
         let file = session.open_options().open_path(path.clone()).await?;
         let filter = gt(root(), lit(2u64))
-            .optimize_recursive(file.dtype())?
+            .optimize_recursive(file.dtype(), &session)?
             .bind(file.dtype())?;
         let array = file
             .scan()?
@@ -561,7 +561,7 @@ mod test {
         // Read the file back, but project down to just the "value" column.
         let file = session.open_options().open_path(path.clone()).await?;
         let projection = select(["value"], root())
-            .optimize_recursive(file.dtype())?
+            .optimize_recursive(file.dtype(), &session)?
             .bind(file.dtype())?;
         let projected = file
             .scan()?

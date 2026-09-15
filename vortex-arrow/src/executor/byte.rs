@@ -105,7 +105,10 @@ where
     // We must cast the offsets to the required offset type.
     let offsets = array
         .offsets()
-        .cast(DType::Primitive(T::Offset::PTYPE, Nullability::NonNullable))?
+        .cast(
+            DType::Primitive(T::Offset::PTYPE, Nullability::NonNullable),
+            ctx.session(),
+        )?
         .execute::<Canonical>(ctx)?
         .into_primitive()
         .to_buffer::<T::Offset>()

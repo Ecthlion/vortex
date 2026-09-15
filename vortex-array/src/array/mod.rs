@@ -13,6 +13,7 @@ use vortex_error::VortexResult;
 use vortex_error::vortex_ensure;
 use vortex_error::vortex_err;
 use vortex_error::vortex_panic;
+use vortex_session::VortexSession;
 use vortex_session::registry::Id;
 
 use crate::ExecutionCtx;
@@ -185,7 +186,7 @@ pub(crate) trait DynArrayData: 'static + private::Sealed + Send + Sync + Debug {
     unsafe fn with_slots_unchecked(&self, this: &ArrayRef, slots: ArraySlots) -> ArrayRef;
 
     /// Attempt to reduce the array to a simpler representation.
-    fn reduce(&self, this: &ArrayRef) -> VortexResult<Option<ArrayRef>>;
+    fn reduce(&self, this: &ArrayRef, session: &VortexSession) -> VortexResult<Option<ArrayRef>>;
 
     /// Attempt to reduce the parent of this array.
     fn reduce_parent(
@@ -193,6 +194,7 @@ pub(crate) trait DynArrayData: 'static + private::Sealed + Send + Sync + Debug {
         this: &ArrayRef,
         parent: &ArrayRef,
         child_idx: usize,
+        session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>>;
 
     /// Execute the array by taking a single encoding-specific execution step.
@@ -403,9 +405,9 @@ impl<V: VTable> DynArrayData for ArrayData<V> {
         ArrayRef::from_inner(Arc::new(store))
     }
 
-    fn reduce(&self, this: &ArrayRef) -> VortexResult<Option<ArrayRef>> {
+    fn reduce(&self, this: &ArrayRef, session: &VortexSession) -> VortexResult<Option<ArrayRef>> {
         let view = unsafe { ArrayView::new_unchecked(this, &self.data) };
-        let Some(reduced) = V::reduce(view)? else {
+        let Some(reduced) = V::reduce(view, session)? else {
             return Ok(None);
         };
         vortex_ensure!(
@@ -428,9 +430,10 @@ impl<V: VTable> DynArrayData for ArrayData<V> {
         this: &ArrayRef,
         parent: &ArrayRef,
         child_idx: usize,
+        session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         let view = unsafe { ArrayView::new_unchecked(this, &self.data) };
-        let Some(reduced) = V::reduce_parent(view, parent, child_idx)? else {
+        let Some(reduced) = V::reduce_parent(view, parent, child_idx, session)? else {
             return Ok(None);
         };
 

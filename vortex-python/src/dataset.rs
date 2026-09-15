@@ -60,12 +60,12 @@ pub fn read_array_from_reader(
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<ArrayRef> {
     let projection = projection
-        .optimize_recursive(vortex_file.dtype())?
+        .optimize_recursive(vortex_file.dtype(), ctx.session())?
         .bind(vortex_file.dtype())?;
     let filter = filter
         .map(|filter| {
             filter
-                .optimize_recursive(vortex_file.dtype())?
+                .optimize_recursive(vortex_file.dtype(), ctx.session())?
                 .bind(vortex_file.dtype())
         })
         .transpose()?;
@@ -198,10 +198,14 @@ impl PyVortexDataset {
 
         let reader = self_.py().detach(move || {
             let projection = projection
-                .optimize_recursive(vxf.dtype())?
+                .optimize_recursive(vxf.dtype(), session())?
                 .bind(vxf.dtype())?;
             let filter = filter
-                .map(|filter| filter.optimize_recursive(vxf.dtype())?.bind(vxf.dtype()))
+                .map(|filter| {
+                    filter
+                        .optimize_recursive(vxf.dtype(), session())?
+                        .bind(vxf.dtype())
+                })
                 .transpose()?;
             let mut scan = vxf
                 .scan()?
@@ -244,10 +248,14 @@ impl PyVortexDataset {
         let filter = filter_from_python(row_filter);
         let n_rows: usize = self_.py().detach(move || {
             let projection = select(FieldNames::empty(), root())
-                .optimize_recursive(vxf.dtype())?
+                .optimize_recursive(vxf.dtype(), session())?
                 .bind(vxf.dtype())?;
             let filter = filter
-                .map(|filter| filter.optimize_recursive(vxf.dtype())?.bind(vxf.dtype()))
+                .map(|filter| {
+                    filter
+                        .optimize_recursive(vxf.dtype(), session())?
+                        .bind(vxf.dtype())
+                })
                 .transpose()?;
             let mut scan = vxf
                 .scan()?

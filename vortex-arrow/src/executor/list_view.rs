@@ -101,12 +101,12 @@ fn list_view_to_list_view<O: OffsetSizeTrait + IntegerPType>(
     );
 
     let offsets = offsets
-        .cast(DType::Primitive(O::PTYPE, NonNullable))?
+        .cast(DType::Primitive(O::PTYPE, NonNullable), ctx.session())?
         .execute::<PrimitiveArray>(ctx)?
         .to_buffer::<O>()
         .into_arrow_scalar_buffer();
     let sizes = sizes
-        .cast(DType::Primitive(O::PTYPE, NonNullable))?
+        .cast(DType::Primitive(O::PTYPE, NonNullable), ctx.session())?
         .execute::<PrimitiveArray>(ctx)?
         .to_buffer::<O>()
         .into_arrow_scalar_buffer();

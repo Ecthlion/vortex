@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::IntoArray;
@@ -41,6 +42,7 @@ impl ArrayParentReduceRule<Constant> for ConstantFilterRule {
         child: ArrayView<'_, Constant>,
         parent: ArrayView<'_, Filter>,
         _child_idx: usize,
+        _session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         Ok(Some(
             ConstantArray::new(child.scalar.clone(), parent.len()).into_array(),

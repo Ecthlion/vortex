@@ -42,7 +42,10 @@ where
     T::Native: NativePType,
 {
     // We use nullable here so we can essentially ignore nullability during the cast.
-    let array = array.cast(DType::Primitive(T::Native::PTYPE, Nullability::Nullable))?;
+    let array = array.cast(
+        DType::Primitive(T::Native::PTYPE, Nullability::Nullable),
+        ctx.session(),
+    )?;
     let primitive = array.execute::<PrimitiveArray>(ctx)?;
     canonical_primitive_to_arrow::<T>(primitive, ctx)
 }

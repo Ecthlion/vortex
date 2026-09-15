@@ -21,6 +21,7 @@ use vortex_array::dtype::Nullability;
 use vortex_array::dtype::PType;
 use vortex_array::expr::BoundExpression;
 use vortex_array::expr::root;
+use vortex_array::scalar_fn::fns::cast::Cast;
 use vortex_array::scalar_fn::fns::operators::Operator;
 use vortex_array::validity::Validity;
 use vortex_error::VortexExpect;
@@ -570,9 +571,12 @@ fn rebase_offsets(offsets: ArrayRef, first: u64) -> VortexResult<ArrayRef> {
     if first == 0 {
         return Ok(offsets);
     }
-    let constant = ConstantArray::new(first, offsets.len())
-        .into_array()
-        .cast(offsets.dtype().clone())?;
+    // No session is available here; the cast resolves when the result executes.
+    let constant = Cast::new(
+        ConstantArray::new(first, offsets.len()).into_array(),
+        offsets.dtype().clone(),
+    )
+    .into_array();
     offsets.binary(constant, Operator::Sub)
 }
 
@@ -590,7 +594,7 @@ fn apply_lengths_validity(
     nullability: Nullability,
 ) -> VortexResult<ArrayRef> {
     let len = lengths.len();
-    let lengths = lengths.cast(DType::Primitive(PType::U64, nullability))?;
+    let lengths = Cast::new(lengths, DType::Primitive(PType::U64, nullability)).into_array();
 
     if matches!(nullability, Nullability::Nullable) {
         lengths.mask(create_validity(validity, nullability).to_array(len))

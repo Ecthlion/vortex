@@ -102,7 +102,7 @@ fn cast_execute(bencher: Bencher, (chunk_len, chunk_count, frac): (usize, usize,
         .bench_refs(|(array, ctx)| {
             array
                 .clone()
-                .cast(U32)
+                .cast(U32, &SESSION)
                 .unwrap()
                 .execute::<PrimitiveArray>(ctx)
                 .unwrap()

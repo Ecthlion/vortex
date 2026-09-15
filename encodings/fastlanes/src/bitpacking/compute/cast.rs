@@ -15,6 +15,7 @@ use vortex_array::scalar_fn::fns::cast::CastKernel;
 use vortex_array::scalar_fn::fns::cast::CastReduce;
 use vortex_array::validity::Validity;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::bitpacking::BitPacked;
 use crate::bitpacking::array::BitPackedArrayExt;
@@ -35,6 +36,7 @@ fn build_with_validity(
     array: ArrayView<'_, BitPacked>,
     dtype: &DType,
     new_validity: Validity,
+    session: &VortexSession,
 ) -> VortexResult<ArrayRef> {
     Ok(BitPacked::try_new(
         array.packed().clone(),
@@ -42,7 +44,7 @@ fn build_with_validity(
         new_validity,
         array
             .patches()
-            .map(|patches| patches.map_values(|values| values.cast(dtype.clone())))
+            .map(|patches| patches.map_values(|values| values.cast(dtype.clone(), session)))
             .transpose()?,
         array.bit_width(),
         array.len(),
@@ -52,7 +54,11 @@ fn build_with_validity(
 }
 
 impl CastReduce for BitPacked {
-    fn cast(array: ArrayView<'_, Self>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, Self>,
+        dtype: &DType,
+        session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         if !array.dtype().eq_ignore_nullability(dtype) {
             return Ok(None);
         }
@@ -62,7 +68,7 @@ impl CastReduce for BitPacked {
         else {
             return Ok(None);
         };
-        build_with_validity(array, dtype, new_validity).map(Some)
+        build_with_validity(array, dtype, new_validity, session).map(Some)
     }
 }
 
@@ -78,7 +84,7 @@ impl CastKernel for BitPacked {
                 array
                     .validity()?
                     .cast_nullability(dtype.nullability(), array.len(), ctx)?;
-            return build_with_validity(array, dtype, new_validity).map(Some);
+            return build_with_validity(array, dtype, new_validity, ctx.session()).map(Some);
         }
 
         // Widening integer cast: unpack each FastLanes chunk into a cache-resident scratch buffer
@@ -154,7 +160,10 @@ mod tests {
 
         let casted = packed
             .into_array()
-            .cast(DType::Primitive(PType::U32, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::U32, Nullability::NonNullable),
+                &SESSION,
+            )
             .unwrap();
         assert_eq!(
             casted.dtype(),
@@ -175,7 +184,10 @@ mod tests {
 
         let casted = packed
             .into_array()
-            .cast(DType::Primitive(PType::U32, Nullability::Nullable))
+            .cast(
+                DType::Primitive(PType::U32, Nullability::Nullable),
+                &SESSION,
+            )
             .unwrap();
         assert_eq!(
             casted.dtype(),
@@ -231,14 +243,14 @@ mod tests {
                     // Reference: plain primitive cast of the same values.
                     let reference = source_ref
                         .clone()
-                        .cast(target.clone())?
+                        .cast(target.clone(), ctx.session())?
                         .execute::<PrimitiveArray>(&mut ctx)?;
 
                     // Candidate: bit-pack, then cast through the real engine. This dispatches to
                     // `BitPacked`'s `CastKernel` widening pushdown.
                     let packed = bp(&source_ref, 3).into_array();
                     let casted = packed
-                        .cast(target.clone())?
+                        .cast(target.clone(), ctx.session())?
                         .execute::<PrimitiveArray>(&mut ctx)?;
                     assert_arrays_eq!(casted, reference, &mut ctx);
 
@@ -248,12 +260,12 @@ mod tests {
                         let hi = len - len / 4;
                         let sliced = bp(&source_ref, 3).into_array().slice(lo..hi)?;
                         let casted = sliced
-                            .cast(target.clone())?
+                            .cast(target.clone(), ctx.session())?
                             .execute::<PrimitiveArray>(&mut ctx)?;
                         let reference = source_ref
                             .clone()
                             .slice(lo..hi)?
-                            .cast(target.clone())?
+                            .cast(target.clone(), ctx.session())?
                             .execute::<PrimitiveArray>(&mut ctx)?;
                         assert_arrays_eq!(casted, reference, &mut ctx);
                     }

@@ -355,10 +355,9 @@ impl Display for ArraySummary {
     }
 }
 
-pub(crate) fn record_optimize_start(root: &ArrayRef, session: bool) {
+pub(crate) fn record_optimize_start(root: &ArrayRef) {
     record(TraceEvent::OptimizeStart {
         root: ArraySummary::new(root),
-        session,
     });
 }
 
@@ -877,7 +876,6 @@ impl TraceRecorder {
 enum TraceEvent {
     OptimizeStart {
         root: ArraySummary,
-        session: bool,
     },
     OptimizeLoopStart {
         array: ArraySummary,
@@ -1078,8 +1076,8 @@ impl TraceEvent {
 
     fn fmt_line(&self, f: &mut fmt::Formatter<'_>, resolution: TraceResolution) -> fmt::Result {
         match self {
-            TraceEvent::OptimizeStart { root, session } => {
-                write!(f, "optimize root={root} session={session}")
+            TraceEvent::OptimizeStart { root } => {
+                write!(f, "optimize root={root}")
             }
             TraceEvent::OptimizeLoopStart { array } => {
                 write!(f, "loop input={array}")

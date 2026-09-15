@@ -203,7 +203,10 @@ fn test_onpair_u64_codes_offsets() -> vortex_error::VortexResult<()> {
         let view = narrow.as_view();
         let wide_offsets = view
             .codes_offsets()
-            .cast(DType::Primitive(PType::U64, Nullability::NonNullable))?
+            .cast(
+                DType::Primitive(PType::U64, Nullability::NonNullable),
+                ctx.session(),
+            )?
             .execute::<PrimitiveArray>(&mut ctx)?
             .into_array();
         OnPair::try_new(

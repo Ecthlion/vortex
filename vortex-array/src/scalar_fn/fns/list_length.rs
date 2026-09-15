@@ -155,7 +155,7 @@ pub(crate) fn list_length(
 
     // Cast to `U64`
     let len = lengths.len();
-    let lengths = lengths.cast(DType::Primitive(PType::U64, nullability))?;
+    let lengths = lengths.cast(DType::Primitive(PType::U64, nullability), ctx.session())?;
 
     // Carry over validity mask for nullable arrays
     if matches!(nullability, Nullability::Nullable) {

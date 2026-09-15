@@ -18,7 +18,6 @@ use crate::arrays::Constant;
 use crate::arrays::ConstantArray;
 use crate::arrays::ScalarFnArray;
 use crate::arrays::masked::mask_validity_canonical;
-use crate::builtins::ArrayBuiltins;
 use crate::child_to_validity;
 use crate::dtype::DType;
 use crate::dtype::Nullability;
@@ -34,6 +33,7 @@ use crate::scalar_fn::ScalarFnId;
 use crate::scalar_fn::ScalarFnVTable;
 use crate::scalar_fn::ScalarFnVTableExt;
 use crate::scalar_fn::SimplifyCtx;
+use crate::scalar_fn::fns::cast::Cast;
 use crate::scalar_fn::fns::literal::Literal;
 
 /// An expression that masks an input based on a boolean mask.
@@ -162,7 +162,10 @@ fn execute_constant(input: &ArrayRef, mask_array: &ArrayRef) -> VortexResult<Opt
     if let Some(constant_mask) = mask_array.as_opt::<Constant>() {
         let mask_value = constant_mask.scalar().as_bool().value().unwrap_or(false);
         return if mask_value {
-            input.cast(input.dtype().as_nullable()).map(Some)
+            // No session is available here; the cast resolves when the result executes.
+            Ok(Some(
+                Cast::new(input.clone(), input.dtype().as_nullable()).into_array(),
+            ))
         } else {
             Ok(Some(
                 ConstantArray::new(Scalar::null(input.dtype().as_nullable()), len).into_array(),
@@ -196,6 +199,7 @@ fn execute_canonical(
 mod test {
     use vortex_error::VortexExpect;
 
+    use crate::array_session;
     use crate::dtype::DType;
     use crate::dtype::Nullability::Nullable;
     use crate::dtype::PType;
@@ -211,13 +215,13 @@ mod test {
 
         let mask_true_expr = mask(input_expr.clone(), true_mask_expr);
         let simplified_true = mask_true_expr
-            .optimize(&DType::Null)
+            .optimize(&DType::Null, &array_session())
             .vortex_expect("Simplification");
         assert_eq!(&simplified_true, &input_expr);
 
         let mask_false_expr = mask(input_expr, false_mask_expr);
         let simplified_false = mask_false_expr
-            .optimize(&DType::Null)
+            .optimize(&DType::Null, &array_session())
             .vortex_expect("Simplification");
         let expected_null_expr = lit(Scalar::null(DType::Primitive(PType::U32, Nullable)));
         assert_eq!(&simplified_false, &expected_null_expr);

@@ -69,7 +69,11 @@ fn decimal_array(n: usize, precision: u8, scale: i8, nullable: bool) -> ArrayRef
 fn bench_cast(bencher: Bencher, array: ArrayRef, target: DType) {
     bencher
         .with_inputs(|| (array.clone(), SESSION.create_execution_ctx()))
-        .bench_refs(|(a, ctx)| a.cast(target.clone()).unwrap().execute::<Canonical>(ctx));
+        .bench_refs(|(a, ctx)| {
+            a.cast(target.clone(), &SESSION)
+                .unwrap()
+                .execute::<Canonical>(ctx)
+        });
 }
 
 // In place: widening precision at the same scale keeps the physical type, so the cast reuses the

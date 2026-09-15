@@ -7,14 +7,17 @@
 //! Optimization runs between execution steps, which is what enables cross-step optimizations:
 //! after a child is decoded, new `reduce_parent` rules may match that were previously blocked.
 //!
-//! There are three public entry points on [`ArrayOptimizer`]:
+//! Every rule receives the [`VortexSession`] being optimized for, so rules that fold values, such
+//! as a constant cast, apply that session's registries. There are three public entry points on
+//! [`ArrayOptimizer`]:
 //!
-//! - [`ArrayOptimizer::optimize`] uses only static rules registered on encoding vtables.
-//! - [`ArrayOptimizer::optimize_ctx`] also consults the session's active
-//!   [`kernels::ArrayKernels`] registry before static parent-reduce rules, so this is the entry
-//!   point used by execution.
-//! - [`ArrayOptimizer::optimize_recursive`] applies the session-aware optimizer to the root and
-//!   every descendant.
+//! - [`ArrayOptimizer::optimize_ctx`] optimizes the root node with the given session. It consults
+//!   the session's [`kernels::ArrayKernels`] registry before static parent-reduce rules, and is
+//!   the entry point used by execution.
+//! - [`ArrayOptimizer::optimize_recursive`] applies the same optimizer to the root and every
+//!   descendant.
+//! - [`ArrayOptimizer::optimize`] is a convenience that uses the default session; prefer
+//!   `optimize_ctx` wherever a session is available.
 
 use smallvec::SmallVec;
 use vortex_error::VortexResult;
@@ -35,19 +38,20 @@ const MAX_OPTIMIZER_REWRITE_PASS: usize = 100;
 
 /// Extension trait for optimizing array trees using reduce/reduce_parent rules.
 pub trait ArrayOptimizer {
-    /// Optimize the root array node by running reduce and reduce_parent rules to fixpoint.
+    /// Optimize the root array node with the default session.
     ///
-    /// This uses only static rules registered on encoding vtables. Use [`Self::optimize_ctx`]
-    /// when a session-scoped [`kernels::ArrayKernels`] registry should participate.
+    /// This is [`Self::optimize_ctx`] over the default session, for callers that have none.
+    /// Prefer `optimize_ctx` wherever a session is available, so that rules apply the registries
+    /// of the session that will execute the array.
     fn optimize(&self) -> VortexResult<ArrayRef>;
 
-    /// Optimize the root array node using static rules and the active
-    /// [`kernels::ArrayKernels`] registry on `session`, if any.
+    /// Optimize the root array node by running reduce and reduce_parent rules to fixpoint with
+    /// `session`.
     ///
-    /// Session kernels are checked for each `(parent_encoding_id, child_encoding_id)` pair before
-    /// the child's static `PARENT_RULES`. The registry comes from the [`kernels::KernelSession`] on
-    /// `session`, if any. If `session` does not contain a [`kernels::KernelSession`], this behaves
-    /// like [`Self::optimize`].
+    /// Every rule receives `session`. Its [`kernels::ArrayKernels`] registry is checked for each
+    /// `(parent_encoding_id, child_encoding_id)` pair before the child's static `PARENT_RULES`;
+    /// the registry comes from the [`kernels::KernelSession`] on `session`, installed with its
+    /// defaults if absent.
     fn optimize_ctx(&self, session: &VortexSession) -> VortexResult<ArrayRef>;
 
     /// Optimize the entire array tree recursively (root and all descendants).
@@ -58,12 +62,16 @@ pub trait ArrayOptimizer {
 }
 
 impl ArrayOptimizer for ArrayRef {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sessionless optimize is a convenience over the default session"
+    )]
     fn optimize(&self) -> VortexResult<ArrayRef> {
-        Ok(try_optimize(self, None)?.unwrap_or_else(|| self.clone()))
+        self.optimize_ctx(crate::legacy_session())
     }
 
     fn optimize_ctx(&self, session: &VortexSession) -> VortexResult<ArrayRef> {
-        Ok(try_optimize(self, Some(session))?.unwrap_or_else(|| self.clone()))
+        Ok(try_optimize(self, session)?.unwrap_or_else(|| self.clone()))
     }
 
     fn optimize_recursive(&self, session: &VortexSession) -> VortexResult<ArrayRef> {
@@ -71,20 +79,17 @@ impl ArrayOptimizer for ArrayRef {
     }
 }
 
-fn try_optimize(
-    array: &ArrayRef,
-    session: Option<&VortexSession>,
-) -> VortexResult<Option<ArrayRef>> {
+fn try_optimize(array: &ArrayRef, session: &VortexSession) -> VortexResult<Option<ArrayRef>> {
     let mut current_array = array.clone();
     let mut any_optimizations = false;
-    let session_kernels = session.map(|session| session.kernels());
+    let session_kernels = session.kernels();
 
-    trace_op!(record_optimize_start(array, session.is_some()));
+    trace_op!(record_optimize_start(array));
 
     for _ in 0..=MAX_OPTIMIZER_REWRITE_PASS {
         trace_op!(record_optimize_loop_start(&current_array));
 
-        if let Some(new_array) = current_array.reduce()? {
+        if let Some(new_array) = current_array.reduce(session)? {
             current_array = new_array;
             any_optimizations = true;
             trace_op!(record_optimize_loop_end());
@@ -101,15 +106,18 @@ fn try_optimize(
             };
 
             // Session kernels take precedence over the child's static parent-reduce rules.
-            if let Some(session_kernels) = &session_kernels
-                && let Some(new_array) =
-                    try_session_parent_reduce(session_kernels, &current_array, child, slot_idx)?
-            {
+            if let Some(new_array) = try_session_parent_reduce(
+                &session_kernels,
+                &current_array,
+                child,
+                slot_idx,
+                session,
+            )? {
                 reduced_parent = Some(new_array);
                 break;
             }
 
-            if let Some(new_array) = child.reduce_parent(&current_array, slot_idx)? {
+            if let Some(new_array) = child.reduce_parent(&current_array, slot_idx, session)? {
                 reduced_parent = Some(new_array);
                 break;
             }
@@ -138,6 +146,7 @@ fn try_session_parent_reduce(
     parent: &ArrayRef,
     child: &ArrayRef,
     slot_idx: usize,
+    session: &VortexSession,
 ) -> VortexResult<Option<ArrayRef>> {
     let Some(reduce_parent_fns) =
         kernels.find_reduce_parent(parent.encoding_id(), child.encoding_id())
@@ -147,7 +156,7 @@ fn try_session_parent_reduce(
 
     #[allow(clippy::unused_enumerate_index)]
     for (_kernel_idx, reduce_parent) in reduce_parent_fns.iter().enumerate() {
-        if let Some(new_array) = reduce_parent(child, parent, slot_idx)? {
+        if let Some(new_array) = reduce_parent(child, parent, slot_idx, session)? {
             trace_op!(record_session_parent_reduce_applied(
                 parent,
                 child,
@@ -179,7 +188,7 @@ fn try_optimize_recursive(
 
     trace_op!(record_optimize_recursive_start(array));
 
-    if let Some(new_array) = try_optimize(&current_array, Some(session))? {
+    if let Some(new_array) = try_optimize(&current_array, session)? {
         current_array = new_array;
         any_optimizations = true;
     }

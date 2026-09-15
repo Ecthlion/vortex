@@ -16,6 +16,7 @@ use vortex_error::vortex_ensure;
 use vortex_error::vortex_err;
 use vortex_error::vortex_panic;
 use vortex_mask::Mask;
+use vortex_session::VortexSession;
 
 use crate::AnyCanonical;
 use crate::Array;
@@ -646,16 +647,17 @@ impl ArrayRef {
         self.0.data.with_buffers(&self, buffers)
     }
 
-    pub fn reduce(&self) -> VortexResult<Option<ArrayRef>> {
-        self.0.data.reduce(self)
+    pub fn reduce(&self, session: &VortexSession) -> VortexResult<Option<ArrayRef>> {
+        self.0.data.reduce(self, session)
     }
 
     pub fn reduce_parent(
         &self,
         parent: &ArrayRef,
         child_idx: usize,
+        session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
-        self.0.data.reduce_parent(self, parent, child_idx)
+        self.0.data.reduce_parent(self, parent, child_idx, session)
     }
 
     pub(crate) fn execute_encoding(self, ctx: &mut ExecutionCtx) -> VortexResult<ExecutionResult> {

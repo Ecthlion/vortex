@@ -103,7 +103,10 @@ fn list_to_list<O: OffsetSizeTrait + NativePType>(
     // We must cast the offsets to the required offset type.
     let offsets = array
         .offsets()
-        .cast(DType::Primitive(O::PTYPE, Nullability::NonNullable))?
+        .cast(
+            DType::Primitive(O::PTYPE, Nullability::NonNullable),
+            ctx.session(),
+        )?
         .execute::<Canonical>(ctx)?
         .into_primitive()
         .to_buffer::<O>()
@@ -170,7 +173,10 @@ fn list_view_zctl<O: OffsetSizeTrait + NativePType>(
         .vortex_expect("non null");
 
     let offsets = offsets
-        .cast(DType::Primitive(O::PTYPE, Nullability::NonNullable))?
+        .cast(
+            DType::Primitive(O::PTYPE, Nullability::NonNullable),
+            ctx.session(),
+        )?
         .execute::<Canonical>(ctx)?
         .into_primitive()
         .to_buffer::<O>();

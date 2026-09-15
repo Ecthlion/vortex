@@ -25,7 +25,7 @@ fn cast_and_execute(
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<ArrayRef> {
     Ok(array
-        .cast(dtype)?
+        .cast(dtype, ctx.session())?
         .execute::<RecursiveCanonical>(ctx)?
         .0
         .into_array())

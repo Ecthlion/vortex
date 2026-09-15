@@ -4,6 +4,7 @@
 use std::ops::Range;
 
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::IntoArray;
@@ -41,6 +42,7 @@ impl ArrayParentReduceRule<Decimal> for DecimalMaskedValidityRule {
         array: ArrayView<'_, Decimal>,
         parent: ArrayView<'_, Masked>,
         _child_idx: usize,
+        _session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         // Merge the parent's validity mask into the child's validity
         // TODO(joe): make this lazy

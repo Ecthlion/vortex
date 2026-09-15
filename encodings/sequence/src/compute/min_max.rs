@@ -104,7 +104,10 @@ mod tests {
     fn min_max_uses_output_dtype() -> VortexResult<()> {
         let array = Sequence::try_new_typed(100i32, -10i32, Nullability::NonNullable, 5)?
             .into_array()
-            .cast(DType::Primitive(PType::U8, Nullability::NonNullable))?;
+            .cast(
+                DType::Primitive(PType::U8, Nullability::NonNullable),
+                &SESSION,
+            )?;
 
         let MinMaxResult { min, max } = min_max(
             &array,

@@ -13,6 +13,7 @@ use vortex_array::scalar_fn::fns::cast::CastReduceAdaptor;
 use vortex_array::scalar_fn::fns::mask::MaskReduceAdaptor;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::DecimalByteParts;
 use crate::decimal_byte_parts::DecimalBytePartsArraySlotsExt;
@@ -36,6 +37,7 @@ impl ArrayParentReduceRule<DecimalByteParts> for DecimalBytePartsFilterPushDownR
         child: ArrayView<'_, DecimalByteParts>,
         parent: ArrayView<'_, Filter>,
         _child_idx: usize,
+        _session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         // TODO(ngates): we should benchmark whether to push-down filters with "lower parts".
         //  For now, we only push down if there are no lower parts.

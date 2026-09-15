@@ -7,10 +7,15 @@ use vortex_array::IntoArray;
 use vortex_array::dtype::DType;
 use vortex_array::scalar_fn::fns::cast::CastReduce;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::Sequence;
 impl CastReduce for Sequence {
-    fn cast(array: ArrayView<'_, Self>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, Self>,
+        dtype: &DType,
+        _session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         // SequenceArray represents arithmetic sequences (base + i * multiplier) which
         // only makes sense for integer types. Floating-point sequences would accumulate
         // rounding errors, and other types don't support arithmetic operations.
@@ -75,7 +80,10 @@ mod tests {
         // Cast to nullable
         let casted = sequence
             .into_array()
-            .cast(DType::Primitive(PType::U32, Nullability::Nullable))
+            .cast(
+                DType::Primitive(PType::U32, Nullability::Nullable),
+                &SESSION,
+            )
             .unwrap();
         assert_eq!(
             casted.dtype(),
@@ -90,7 +98,10 @@ mod tests {
 
         let casted = sequence
             .into_array()
-            .cast(DType::Primitive(PType::I64, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::I64, Nullability::NonNullable),
+                ctx.session(),
+            )
             .unwrap();
         assert_eq!(
             casted.dtype(),
@@ -114,7 +125,10 @@ mod tests {
 
         let casted = sequence
             .into_array()
-            .cast(DType::Primitive(PType::I32, Nullability::Nullable))
+            .cast(
+                DType::Primitive(PType::I32, Nullability::Nullable),
+                ctx.session(),
+            )
             .unwrap();
         assert_eq!(
             casted.dtype(),
@@ -138,7 +152,10 @@ mod tests {
         // Cast to float should delegate to canonical (SequenceArray doesn't support float)
         let casted = sequence
             .into_array()
-            .cast(DType::Primitive(PType::F32, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::F32, Nullability::NonNullable),
+                ctx.session(),
+            )
             .unwrap();
         // Should still succeed by decoding to canonical first
         assert_eq!(
@@ -159,7 +176,10 @@ mod tests {
     fn test_cast_sequence_narrows_to_output_dtype() -> VortexResult<()> {
         let casted = Sequence::try_new_typed(100i32, -10i32, Nullability::NonNullable, 5)?
             .into_array()
-            .cast(DType::Primitive(PType::U8, Nullability::NonNullable))?;
+            .cast(
+                DType::Primitive(PType::U8, Nullability::NonNullable),
+                &SESSION,
+            )?;
 
         let sequence = casted
             .as_typed::<Sequence>()

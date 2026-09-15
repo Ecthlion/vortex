@@ -376,7 +376,7 @@ fn trace_optimize_reduce_fixpoint() -> VortexResult<()> {
     assert!(traced.output.is::<Primitive>());
     assert_arrays_eq!(traced.output, values, &mut execution_ctx());
     insta::assert_snapshot!(traced.trace.to_string(), @r"
-optimize root=vortex.filter(i32, len=4) session=false
+optimize root=vortex.filter(i32, len=4)
   reduce TrivialFilterRule: vortex.filter(i32, len=4) -> vortex.primitive(i32, len=4)
   done output=vortex.primitive(i32, len=4)
 ");
@@ -410,7 +410,7 @@ fn trace_optimize_parent_reduce_fixpoint_attempts() -> VortexResult<()> {
         &mut execution_ctx()
     );
     insta::assert_snapshot!(traced.trace.to_string(), @r"
-    optimize root=vortex.filter(i32, len=2) session=false
+    optimize root=vortex.filter(i32, len=2)
       reduce_parent static:FilterReduceAdaptor(Filter) slot=0 parent=vortex.filter(i32, len=2) child=vortex.filter(i32, len=4) -> vortex.filter(i32, len=2)
       done output=vortex.filter(i32, len=2)
     ");
@@ -444,7 +444,7 @@ fn trace_optimize_parent_reduce_fixpoint_attempts() -> VortexResult<()> {
       iter 3 current=vortex.primitive(i32, len=4) stack_parent=vortex.slice(i32, len=2) slot=0 builder_active=false
         pop_frame slot=0 output=vortex.slice(i32, len=2)
       iter 4 current=vortex.slice(i32, len=2) builder_active=false
-    optimize root=vortex.slice(i32, len=2) session=false
+    optimize root=vortex.slice(i32, len=2)
       reduce_parent static:SliceReduceAdaptor(Primitive) slot=0 parent=vortex.slice(i32, len=2) child=vortex.primitive(i32, len=4) -> vortex.primitive(i32, len=2)
       done output=vortex.primitive(i32, len=2)
         Done array=vortex.primitive(i32, len=2)
@@ -539,7 +539,7 @@ fn trace_execution_stack_parent_kernel_attempts(
         done_check target=false canonical=false
         stack_execute_parent attempt slot=0 parent=vortex.test.stack-parent(i32, len=3) child=vortex.test.stack-child(i32, len=3) source=session[0] kernel=execute_parent_fn outcome=declined
         stack_execute_parent applied slot=0 parent=vortex.test.stack-parent(i32, len=3) child=vortex.test.stack-child(i32, len=3) source=session[1] kernel=execute_parent_fn output=vortex.primitive(i32, len=3)
-    optimize root=vortex.primitive(i32, len=3) session=true
+    optimize root=vortex.primitive(i32, len=3)
       loop input=vortex.primitive(i32, len=3)
         reduce none array=vortex.primitive(i32, len=3)
         reduce_parent none array=vortex.primitive(i32, len=3)
@@ -679,8 +679,8 @@ fn trace_filter_on_struct_with_complex_children() -> VortexResult<()> {
 
     let traced = trace_op(|| filtered.optimize())?;
     insta::assert_snapshot!(traced.trace.to_string(), @"
-    optimize root=vortex.filter({name=utf8, score=i64}, len=3) session=false
-      optimize root=vortex.filter(utf8, len=3) session=false
+    optimize root=vortex.filter({name=utf8, score=i64}, len=3)
+      optimize root=vortex.filter(utf8, len=3)
         reduce_parent static:FilterReduceAdaptor(Dict) slot=0 parent=vortex.filter(utf8, len=3) child=vortex.dict(utf8, len=5) -> vortex.dict(utf8, len=3)
         done output=vortex.dict(utf8, len=3)
       reduce FilterStructRule: vortex.filter({name=utf8, score=i64}, len=3) -> vortex.struct({name=utf8, score=i64}, len=3)
@@ -728,7 +728,7 @@ fn trace_compare_on_dict() -> VortexResult<()> {
 
     let traced = trace_op(|| compared.optimize())?;
     insta::assert_snapshot!(traced.trace.to_string(), @"
-    optimize root=vortex.binary(bool, len=5) session=false
+    optimize root=vortex.binary(bool, len=5)
       reduce_parent static:DictionaryScalarFnValuesPushDownRule slot=0 parent=vortex.binary(bool, len=5) child=vortex.dict(i32, len=5) -> vortex.dict(bool, len=5)
       done output=vortex.dict(bool, len=5)
     ");
@@ -779,7 +779,7 @@ fn trace_like_on_dict() -> VortexResult<()> {
 
     let traced = trace_op(|| like.optimize())?;
     insta::assert_snapshot!(traced.trace.to_string(), @"
-    optimize root=vortex.like(bool, len=6) session=false
+    optimize root=vortex.like(bool, len=6)
       reduce_parent static:LikeReduceAdaptor(Dict) slot=0 parent=vortex.like(bool, len=6) child=vortex.dict(utf8, len=6) -> vortex.dict(bool, len=6)
       done output=vortex.dict(bool, len=6)
     ");

@@ -3,6 +3,7 @@
 
 use vortex_error::VortexResult;
 use vortex_error::vortex_err;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::IntoArray;
@@ -37,6 +38,7 @@ pub(crate) fn struct_cast_reduce_parent(
     child: &ArrayRef,
     parent: &ArrayRef,
     _child_idx: usize,
+    session: &VortexSession,
 ) -> VortexResult<Option<ArrayRef>> {
     let Some(array) = child.as_opt::<Struct>() else {
         return Ok(None);
@@ -49,12 +51,13 @@ pub(crate) fn struct_cast_reduce_parent(
         return Ok(Some(array.array().clone()));
     }
 
-    reduce_struct_cast(array, parent)
+    reduce_struct_cast(array, parent, session)
 }
 
 fn reduce_struct_cast(
     array: ArrayView<'_, Struct>,
     parent: ScalarFnArrayView<'_, Cast>,
+    session: &VortexSession,
 ) -> VortexResult<Option<ArrayRef>> {
     let Some(target_fields) = parent.options.as_struct_fields_opt() else {
         return Ok(None);
@@ -67,7 +70,7 @@ fn reduce_struct_cast(
         return Ok(None);
     };
 
-    let new_fields = struct_cast_fields(array, target_fields)?;
+    let new_fields = struct_cast_fields(array, target_fields, session)?;
 
     Ok(Some(
         unsafe {
@@ -89,6 +92,7 @@ impl ArrayParentReduceRule<Struct> for StructGetItemRule {
         child: ArrayView<'_, Struct>,
         parent: ScalarFnArrayView<'_, GetItem>,
         _child_idx: usize,
+        session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         let field_name = parent.options;
         let field = child
@@ -108,7 +112,10 @@ impl ArrayParentReduceRule<Struct> for StructGetItemRule {
             }
             Validity::AllValid => {
                 // If struct is nullable, field must also be nullable
-                field.clone().cast(field.dtype().as_nullable()).map(Some)
+                field
+                    .clone()
+                    .cast(field.dtype().as_nullable(), session)
+                    .map(Some)
             }
             Validity::AllInvalid => {
                 // If everything is invalid, the field is also all invalid
@@ -163,6 +170,7 @@ mod tests {
         _child: &ArrayRef,
         _parent: &ArrayRef,
         _child_idx: usize,
+        _session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         Ok(None)
     }
@@ -195,7 +203,7 @@ mod tests {
         // `StructCastPushDownRule`.
         let result = source
             .into_array()
-            .cast(target)
+            .cast(target, ctx.session())
             .unwrap()
             .execute::<StructArray>(&mut SESSION.create_execution_ctx())
             .unwrap();
@@ -236,7 +244,7 @@ mod tests {
             Nullability::NonNullable,
         );
 
-        let cast = source.cast(target).unwrap();
+        let cast = source.cast(target, &SESSION).unwrap();
         let optimized = cast.optimize().unwrap();
         assert!(optimized.is::<ScalarFn>());
     }
@@ -261,7 +269,7 @@ mod tests {
             Nullability::NonNullable,
         );
 
-        let cast = source.cast(target).unwrap();
+        let cast = source.cast(target, &SESSION).unwrap();
         let kernels = KernelSession::empty();
         kernels.kernels().register_reduce_parent(
             Cast.id(),
@@ -291,7 +299,10 @@ mod tests {
         // the reduce-parent rewrite would panic via `as_struct_fields()` on the non-struct target.
         let result = source
             .into_array()
-            .cast(DType::Primitive(PType::I32, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::I32, Nullability::NonNullable),
+                &SESSION,
+            )
             .and_then(|arr| arr.optimize_ctx(&SESSION));
 
         // Whether this errors or succeeds depends on execution, but the key invariant is that the
@@ -333,7 +344,7 @@ mod tests {
 
         let result = source
             .into_array()
-            .cast(target)
+            .cast(target, ctx.session())
             .unwrap()
             .execute::<StructArray>(&mut SESSION.create_execution_ctx())
             .unwrap();
@@ -372,7 +383,7 @@ mod tests {
 
         let result = source
             .into_array()
-            .cast(target)
+            .cast(target, ctx.session())
             .unwrap()
             .execute::<StructArray>(&mut SESSION.create_execution_ctx())
             .unwrap();
@@ -411,7 +422,7 @@ mod tests {
 
         let arr = source
             .into_array()
-            .cast(target)
+            .cast(target, &SESSION)
             .and_then(|arr| arr.optimize_ctx(&SESSION));
         assert!(arr.is_err());
     }

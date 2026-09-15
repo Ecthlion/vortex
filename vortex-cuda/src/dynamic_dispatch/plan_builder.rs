@@ -44,6 +44,7 @@ use vortex::error::vortex_bail;
 use vortex::error::vortex_err;
 use vortex::scalar_fn::ScalarFnVTable;
 use vortex::scalar_fn::fns::cast::Cast;
+use vortex::session::VortexSession;
 
 use super::CudaDispatchPlan;
 use super::MaterializedStage;
@@ -293,6 +294,8 @@ pub struct FusedPlan {
     output_ptype: PTypeTag,
     /// Validity of the root array, propagated to the output.
     validity: Validity,
+    /// Session whose rules reduce arrays while the tree is walked.
+    session: VortexSession,
 }
 
 impl DispatchPlan {
@@ -310,7 +313,11 @@ impl DispatchPlan {
     ///   binary search). RunEnd with ends wider than values is also rejected.
     /// - Validity is propagated from the root array to the output.
     /// - Unrecognized encodings fall back to `Unfused`.
-    pub fn new(array: &ArrayRef, mode: CudaDispatchMode) -> VortexResult<Self> {
+    pub fn new(
+        array: &ArrayRef,
+        mode: CudaDispatchMode,
+        session: &VortexSession,
+    ) -> VortexResult<Self> {
         if mode == CudaDispatchMode::Auto && has_standalone_kernel(array) {
             return Ok(Self::Standalone);
         }
@@ -319,7 +326,7 @@ impl DispatchPlan {
             return Ok(Self::Unfused);
         }
 
-        let (plan, pending_subtrees) = match FusedPlan::build(array) {
+        let (plan, pending_subtrees) = match FusedPlan::build(array, session) {
             Ok(result) => result,
             Err(_) => return Ok(Self::Unfused),
         };
@@ -355,7 +362,7 @@ impl FusedPlan {
     ///
     /// During the walk, incompatible nodes are discovered and recorded in the
     /// returned `Vec<ArrayRef>`.
-    fn build(array: &ArrayRef) -> VortexResult<(Self, Vec<ArrayRef>)> {
+    fn build(array: &ArrayRef, session: &VortexSession) -> VortexResult<(Self, Vec<ArrayRef>)> {
         let output_ptype_rust = PType::try_from(array.dtype()).map_err(|_| {
             vortex_err!(
                 "dyn dispatch requires primitive dtype, got {:?}",
@@ -374,6 +381,7 @@ impl FusedPlan {
             output_elem_bytes,
             output_ptype,
             validity,
+            session: session.clone(),
         };
 
         let len = array.len() as u32;
@@ -549,7 +557,7 @@ impl FusedPlan {
         let slice_arr = array.as_::<Slice>();
         let child = slice_arr.child().clone();
 
-        if let Some(reduced) = child.reduce_parent(&array, 0)? {
+        if let Some(reduced) = child.reduce_parent(&array, 0, &self.session)? {
             return self.walk(reduced, pending_subtrees);
         }
 
@@ -909,9 +917,10 @@ mod tests {
 
     #[test]
     fn cast_to_non_primitive_target_is_not_dyn_dispatch_compatible() -> VortexResult<()> {
-        let cast = PrimitiveArray::from_iter([0u8, 1])
-            .into_array()
-            .cast(DType::Bool(Nullability::NonNullable))?;
+        let cast = PrimitiveArray::from_iter([0u8, 1]).into_array().cast(
+            DType::Bool(Nullability::NonNullable),
+            &vortex_array::array_session(),
+        )?;
 
         assert!(!is_dyn_dispatch_cast_compatible(&cast));
         assert!(matches!(

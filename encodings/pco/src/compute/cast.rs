@@ -7,13 +7,18 @@ use vortex_array::IntoArray;
 use vortex_array::dtype::DType;
 use vortex_array::scalar_fn::fns::cast::CastReduce;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::Pco;
 use crate::PcoArrayExt;
 use crate::PcoData;
 
 impl CastReduce for Pco {
-    fn cast(array: ArrayView<'_, Self>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, Self>,
+        dtype: &DType,
+        _session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         // PCO (Pcodec) stores compressed data and uses validity bits to decode (the validity
         // tells PCO which logical positions correspond to compressed values). Casting away
         // nullability would change the validity-to-compressed-value mapping, so we cannot
@@ -84,7 +89,10 @@ mod tests {
 
         let casted = pco
             .into_array()
-            .cast(DType::Primitive(PType::F64, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::F64, Nullability::NonNullable),
+                ctx.session(),
+            )
             .unwrap();
         assert_eq!(
             casted.dtype(),
@@ -107,7 +115,10 @@ mod tests {
 
         let casted = pco
             .into_array()
-            .cast(DType::Primitive(PType::U32, Nullability::Nullable))
+            .cast(
+                DType::Primitive(PType::U32, Nullability::Nullable),
+                ctx.session(),
+            )
             .unwrap();
         assert_arrays_eq!(
             casted,
@@ -126,7 +137,10 @@ mod tests {
         let pco = Pco::from_primitive(values.as_view(), 0, 128, &mut ctx).unwrap();
         let sliced = pco.slice(1..5).unwrap();
         let casted = sliced
-            .cast(DType::Primitive(PType::U32, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::U32, Nullability::NonNullable),
+                ctx.session(),
+            )
             .unwrap();
         assert_eq!(
             casted.dtype(),
@@ -154,7 +168,10 @@ mod tests {
         let pco = Pco::from_primitive(values.as_view(), 0, 128, &mut ctx).unwrap();
         let sliced = pco.slice(1..5).unwrap();
         let casted = sliced
-            .cast(DType::Primitive(PType::U32, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::U32, Nullability::NonNullable),
+                ctx.session(),
+            )
             .unwrap();
         assert_eq!(
             casted.dtype(),

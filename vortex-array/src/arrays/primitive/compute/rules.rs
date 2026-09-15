@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::IntoArray;
@@ -37,6 +38,7 @@ impl ArrayParentReduceRule<Primitive> for PrimitiveMaskedValidityRule {
         array: ArrayView<'_, Primitive>,
         parent: ArrayView<'_, Masked>,
         _child_idx: usize,
+        _session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         // TODO(joe): make this lazy
         // Merge the parent's validity mask into the child's validity

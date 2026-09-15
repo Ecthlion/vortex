@@ -165,12 +165,16 @@ mod tests {
             StructFields::new(FieldNames::default(), vec![]),
             NonNullable,
         );
-        let casted = array.cast(non_nullable_dtype.clone()).unwrap();
+        let casted = array
+            .cast(non_nullable_dtype.clone(), &array_session())
+            .unwrap();
         assert_eq!(casted.dtype(), &non_nullable_dtype);
 
         let nullable_dtype =
             DType::Struct(StructFields::new(FieldNames::default(), vec![]), Nullable);
-        let casted = array.cast(nullable_dtype.clone()).unwrap();
+        let casted = array
+            .cast(nullable_dtype.clone(), &array_session())
+            .unwrap();
         assert_eq!(casted.dtype(), &nullable_dtype);
     }
 
@@ -204,7 +208,7 @@ mod tests {
 
         let top_level_non_nullable = fully_nullable_array.dtype().as_nonnullable();
         let casted = fully_nullable_array
-            .cast(top_level_non_nullable.clone())
+            .cast(top_level_non_nullable.clone(), &array_session())
             .unwrap();
         assert_eq!(casted.dtype(), &top_level_non_nullable);
 
@@ -229,7 +233,7 @@ mod tests {
             Nullable,
         );
         let casted = fully_nullable_array
-            .cast(non_null_xs_right.clone())
+            .cast(non_null_xs_right.clone(), &array_session())
             .unwrap();
         assert_eq!(casted.dtype(), &non_null_xs_right);
 
@@ -253,7 +257,9 @@ mod tests {
             ),
             Nullable,
         );
-        let casted = fully_nullable_array.cast(non_null_xs.clone()).unwrap();
+        let casted = fully_nullable_array
+            .cast(non_null_xs.clone(), &array_session())
+            .unwrap();
         assert_eq!(casted.dtype(), &non_null_xs);
     }
 

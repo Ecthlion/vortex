@@ -66,7 +66,10 @@ fn take_impl(
             if let Some((start, end)) =
                 contiguous_sequential_take_range_indices(array.filter_mask(), indices)?
             {
-                return array.child().slice(start..end)?.cast(result_dtype);
+                return array
+                    .child()
+                    .slice(start..end)?
+                    .cast(result_dtype, ctx.session());
             }
 
             if let Some(take_len) = sequential_take_len(indices, array.len())? {
@@ -75,7 +78,10 @@ fn take_impl(
                 }
                 let rank_mask = Mask::from_slices(array.len(), vec![(0, take_len)]);
                 let mask = array.filter_mask().intersect_by_rank(&rank_mask);
-                return array.child().filter(mask)?.cast(result_dtype);
+                return array
+                    .child()
+                    .filter(mask)?
+                    .cast(result_dtype, ctx.session());
             }
 
             let translated =
@@ -146,7 +152,10 @@ impl TakeExecute for Filter {
         } else {
             indices
                 .clone()
-                .cast(DType::Primitive(ptype.to_unsigned(), *nullability))?
+                .cast(
+                    DType::Primitive(ptype.to_unsigned(), *nullability),
+                    ctx.session(),
+                )?
                 .execute::<PrimitiveArray>(ctx)?
         };
 

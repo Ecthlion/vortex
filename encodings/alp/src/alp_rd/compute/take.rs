@@ -31,7 +31,11 @@ impl TakeExecute for ALPRD {
             .map(|patches| {
                 patches
                     .take(indices, ctx)?
-                    .map(|taken| taken.map_values(|values| values.cast(exceptions_dtype.clone())))
+                    .map(|taken| {
+                        taken.map_values(|values| {
+                            values.cast(exceptions_dtype.clone(), ctx.session())
+                        })
+                    })
                     .transpose()
             })
             .transpose()?

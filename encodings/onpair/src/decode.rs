@@ -27,7 +27,7 @@ pub(crate) fn collect_widened<T: NativePType>(
 ) -> VortexResult<Buffer<T>> {
     let dtype = DType::Primitive(T::PTYPE, arr.dtype().nullability());
     Ok(arr
-        .cast(dtype)?
+        .cast(dtype, ctx.session())?
         .execute::<PrimitiveArray>(ctx)?
         .into_buffer::<T>())
 }

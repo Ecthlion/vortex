@@ -75,14 +75,14 @@ mod tests {
     // null fill, some null patches
     #[case(Sparse::try_new(
         buffer![1u64, 3, 5].into_array(),
-        PrimitiveArray::from_option_iter([Some(10i32), None, Some(30)]).into_array().cast(nullable_i32()).unwrap(),
+        PrimitiveArray::from_option_iter([Some(10i32), None, Some(30)]).into_array().cast(nullable_i32(), &SESSION).unwrap(),
         8,
         Scalar::null(nullable_i32()),
     ).unwrap().into_array())]
     // non-null fill, nullable patches with a null
     #[case(Sparse::try_new(
         buffer![0u64, 2].into_array(),
-        PrimitiveArray::from_option_iter([Some(7i32), None]).into_array().cast(nullable_i32()).unwrap(),
+        PrimitiveArray::from_option_iter([Some(7i32), None]).into_array().cast(nullable_i32(), &SESSION).unwrap(),
         4,
         Scalar::from(1i32).cast(&nullable_i32()).unwrap(),
     ).unwrap().into_array())]

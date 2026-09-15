@@ -62,8 +62,12 @@ static FN_HASHER: LazyLock<DefaultHashBuilder> = LazyLock::new(DefaultHashBuilde
 ///
 /// Implementations must preserve the parent's logical length and dtype, matching the invariant
 /// required of static parent-reduce rules.
-pub type ReduceParentFn =
-    fn(child: &ArrayRef, parent: &ArrayRef, child_idx: usize) -> VortexResult<Option<ArrayRef>>;
+pub type ReduceParentFn = fn(
+    child: &ArrayRef,
+    parent: &ArrayRef,
+    child_idx: usize,
+    session: &VortexSession,
+) -> VortexResult<Option<ArrayRef>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
 #[repr(transparent)]

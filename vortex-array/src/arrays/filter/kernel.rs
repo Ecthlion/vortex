@@ -102,6 +102,7 @@ where
         array: ArrayView<'_, V>,
         parent: ArrayView<'_, Filter>,
         child_idx: usize,
+        _session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         assert_eq!(child_idx, 0);
         if let Some(result) = short_circuit::<V>(array, parent.filter_mask()) {

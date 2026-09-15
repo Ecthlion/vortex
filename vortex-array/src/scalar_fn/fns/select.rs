@@ -498,7 +498,7 @@ mod tests {
         );
         let e = select(["a", "b"], root());
 
-        let result = e.optimize_recursive(&dtype).unwrap();
+        let result = e.optimize_recursive(&dtype, &array_session()).unwrap();
 
         assert!(result.return_dtype(&dtype).unwrap().is_nullable());
     }
@@ -516,7 +516,7 @@ mod tests {
         );
         let e = select_exclude(["c"], root());
 
-        let result = e.optimize_recursive(&dtype).unwrap();
+        let result = e.optimize_recursive(&dtype, &array_session()).unwrap();
 
         // Should exclude "c" and include "a" and "b"
         let result_dtype = result.return_dtype(&dtype).unwrap();

@@ -3,6 +3,7 @@
 
 use smallvec::SmallVec;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use super::Dict;
 use crate::ArrayRef;
@@ -92,6 +93,7 @@ where
         array: ArrayView<'_, V>,
         parent: ArrayView<'_, Dict>,
         child_idx: usize,
+        _session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         // Only handle the values child (index 1), not the codes child (index 0).
         if child_idx != 1 {

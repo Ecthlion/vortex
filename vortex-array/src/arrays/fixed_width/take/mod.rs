@@ -129,7 +129,10 @@ pub(crate) fn take<V: FixedWidthArray>(
         indices_nulls_zeroed.execute::<PrimitiveArray>(ctx)?
     } else {
         indices_nulls_zeroed
-            .cast(DType::Primitive(ptype.to_unsigned(), *nullability))?
+            .cast(
+                DType::Primitive(ptype.to_unsigned(), *nullability),
+                ctx.session(),
+            )?
             .execute::<PrimitiveArray>(ctx)?
     };
     let validity = array

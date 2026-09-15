@@ -8,13 +8,18 @@ use vortex_array::builtins::ArrayBuiltins;
 use vortex_array::dtype::DType;
 use vortex_array::scalar_fn::fns::cast::CastReduce;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::ALPArrayExt;
 use crate::ALPArraySlotsExt;
 use crate::alp::ALP;
 
 impl CastReduce for ALP {
-    fn cast(array: ArrayView<'_, Self>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, Self>,
+        dtype: &DType,
+        session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         // Check if this is just a nullability change
         if !array.dtype().eq_ignore_nullability(dtype) {
             return Ok(None);
@@ -27,11 +32,12 @@ impl CastReduce for ALP {
                 .encoded()
                 .dtype()
                 .with_nullability(dtype.nullability()),
+            session,
         )?;
 
         let new_patches = array
             .patches()
-            .map(|p| p.map_values(|v| v.cast(dtype.clone())))
+            .map(|p| p.map_values(|v| v.cast(dtype.clone(), session)))
             .transpose()?;
 
         // SAFETY: casting nullability doesn't alter the invariants
@@ -84,9 +90,11 @@ mod tests {
         );
 
         let nullable_dtype = DType::Primitive(PType::F32, Nullability::Nullable);
-        let casted = alp.into_array().cast(nullable_dtype.clone())?;
+        let casted = alp
+            .into_array()
+            .cast(nullable_dtype.clone(), ctx.session())?;
 
-        let expected = values.cast(nullable_dtype)?;
+        let expected = values.cast(nullable_dtype, ctx.session())?;
 
         let casted_prim = casted.execute::<PrimitiveArray>(&mut ctx)?;
         assert_arrays_eq!(casted_prim, expected, &mut ctx);
@@ -101,9 +109,10 @@ mod tests {
         let values_primitive = values.execute::<PrimitiveArray>(&mut ctx)?;
         let alp = alp_encode(values_primitive.as_view(), None, &mut ctx)?;
 
-        let casted = alp
-            .into_array()
-            .cast(DType::Primitive(PType::F64, Nullability::NonNullable))?;
+        let casted = alp.into_array().cast(
+            DType::Primitive(PType::F64, Nullability::NonNullable),
+            ctx.session(),
+        )?;
         assert_eq!(
             casted.dtype(),
             &DType::Primitive(PType::F64, Nullability::NonNullable)
@@ -125,9 +134,10 @@ mod tests {
         let values_primitive = values.execute::<PrimitiveArray>(&mut ctx)?;
         let alp = alp_encode(values_primitive.as_view(), None, &mut ctx)?;
 
-        let casted = alp
-            .into_array()
-            .cast(DType::Primitive(PType::I32, Nullability::NonNullable))?;
+        let casted = alp.into_array().cast(
+            DType::Primitive(PType::I32, Nullability::NonNullable),
+            ctx.session(),
+        )?;
         assert_eq!(
             casted.dtype(),
             &DType::Primitive(PType::I32, Nullability::NonNullable)

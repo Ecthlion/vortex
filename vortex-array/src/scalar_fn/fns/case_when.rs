@@ -339,7 +339,7 @@ fn merge_case_branches(
     let mut spans: Vec<(usize, usize, usize)> = Vec::new();
     for (branch_idx, (mask, _)) in branches.iter().enumerate() {
         match mask.slices() {
-            AllOr::All => return branch_arrays[branch_idx].cast(output_dtype),
+            AllOr::All => return branch_arrays[branch_idx].cast(output_dtype, ctx.session()),
             AllOr::None => {}
             AllOr::Some(slices) => {
                 for &(start, end) in slices {
@@ -351,7 +351,7 @@ fn merge_case_branches(
     spans.sort_unstable_by_key(|&(start, ..)| start);
 
     if spans.is_empty() {
-        return else_value.cast(output_dtype);
+        return else_value.cast(output_dtype, ctx.session());
     }
 
     let builder = builder_with_capacity_in(&output_dtype, else_value.len(), ctx.allocator());
@@ -419,7 +419,7 @@ fn merge_run_by_run(
     mut builder: Box<dyn ArrayBuilder>,
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<ArrayRef> {
-    let else_value = else_value.cast(output_dtype.clone())?;
+    let else_value = else_value.cast(output_dtype.clone(), ctx.session())?;
     let len = else_value.len();
     for (start, end, branch_idx) in spans {
         if builder.len() < *start {
@@ -428,7 +428,7 @@ fn merge_run_by_run(
                 .append_to_builder(builder.as_mut(), ctx)?;
         }
         branch_arrays[*branch_idx]
-            .cast(output_dtype.clone())?
+            .cast(output_dtype.clone(), ctx.session())?
             .slice(*start..*end)?
             .append_to_builder(builder.as_mut(), ctx)?;
     }
@@ -1304,7 +1304,7 @@ mod tests {
     fn test_simplify_coalesce_is_null_rewrites_to_fill_null() -> VortexResult<()> {
         // CASE WHEN is_null(x) THEN 0 ELSE x END  ==>  fill_null(x, 0)
         let expr = case_when(is_null(col("x")), lit(0i64), col("x"));
-        let optimized = expr.optimize_recursive(&nullable_i64_scope(&["x"]))?;
+        let optimized = expr.optimize_recursive(&nullable_i64_scope(&["x"]), &SESSION)?;
         assert!(
             optimized.to_string().starts_with("vortex.fill_null"),
             "expected fill_null, got {optimized}"
@@ -1316,7 +1316,7 @@ mod tests {
     fn test_simplify_coalesce_is_not_null_rewrites_to_fill_null() -> VortexResult<()> {
         // CASE WHEN is_not_null(x) THEN x ELSE 0 END  ==>  fill_null(x, 0)
         let expr = case_when(is_not_null(col("x")), col("x"), lit(0i64));
-        let optimized = expr.optimize_recursive(&nullable_i64_scope(&["x"]))?;
+        let optimized = expr.optimize_recursive(&nullable_i64_scope(&["x"]), &SESSION)?;
         assert!(
             optimized.to_string().starts_with("vortex.fill_null"),
             "expected fill_null, got {optimized}"
@@ -1328,7 +1328,7 @@ mod tests {
     fn test_simplify_does_not_fire_when_operands_differ() -> VortexResult<()> {
         // The is_null operand (x) and the ELSE (y) are different columns: not a COALESCE.
         let expr = case_when(is_null(col("x")), lit(0i64), col("y"));
-        let optimized = expr.optimize_recursive(&nullable_i64_scope(&["x", "y"]))?;
+        let optimized = expr.optimize_recursive(&nullable_i64_scope(&["x", "y"]), &SESSION)?;
         let s = optimized.to_string();
         assert!(s.contains("CASE"), "expected CASE WHEN to remain, got {s}");
         assert!(!s.contains("fill_null"), "must not rewrite, got {s}");
@@ -1340,7 +1340,7 @@ mod tests {
         // COALESCE(x, c) with a *column* fill: fill_null cannot consume a non-constant
         // fill value, so the rewrite must not fire.
         let expr = case_when(is_null(col("x")), col("c"), col("x"));
-        let optimized = expr.optimize_recursive(&nullable_i64_scope(&["x", "c"]))?;
+        let optimized = expr.optimize_recursive(&nullable_i64_scope(&["x", "c"]), &SESSION)?;
         let s = optimized.to_string();
         assert!(s.contains("CASE"), "expected CASE WHEN to remain, got {s}");
         assert!(!s.contains("fill_null"), "must not rewrite, got {s}");
@@ -1363,7 +1363,7 @@ mod tests {
             case_when(is_null(col("x")), null_fill(), col("x")),
             case_when(is_not_null(col("x")), col("x"), null_fill()),
         ] {
-            let optimized = expr.optimize_recursive(&nullable_i64_scope(&["x"]))?;
+            let optimized = expr.optimize_recursive(&nullable_i64_scope(&["x"]), &SESSION)?;
             assert_eq!(
                 optimized.to_string(),
                 "$.x",
@@ -1385,7 +1385,7 @@ mod tests {
         )));
 
         let original = case_when(is_null(root()), null_fill, root());
-        let optimized = original.optimize_recursive(&scope)?;
+        let optimized = original.optimize_recursive(&scope, ctx.session())?;
         assert_eq!(
             optimized.to_string(),
             "$",
@@ -1401,7 +1401,7 @@ mod tests {
     #[test]
     fn test_simplify_does_not_fire_without_else() -> VortexResult<()> {
         let expr = case_when_no_else(is_null(col("x")), lit(0i64));
-        let optimized = expr.optimize_recursive(&nullable_i64_scope(&["x"]))?;
+        let optimized = expr.optimize_recursive(&nullable_i64_scope(&["x"]), &SESSION)?;
         assert!(
             !optimized.to_string().contains("fill_null"),
             "must not rewrite a no-ELSE case_when, got {optimized}"
@@ -1418,7 +1418,7 @@ mod tests {
             ],
             Some(col("x")),
         );
-        let optimized = expr.optimize_recursive(&nullable_i64_scope(&["x"]))?;
+        let optimized = expr.optimize_recursive(&nullable_i64_scope(&["x"]), &SESSION)?;
         assert!(
             !optimized.to_string().contains("fill_null"),
             "must not rewrite a multi-pair case_when, got {optimized}"
@@ -1434,7 +1434,7 @@ mod tests {
         let scope = DType::Primitive(PType::I64, Nullability::Nullable);
 
         let original = case_when(is_null(root()), lit(0i64), root());
-        let optimized = original.optimize_recursive(&scope)?;
+        let optimized = original.optimize_recursive(&scope, ctx.session())?;
         assert!(
             optimized.to_string().starts_with("vortex.fill_null"),
             "expected fill_null, got {optimized}"

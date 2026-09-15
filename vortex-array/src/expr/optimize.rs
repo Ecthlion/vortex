@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use itertools::Itertools;
 use vortex_error::VortexResult;
 use vortex_error::vortex_err;
+use vortex_session::VortexSession;
 use vortex_utils::aliases::hash_map::HashMap;
 
 use crate::dtype::DType;
@@ -21,8 +22,8 @@ impl Expression {
     /// 1. `simplify_untyped` - type-independent simplifications
     /// 2. `simplify` - type-aware simplifications
     /// 3. `reduce` - abstract reduction rules via `ReduceNode`
-    pub fn optimize(&self, scope: &DType) -> VortexResult<Expression> {
-        let cache = SimplifyCache::new(scope);
+    pub fn optimize(&self, scope: &DType, session: &VortexSession) -> VortexResult<Expression> {
+        let cache = SimplifyCache::new(scope, session);
         Ok(self.try_optimize(&cache)?.unwrap_or_else(|| self.clone()))
     }
 
@@ -110,16 +111,24 @@ impl Expression {
     /// Optimize the entire expression tree recursively.
     ///
     /// Optimizes children first (bottom-up), then optimizes the root.
-    pub fn optimize_recursive(&self, scope: &DType) -> VortexResult<Expression> {
+    pub fn optimize_recursive(
+        &self,
+        scope: &DType,
+        session: &VortexSession,
+    ) -> VortexResult<Expression> {
         Ok(self
             .clone()
-            .try_optimize_recursive(scope)?
+            .try_optimize_recursive(scope, session)?
             .unwrap_or_else(|| self.clone()))
     }
 
     /// Try to optimize the entire expression tree recursively.
-    pub fn try_optimize_recursive(&self, scope: &DType) -> VortexResult<Option<Expression>> {
-        let cache = SimplifyCache::new(scope);
+    pub fn try_optimize_recursive(
+        &self,
+        scope: &DType,
+        session: &VortexSession,
+    ) -> VortexResult<Option<Expression>> {
+        let cache = SimplifyCache::new(scope, session);
         let result = self.try_optimize_recursive_inner(&cache)?;
 
         // Apply the between optimization once at the top level only.
@@ -163,19 +172,25 @@ impl Expression {
 
 struct SimplifyCache<'a> {
     scope: &'a DType,
+    session: &'a VortexSession,
     dtype_cache: RefCell<HashMap<Expression, DType>>,
 }
 
 impl<'a> SimplifyCache<'a> {
-    fn new(scope: &'a DType) -> Self {
+    fn new(scope: &'a DType, session: &'a VortexSession) -> Self {
         Self {
             scope,
+            session,
             dtype_cache: RefCell::new(HashMap::new()),
         }
     }
 }
 
 impl SimplifyCtx for SimplifyCache<'_> {
+    fn session(&self) -> &VortexSession {
+        self.session
+    }
+
     fn return_dtype(&self, expr: &Expression) -> VortexResult<DType> {
         // If the expression is "root", return the scope dtype
         if expr.is_root() {
@@ -209,6 +224,7 @@ mod tests {
     use vortex_error::VortexResult;
     use vortex_error::vortex_err;
 
+    use crate::array_session;
     use crate::dtype::DType;
     use crate::dtype::Nullability;
     use crate::dtype::PType;
@@ -236,7 +252,7 @@ mod tests {
             ),
             Nullability::NonNullable,
         );
-        let optimized = expr.optimize_recursive(&scope)?;
+        let optimized = expr.optimize_recursive(&scope, &array_session())?;
 
         let s = optimized.to_string();
         assert!(s.contains("$.x"), "expected $.x in {s}");
@@ -261,7 +277,7 @@ mod tests {
             ),
             Nullability::NonNullable,
         );
-        let optimized = expr.optimize_recursive(&scope)?;
+        let optimized = expr.optimize_recursive(&scope, &array_session())?;
 
         // Prune rules pattern-match a bare Literal on the comparison RHS; a cast wrapper
         // silently disables pruning.

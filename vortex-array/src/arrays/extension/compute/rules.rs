@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::IntoArray;
@@ -30,7 +31,11 @@ pub(crate) const RULES: ReduceRuleSet<Extension> = ReduceRuleSet::new(&[&Extensi
 struct ExtensionConstantRule;
 
 impl ArrayReduceRule<Extension> for ExtensionConstantRule {
-    fn reduce(&self, array: ArrayView<'_, Extension>) -> VortexResult<Option<ArrayRef>> {
+    fn reduce(
+        &self,
+        array: ArrayView<'_, Extension>,
+        _session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         let Some(const_array) = array.storage_array().as_opt::<Constant>() else {
             return Ok(None);
         };
@@ -66,6 +71,7 @@ impl ArrayParentReduceRule<Extension> for ExtensionFilterPushDownRule {
         child: ArrayView<'_, Extension>,
         parent: ArrayView<'_, Filter>,
         child_idx: usize,
+        _session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         debug_assert_eq!(child_idx, 0);
         let filtered_storage = child

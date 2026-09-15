@@ -8,14 +8,19 @@ use vortex_array::builtins::ArrayBuiltins;
 use vortex_array::dtype::DType;
 use vortex_array::scalar_fn::fns::cast::CastReduce;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::RunEnd;
 use crate::array::RunEndArrayExt;
 use crate::array::RunEndArraySlotsExt;
 impl CastReduce for RunEnd {
-    fn cast(array: ArrayView<'_, Self>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, Self>,
+        dtype: &DType,
+        session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         // Cast the values array to the target type
-        let casted_values = array.values().cast(dtype.clone())?;
+        let casted_values = array.values().cast(dtype.clone(), session)?;
 
         // SAFETY: casting does not affect the ends being valid
         unsafe {
@@ -71,7 +76,10 @@ mod tests {
 
         let casted = runend
             .into_array()
-            .cast(DType::Primitive(PType::I64, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::I64, Nullability::NonNullable),
+                ctx.session(),
+            )
             .unwrap();
         assert_eq!(
             casted.dtype(),
@@ -112,7 +120,10 @@ mod tests {
 
         let casted = runend
             .into_array()
-            .cast(DType::Primitive(PType::I64, Nullability::Nullable))
+            .cast(
+                DType::Primitive(PType::I64, Nullability::Nullable),
+                ctx.session(),
+            )
             .unwrap();
         assert_eq!(
             casted.dtype(),
@@ -143,7 +154,10 @@ mod tests {
 
         // Cast the sliced array
         let casted = sliced
-            .cast(DType::Primitive(PType::I64, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::I64, Nullability::NonNullable),
+                ctx.session(),
+            )
             .unwrap();
 
         // Verify the cast preserved the offset

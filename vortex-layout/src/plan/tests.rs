@@ -4,6 +4,7 @@
 use std::fmt;
 use std::sync::Arc;
 
+use vortex_array::array_session;
 use vortex_array::dtype::DType;
 use vortex_array::dtype::Nullability;
 use vortex_array::dtype::PType;
@@ -59,14 +60,14 @@ fn make_plan(layout: LayoutRef) -> VortexResult<PlanRef> {
 
 fn make_eval(expression: Expression, child: PlanRef) -> VortexResult<EvalPlan> {
     let expression = expression
-        .optimize_recursive(child.dtype())?
+        .optimize_recursive(child.dtype(), &array_session())?
         .bind(child.dtype())?;
     EvalPlan::try_new(expression, child)
 }
 
 fn make_row_idx_plan(expression: Expression, child: PlanRef) -> VortexResult<PlanRef> {
     let expression = expression
-        .optimize_recursive(child.dtype())?
+        .optimize_recursive(child.dtype(), &array_session())?
         .bind(child.dtype())?;
     plan_row_idx_expression(expression, child)
 }

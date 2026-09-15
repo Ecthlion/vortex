@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::IntoArray;
@@ -12,12 +13,16 @@ use crate::dtype::DType;
 use crate::scalar_fn::fns::cast::CastReduce;
 
 impl CastReduce for Constant {
-    /// Folds the cast with the rules of the default session, the only ones a reduce rule can
-    /// reach. A failing cast is left in place so its error surfaces at execution.
-    fn cast(array: ArrayView<'_, Constant>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    /// Folds the cast with the session's rules. A failing cast is left in place so its error
+    /// surfaces at execution.
+    fn cast(
+        array: ArrayView<'_, Constant>,
+        dtype: &DType,
+        session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         Ok(array
             .scalar()
-            .cast(dtype)
+            .cast_ctx(dtype, session)
             .ok()
             .map(|scalar| ConstantArray::new(scalar, array.len()).into_array()))
     }
@@ -56,7 +61,7 @@ mod tests {
         let target_dtype = DType::Decimal(DecimalDType::new(21, 2), Nullability::NonNullable);
         let casted = ConstantArray::new(Scalar::from(42i64), 5)
             .into_array()
-            .cast(target_dtype.clone())
+            .cast(target_dtype.clone(), &array_session())
             .unwrap();
 
         assert_eq!(casted.dtype(), &target_dtype);

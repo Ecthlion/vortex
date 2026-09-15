@@ -97,14 +97,14 @@ mod tests {
     // null fill (8 - 2 = 6 fill nulls), patches non-null
     #[case(Sparse::try_new(
         buffer![1u64, 3].into_array(),
-        PrimitiveArray::from_option_iter([Some(10i32), Some(20)]).into_array().cast(nullable_i32()).unwrap(),
+        PrimitiveArray::from_option_iter([Some(10i32), Some(20)]).into_array().cast(nullable_i32(), &SESSION).unwrap(),
         8,
         Scalar::null(nullable_i32()),
     ).unwrap())]
     // null fill + some null patches
     #[case(Sparse::try_new(
         buffer![0u64, 2, 4].into_array(),
-        PrimitiveArray::from_option_iter([Some(10i32), None, Some(30)]).into_array().cast(nullable_i32()).unwrap(),
+        PrimitiveArray::from_option_iter([Some(10i32), None, Some(30)]).into_array().cast(nullable_i32(), &SESSION).unwrap(),
         6,
         Scalar::null(nullable_i32()),
     ).unwrap())]

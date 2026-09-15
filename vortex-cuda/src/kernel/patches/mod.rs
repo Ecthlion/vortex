@@ -293,7 +293,10 @@ mod tests {
     fn force_cast<T: NativePType>(array: PrimitiveArray, ctx: &mut ExecutionCtx) -> PrimitiveArray {
         array
             .into_array()
-            .cast(DType::Primitive(T::PTYPE, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(T::PTYPE, Nullability::NonNullable),
+                ctx.session(),
+            )
             .unwrap()
             .execute::<PrimitiveArray>(ctx)
             .unwrap()

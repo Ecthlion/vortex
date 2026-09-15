@@ -10,6 +10,7 @@
 //! the equivalent Arrow compute function.
 
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::IntoArray;
@@ -117,7 +118,10 @@ impl ExprBuiltins for Expression {
 
 pub trait ArrayBuiltins: Sized {
     /// Cast to the given data type.
-    fn cast(&self, dtype: DType) -> VortexResult<ArrayRef>;
+    ///
+    /// Which casts exist is decided by the [`CastRules`](crate::scalar_fn::fns::cast::CastRules)
+    /// of `session`, which also optimizes the lazy cast.
+    fn cast(&self, dtype: DType, session: &VortexSession) -> VortexResult<ArrayRef>;
 
     /// Replace null values with the given fill value.
     fn fill_null(&self, fill_value: impl Into<Scalar>) -> VortexResult<ArrayRef>;
@@ -168,17 +172,21 @@ pub trait ArrayBuiltins: Sized {
 }
 
 impl ArrayBuiltins for ArrayRef {
-    fn cast(&self, dtype: DType) -> VortexResult<ArrayRef> {
+    fn cast(&self, dtype: DType, session: &VortexSession) -> VortexResult<ArrayRef> {
         if self.dtype() == &dtype {
             return Ok(self.clone());
         }
-        Cast::new(self.clone(), dtype).into_array().optimize()
+        Cast::new(self.clone(), dtype)
+            .into_array()
+            .optimize_ctx(session)
     }
 
     fn fill_null(&self, fill_value: impl Into<Scalar>) -> VortexResult<ArrayRef> {
         let fill_value = fill_value.into();
         if !self.dtype().is_nullable() {
-            return self.cast(fill_value.dtype().clone());
+            return Cast::new(self.clone(), fill_value.dtype().clone())
+                .into_array()
+                .optimize();
         }
         FillNull::try_new(
             self.clone(),

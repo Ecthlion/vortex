@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::array::ArrayView;
@@ -42,7 +43,11 @@ fn prepare_map_cast_target(
 }
 
 impl CastReduce for Map {
-    fn cast(array: ArrayView<'_, Self>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, Self>,
+        dtype: &DType,
+        session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         let Some((target_map_dtype, target_entries_dtype)) = prepare_map_cast_target(array, dtype)?
         else {
             return Ok(None);
@@ -51,6 +56,7 @@ impl CastReduce for Map {
         let Some(entries) = <ListView as CastReduce>::cast(
             array.entries().as_::<ListView>(),
             &target_entries_dtype,
+            session,
         )?
         else {
             return Ok(None);

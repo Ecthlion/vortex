@@ -202,8 +202,9 @@ impl VTable for Masked {
         array: ArrayView<'_, Self>,
         parent: &ArrayRef,
         child_idx: usize,
+        session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
-        PARENT_RULES.evaluate(array, parent, child_idx)
+        PARENT_RULES.evaluate(array, parent, child_idx, session)
     }
     fn slot_name(_array: ArrayView<'_, Self>, idx: usize) -> String {
         MaskedSlots::NAMES[idx].to_string()

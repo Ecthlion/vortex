@@ -241,6 +241,7 @@ mod tests {
     use crate::ArrayRef;
     use crate::IntoArray;
     use crate::VortexSessionExecute;
+    use crate::array_session;
     use crate::arrays::Constant;
     use crate::arrays::ConstantArray;
     use crate::arrays::Filter;
@@ -344,7 +345,7 @@ mod tests {
             (0..128).map(|idx| Scalar::primitive(idx, NonNullable)),
         );
         let array = ConstantArray::new(scalar, 1_000_000).into_array();
-        let mut ctx = crate::array_session().create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
 
         let item: ArrayRef = GetItem::try_new(array, "f97")?
             .into_array()
@@ -410,7 +411,10 @@ mod tests {
         let get_item_expr = get_item("b", pack_expr);
 
         let result = get_item_expr
-            .optimize_recursive(&DType::Struct(StructFields::empty(), NonNullable))
+            .optimize_recursive(
+                &DType::Struct(StructFields::empty(), NonNullable),
+                &array_session(),
+            )
             .unwrap();
 
         assert_eq!(result, lit(2));
@@ -426,7 +430,7 @@ mod tests {
 
         let dtype = DType::Primitive(PType::I32, NonNullable);
 
-        let result = get_z.optimize_recursive(&dtype).unwrap();
+        let result = get_z.optimize_recursive(&dtype, &array_session()).unwrap();
         assert_eq!(result, lit(4));
     }
 
@@ -446,7 +450,9 @@ mod tests {
 
         let dtype = DType::Primitive(PType::I32, NonNullable);
 
-        let result = get_final.optimize_recursive(&dtype).unwrap();
+        let result = get_final
+            .optimize_recursive(&dtype, &array_session())
+            .unwrap();
         assert_eq!(result, lit(42));
     }
 
@@ -461,7 +467,9 @@ mod tests {
 
         let dtype = DType::Primitive(PType::I32, NonNullable);
 
-        let result = get_result.optimize_recursive(&dtype).unwrap();
+        let result = get_result
+            .optimize_recursive(&dtype, &array_session())
+            .unwrap();
         let expected = checked_add(lit(1), lit(10));
         assert_eq!(&result, &expected);
     }

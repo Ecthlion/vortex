@@ -12,6 +12,7 @@ use crate::arrays::dict::DictArraySlotsExt;
 use crate::builtins::ArrayBuiltins;
 use crate::dtype::Nullability;
 use crate::scalar::Scalar;
+use crate::scalar_fn::fns::cast::Cast;
 use crate::validity::Validity;
 
 impl ValidityVTable<Dict> for Dict {
@@ -31,7 +32,11 @@ impl ValidityVTable<Dict> for Dict {
                 }
                 (Validity::AllValid | Validity::NonNullable, Validity::Array(values_validity)) => {
                     // We know codes are all valid, so the cast is free.
-                    let codes = array.codes().cast(array.codes().dtype().as_nonnullable())?;
+                    let codes = Cast::new(
+                        array.codes().clone(),
+                        array.codes().dtype().as_nonnullable(),
+                    )
+                    .into_array();
                     Validity::Array(
                         unsafe { DictArray::new_unchecked(codes, values_validity) }.into_array(),
                     )

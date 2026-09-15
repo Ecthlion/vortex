@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::IntoArray;
@@ -18,11 +19,15 @@ impl CastReduce for Extension {
     /// the storage dtype, and changing the nullability of the same extension dtype. Every other
     /// extension cast comes from a session [`CastRule`](crate::scalar_fn::fns::cast::CastRule),
     /// consulted when the cast executes.
-    fn cast(array: ArrayView<'_, Extension>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, Extension>,
+        dtype: &DType,
+        session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         let ext_dtype = array.ext_dtype();
 
         if ext_dtype.storage_dtype().eq_ignore_nullability(dtype) {
-            return Ok(Some(array.storage_array().cast(dtype.clone())?));
+            return Ok(Some(array.storage_array().cast(dtype.clone(), session)?));
         }
 
         let Some(target_ext_dtype) = dtype.as_extension_opt() else {
@@ -34,7 +39,7 @@ impl CastReduce for Extension {
 
         let new_storage = array
             .storage_array()
-            .cast(target_ext_dtype.storage_dtype().clone())?;
+            .cast(target_ext_dtype.storage_dtype().clone(), session)?;
         Ok(Some(
             ExtensionArray::new(target_ext_dtype.clone(), new_storage).into_array(),
         ))
@@ -80,7 +85,7 @@ mod tests {
         let output = arr
             .clone()
             .into_array()
-            .cast(DType::Extension(ext_dtype.clone()))
+            .cast(DType::Extension(ext_dtype.clone()), &SESSION)
             .unwrap();
         assert_eq!(arr.len(), output.len());
         assert_eq!(arr.dtype(), output.dtype());
@@ -97,7 +102,11 @@ mod tests {
 
         let new_dtype = DType::Extension(ext_dtype).with_nullability(Nullability::Nullable);
 
-        let output = arr.clone().into_array().cast(new_dtype.clone()).unwrap();
+        let output = arr
+            .clone()
+            .into_array()
+            .cast(new_dtype.clone(), &SESSION)
+            .unwrap();
         assert_eq!(arr.len(), output.len());
         assert!(arr.dtype().eq_ignore_nullability(output.dtype()));
         assert_eq!(output.dtype(), &new_dtype);
@@ -128,7 +137,7 @@ mod tests {
         .into_array();
 
         let result = arr
-            .cast(target.clone())?
+            .cast(target.clone(), ctx.session())?
             .execute::<ExtensionArray>(&mut ctx)?;
         assert_eq!(result.dtype(), &target);
         assert_arrays_eq!(
@@ -151,7 +160,7 @@ mod tests {
         .into_array();
 
         let result = arr
-            .cast(target.clone())?
+            .cast(target.clone(), ctx.session())?
             .execute::<ExtensionArray>(&mut ctx)?;
         assert_eq!(result.dtype(), &target);
         assert_eq!(
@@ -187,7 +196,7 @@ mod tests {
 
         let constant = ConstantArray::new(scalar, 4)
             .into_array()
-            .cast(target.clone())?;
+            .cast(target.clone(), ctx.session())?;
         assert_eq!(constant.dtype(), &target);
         assert_eq!(constant.execute_scalar(2, &mut ctx)?, expected);
         Ok(())
@@ -217,7 +226,9 @@ mod tests {
     )]
     fn unsupported_casts_fail_at_execution(#[case] array: ArrayRef, #[case] target: DType) {
         let mut ctx = SESSION.create_execution_ctx();
-        let cast = array.cast(target).vortex_expect("casts always bind");
+        let cast = array
+            .cast(target, ctx.session())
+            .vortex_expect("casts always bind");
         let result = cast.execute::<ArrayRef>(&mut ctx);
         assert!(result.is_err(), "expected error, got {result:?}");
     }
@@ -234,7 +245,7 @@ mod tests {
         );
 
         let result = timestamp_array(&source)
-            .cast(target)
+            .cast(target, ctx.session())
             .vortex_expect("casts always bind")
             .execute::<ArrayRef>(&mut ctx);
         assert!(result.is_err(), "expected error, got {result:?}");
@@ -252,7 +263,10 @@ mod tests {
         let storage = buffer![1i64, 2, 3].into_array();
         let arr = ExtensionArray::new(ext_dtype, storage).into_array();
 
-        let result = arr.cast(DType::Primitive(PType::I64, Nullability::NonNullable))?;
+        let result = arr.cast(
+            DType::Primitive(PType::I64, Nullability::NonNullable),
+            ctx.session(),
+        )?;
         assert_eq!(
             result.dtype(),
             &DType::Primitive(PType::I64, Nullability::NonNullable)

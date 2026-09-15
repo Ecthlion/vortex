@@ -428,6 +428,9 @@ impl Arity {
 pub trait SimplifyCtx {
     /// Get the data type of the given expression.
     fn return_dtype(&self, expr: &Expression) -> VortexResult<DType>;
+
+    /// The session whose rules the optimizer applies.
+    fn session(&self) -> &VortexSession;
 }
 
 /// Arguments for expression execution.

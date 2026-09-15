@@ -3,6 +3,7 @@
 
 use itertools::Itertools;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::IntoArray;
@@ -40,6 +41,7 @@ impl ArrayParentReduceRule<Chunked> for ChunkedUnaryScalarFnPushDownRule {
         array: ArrayView<'_, Chunked>,
         parent: ArrayView<'_, ScalarFn>,
         _child_idx: usize,
+        _session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         if parent.nchildren() != 1 {
             return Ok(None);
@@ -71,6 +73,7 @@ impl ArrayParentReduceRule<Chunked> for ChunkedConstantScalarFnPushDownRule {
         array: ArrayView<'_, Chunked>,
         parent: ArrayView<'_, ScalarFn>,
         child_idx: usize,
+        _session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         for (idx, child) in parent.iter_children().enumerate() {
             if idx == child_idx {

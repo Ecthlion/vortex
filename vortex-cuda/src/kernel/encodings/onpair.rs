@@ -622,7 +622,10 @@ async fn host_dict_offsets(
     let nullability = offsets.dtype().nullability();
     Ok(offsets
         .into_array()
-        .cast(DType::Primitive(PType::U32, nullability))?
+        .cast(
+            DType::Primitive(PType::U32, nullability),
+            ctx.execution_ctx().session(),
+        )?
         .execute::<PrimitiveArray>(ctx.execution_ctx())?
         .into_buffer::<u32>())
 }

@@ -231,14 +231,14 @@ impl PyVortexFile {
             let filter = expr
                 .map(|e| {
                     e.into_inner()
-                        .optimize_recursive(vxf.dtype())?
+                        .optimize_recursive(vxf.dtype(), session())?
                         .bind(vxf.dtype())
                 })
                 .transpose()?;
             let projection = projection
                 .map(|p| p.0)
                 .unwrap_or_else(root)
-                .optimize_recursive(vxf.dtype())?
+                .optimize_recursive(vxf.dtype(), session())?
                 .bind(vxf.dtype())?;
             let mut builder = vxf
                 .scan()?
@@ -290,10 +290,13 @@ fn scan_builder(
 ) -> VortexResult<ScanBuilder<ArrayRef>> {
     let projection = projection
         .unwrap_or_else(root)
-        .optimize_recursive(vxf.dtype())?
+        .optimize_recursive(vxf.dtype(), ctx.session())?
         .bind(vxf.dtype())?;
     let expr = expr
-        .map(|expr| expr.optimize_recursive(vxf.dtype())?.bind(vxf.dtype()))
+        .map(|expr| {
+            expr.optimize_recursive(vxf.dtype(), ctx.session())?
+                .bind(vxf.dtype())
+        })
         .transpose()?;
     let mut builder = vxf
         .scan()?
@@ -305,7 +308,7 @@ fn scan_builder(
     }
 
     if let Some(indices) = indices {
-        let casted = indices.cast(DType::Primitive(PType::U64, NonNullable))?;
+        let casted = indices.cast(DType::Primitive(PType::U64, NonNullable), ctx.session())?;
         let indices = casted.execute::<PrimitiveArray>(ctx)?.into_buffer::<u64>();
         builder = builder.with_row_indices(StrictSortedBuffer::try_new(indices)?);
     }

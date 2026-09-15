@@ -4,6 +4,7 @@
 use vortex_buffer::Buffer;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::ExecutionCtx;
@@ -36,7 +37,11 @@ fn build_with_validity(
 /// Recursively casts the inner elements array to the target element type while preserving the list
 /// structure.
 impl CastReduce for FixedSizeList {
-    fn cast(array: ArrayView<'_, FixedSizeList>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, FixedSizeList>,
+        dtype: &DType,
+        session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         let Some(target_element_type) = dtype.as_fixed_size_list_element_opt() else {
             return Ok(None);
         };
@@ -47,7 +52,9 @@ impl CastReduce for FixedSizeList {
         else {
             return Ok(None);
         };
-        let elements = array.elements().cast((**target_element_type).clone())?;
+        let elements = array
+            .elements()
+            .cast((**target_element_type).clone(), session)?;
 
         Ok(Some(build_with_validity(array, elements, validity)))
     }
@@ -65,7 +72,9 @@ impl CastKernel for FixedSizeList {
                 array
                     .validity()?
                     .cast_nullability(dtype.nullability(), array.len(), ctx)?;
-            let elements = array.elements().cast((**target_element_type).clone())?;
+            let elements = array
+                .elements()
+                .cast((**target_element_type).clone(), ctx.session())?;
             let list_size = u64::from(array.list_size());
             let offsets =
                 Buffer::<u64>::from_iter((0..=array.len()).map(|row| {
@@ -84,7 +93,9 @@ impl CastKernel for FixedSizeList {
         let validity = array
             .validity()?
             .cast_nullability(dtype.nullability(), array.len(), ctx)?;
-        let elements = array.elements().cast((**target_element_type).clone())?;
+        let elements = array
+            .elements()
+            .cast((**target_element_type).clone(), ctx.session())?;
 
         Ok(Some(build_with_validity(array, elements, validity)))
     }
@@ -123,7 +134,7 @@ mod tests {
         );
 
         let result = array
-            .cast(target.clone())?
+            .cast(target.clone(), ctx.session())?
             .execute::<ListViewArray>(&mut ctx)?;
         assert_eq!(result.dtype(), &target);
 

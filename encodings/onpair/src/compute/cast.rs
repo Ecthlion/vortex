@@ -10,6 +10,7 @@ use vortex_array::scalar_fn::fns::cast::CastKernel;
 use vortex_array::scalar_fn::fns::cast::CastReduce;
 use vortex_array::validity::Validity;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::OnPair;
 use crate::OnPairArraySlotsExt;
@@ -36,7 +37,11 @@ fn build_with_validity(
 }
 
 impl CastReduce for OnPair {
-    fn cast(array: ArrayView<'_, Self>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, Self>,
+        dtype: &DType,
+        _session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         if !array.dtype().eq_ignore_nullability(dtype) {
             return Ok(None);
         }

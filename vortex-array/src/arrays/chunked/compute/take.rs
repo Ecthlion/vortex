@@ -166,7 +166,10 @@ fn take_chunked(
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<ArrayRef> {
     let indices = indices
-        .cast(DType::Primitive(PType::U64, indices.dtype().nullability()))?
+        .cast(
+            DType::Primitive(PType::U64, indices.dtype().nullability()),
+            ctx.session(),
+        )?
         .execute::<PrimitiveArray>(ctx)?;
 
     let indices_mask = indices

@@ -24,11 +24,16 @@ use vortex_buffer::BitBuffer;
 use vortex_buffer::ByteBuffer;
 use vortex_error::VortexResult;
 use vortex_error::vortex_err;
+use vortex_session::VortexSession;
 
 use super::ByteBool;
 
 impl CastReduce for ByteBool {
-    fn cast(array: ArrayView<'_, Self>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, Self>,
+        dtype: &DType,
+        _session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         // ByteBool is essentially a bool array stored as bytes
         // The main difference from BoolArray is the storage format
         // For casting, we can decode to canonical (BoolArray) and let it handle the cast
@@ -338,7 +343,7 @@ mod tests {
         let array = bb(vec![true, false, true, false]);
         let casted = array
             .into_array()
-            .cast(DType::Bool(Nullability::Nullable))
+            .cast(DType::Bool(Nullability::Nullable), &SESSION)
             .unwrap();
         assert_eq!(casted.dtype(), &DType::Bool(Nullability::Nullable));
         assert_eq!(casted.len(), 4);

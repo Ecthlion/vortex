@@ -3,6 +3,7 @@
 
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::ExecutionCtx;
@@ -64,6 +65,7 @@ where
         array: ArrayView<'_, V>,
         parent: ScalarFnArrayView<'_, LikeExpr>,
         child_idx: usize,
+        _session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         if child_idx != 0 {
             return Ok(None);

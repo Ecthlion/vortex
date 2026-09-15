@@ -199,15 +199,19 @@ impl VTable for Extension {
         builder.append_extension_array(&array.into_owned(), ctx)
     }
 
-    fn reduce(array: ArrayView<'_, Self>) -> VortexResult<Option<ArrayRef>> {
-        RULES.evaluate(array)
+    fn reduce(
+        array: ArrayView<'_, Self>,
+        session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
+        RULES.evaluate(array, session)
     }
 
     fn reduce_parent(
         array: ArrayView<'_, Self>,
         parent: &ArrayRef,
         child_idx: usize,
+        session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
-        PARENT_RULES.evaluate(array, parent, child_idx)
+        PARENT_RULES.evaluate(array, parent, child_idx, session)
     }
 }

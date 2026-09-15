@@ -254,7 +254,9 @@ fn test_cast_numeric_types(#[case] from_ptype: PType, #[case] to_ptype: PType) {
         Nullability::NonNullable,
     );
 
-    let result = listview.cast(target_dtype.clone()).unwrap();
+    let result = listview
+        .cast(target_dtype.clone(), &array_session())
+        .unwrap();
     assert_eq!(result.dtype(), &target_dtype);
 
     let result_list = result
@@ -292,7 +294,9 @@ fn test_cast_with_nulls() {
         Nullability::Nullable,
     );
 
-    let result = listview.cast(target_dtype.clone()).unwrap();
+    let result = listview
+        .cast(target_dtype.clone(), &array_session())
+        .unwrap();
     assert_eq!(result.dtype(), &target_dtype);
 
     let result_list = result
@@ -346,7 +350,7 @@ fn test_cast_special_patterns(#[case] expected_sizes: Vec<usize>, #[case] list_c
         )
     };
 
-    let result = listview.cast(target_dtype).unwrap();
+    let result = listview.cast(target_dtype, &array_session()).unwrap();
     let result_list = result
         .execute::<ListViewArray>(&mut array_session().create_execution_ctx())
         .unwrap();
@@ -380,7 +384,7 @@ fn test_cast_large_dataset() {
         Nullability::NonNullable,
     );
 
-    let result = listview.cast(target_dtype).unwrap();
+    let result = listview.cast(target_dtype, &array_session()).unwrap();
     let result_list = result
         .execute::<ListViewArray>(&mut array_session().create_execution_ctx())
         .unwrap();

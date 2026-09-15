@@ -5,6 +5,7 @@ use num_traits::One;
 use num_traits::Zero;
 use vortex_buffer::BufferMut;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::ExecutionCtx;
@@ -20,7 +21,11 @@ use crate::scalar_fn::fns::cast::CastKernel;
 use crate::scalar_fn::fns::cast::CastReduce;
 
 impl CastReduce for Bool {
-    fn cast(array: ArrayView<'_, Bool>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, Bool>,
+        dtype: &DType,
+        _session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         if !dtype.is_boolean() {
             return Ok(None);
         }
@@ -99,7 +104,7 @@ mod tests {
 
         let res = bool
             .into_array()
-            .cast(DType::Bool(Nullability::NonNullable));
+            .cast(DType::Bool(Nullability::NonNullable), &SESSION);
         assert!(res.is_ok());
         assert_eq!(res.unwrap().dtype(), &DType::Bool(Nullability::NonNullable));
     }
@@ -112,7 +117,7 @@ mod tests {
         let mut ctx = SESSION.create_execution_ctx();
         let result = bool
             .into_array()
-            .cast(DType::Bool(Nullability::NonNullable))
+            .cast(DType::Bool(Nullability::NonNullable), ctx.session())
             .and_then(|a| a.execute::<Canonical>(&mut ctx).map(|c| c.into_array()));
         assert!(result.is_err(), "Expected error, got: {result:?}");
     }
@@ -138,7 +143,10 @@ mod tests {
         let mut ctx = SESSION.create_execution_ctx();
         let arr = BoolArray::from_iter(vec![true, false, true]).into_array();
         let out = arr
-            .cast(DType::Primitive(target, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(target, Nullability::NonNullable),
+                ctx.session(),
+            )
             .unwrap();
         let out = out.execute::<Canonical>(&mut ctx).unwrap().into_array();
         assert_eq!(out.len(), 3);

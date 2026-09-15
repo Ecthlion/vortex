@@ -21,6 +21,7 @@ pub use array::SliceDataParts;
 pub use array::SliceSlots;
 pub use array::SliceSlotsView;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 pub use vtable::*;
 
 use crate::ArrayRef;
@@ -95,6 +96,7 @@ where
         array: ArrayView<'_, V>,
         parent: <Self::Parent as Matcher>::Match<'_>,
         child_idx: usize,
+        _session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         assert_eq!(child_idx, 0);
         if let Some(result) = short_circuit::<V>(array, &parent.range) {

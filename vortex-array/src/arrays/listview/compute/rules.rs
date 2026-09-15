@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::IntoArray;
@@ -36,6 +37,7 @@ impl ArrayParentReduceRule<ListView> for ListViewFilterPushDown {
         array: ArrayView<'_, ListView>,
         parent: ArrayView<'_, Filter>,
         _child_idx: usize,
+        _session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         // NOTE(ngates): if the filter is super selective, we maybe ought to consider masking
         //  the elements array too. We can create a new Vortex array that represents the explosion

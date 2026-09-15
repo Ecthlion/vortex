@@ -11,6 +11,7 @@ use vortex_array::optimizer::rules::ArrayParentReduceRule;
 use vortex_array::optimizer::rules::ParentRuleSet;
 use vortex_array::scalar_fn::fns::cast::CastReduceAdaptor;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::FoR;
 use crate::r#for::array::FoRArrayExt;
@@ -35,6 +36,7 @@ impl ArrayParentReduceRule<FoR> for FoRFilterPushDownRule {
         child: ArrayView<'_, FoR>,
         parent: ArrayView<'_, Filter>,
         _child_idx: usize,
+        _session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         Ok(Some(
             FoR::try_new(

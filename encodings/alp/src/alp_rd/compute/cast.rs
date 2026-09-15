@@ -8,13 +8,18 @@ use vortex_array::builtins::ArrayBuiltins;
 use vortex_array::dtype::DType;
 use vortex_array::scalar_fn::fns::cast::CastReduce;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::ALPRDArrayExt;
 use crate::ALPRDArraySlotsExt;
 use crate::alp_rd::ALPRD;
 
 impl CastReduce for ALPRD {
-    fn cast(array: ArrayView<'_, Self>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, Self>,
+        dtype: &DType,
+        session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         // Check if this is just a nullability change
         if !array.dtype().eq_ignore_nullability(dtype) {
             return Ok(None);
@@ -27,6 +32,7 @@ impl CastReduce for ALPRD {
                 .left_parts()
                 .dtype()
                 .with_nullability(dtype.nullability()),
+            session,
         )?;
 
         Ok(Some(
@@ -71,7 +77,10 @@ mod tests {
 
         let casted = alprd
             .into_array()
-            .cast(DType::Primitive(PType::F64, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::F64, Nullability::NonNullable),
+                ctx.session(),
+            )
             .unwrap();
         assert_eq!(
             casted.dtype(),
@@ -99,7 +108,10 @@ mod tests {
         let result = alprd
             .clone()
             .into_array()
-            .cast(DType::Primitive(PType::F64, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::F64, Nullability::NonNullable),
+                ctx.session(),
+            )
             .and_then(|a| {
                 a.execute::<PrimitiveArray>(&mut ctx)
                     .map(|p| p.into_array())
@@ -109,7 +121,10 @@ mod tests {
         // Cast to same type with Nullable should succeed
         let casted = alprd
             .into_array()
-            .cast(DType::Primitive(PType::F64, Nullability::Nullable))
+            .cast(
+                DType::Primitive(PType::F64, Nullability::Nullable),
+                ctx.session(),
+            )
             .unwrap();
         assert_eq!(
             casted.dtype(),

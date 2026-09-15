@@ -8,6 +8,7 @@ use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 use vortex_error::vortex_ensure;
 use vortex_mask::Mask;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::ExecutionCtx;
@@ -47,7 +48,11 @@ fn build_with_validity(
 }
 
 impl CastReduce for ListView {
-    fn cast(array: ArrayView<'_, ListView>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, ListView>,
+        dtype: &DType,
+        session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         // Check if we're casting to a `List` type.
         let Some(target_element_type) = dtype.as_list_element_opt() else {
             return Ok(None);
@@ -60,7 +65,9 @@ impl CastReduce for ListView {
         };
 
         // Cast the elements to the target element type.
-        let new_elements = array.elements().cast((**target_element_type).clone())?;
+        let new_elements = array
+            .elements()
+            .cast((**target_element_type).clone(), session)?;
         Ok(Some(build_with_validity(array, new_elements, validity)))
     }
 }
@@ -89,7 +96,9 @@ impl CastKernel for ListView {
         let validity = array
             .validity()?
             .cast_nullability(dtype.nullability(), array.len(), ctx)?;
-        let new_elements = array.elements().cast((**target_element_type).clone())?;
+        let new_elements = array
+            .elements()
+            .cast((**target_element_type).clone(), ctx.session())?;
 
         Ok(Some(build_with_validity(array, new_elements, validity)))
     }
@@ -145,7 +154,7 @@ fn cast_to_fixed_size_list(
     let elements = array
         .elements()
         .take(indices.into_array())?
-        .cast(target_element_type.clone())?;
+        .cast(target_element_type.clone(), ctx.session())?;
     Ok(FixedSizeListArray::try_new(elements, list_size, validity, len)?.into_array())
 }
 
@@ -218,7 +227,7 @@ mod tests {
         );
 
         let result = array
-            .cast(target.clone())?
+            .cast(target.clone(), ctx.session())?
             .execute::<FixedSizeListArray>(&mut ctx)?
             .into_array();
         assert_eq!(result.dtype(), &target);
@@ -251,7 +260,9 @@ mod tests {
         );
 
         // List sizes are a value-level property: the cast binds but fails at execution.
-        let result = array.cast(target)?.execute::<FixedSizeListArray>(&mut ctx);
+        let result = array
+            .cast(target, ctx.session())?
+            .execute::<FixedSizeListArray>(&mut ctx);
         assert!(result.is_err(), "expected error, got {result:?}");
         Ok(())
     }

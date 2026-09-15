@@ -18,6 +18,7 @@ use vortex_error::vortex_ensure;
 use vortex_error::vortex_err;
 use vortex_mask::AllOr;
 use vortex_mask::Mask;
+use vortex_session::VortexSession;
 use vortex_utils::aliases::hash_map::HashMap;
 
 use crate::ArrayRef;
@@ -675,7 +676,9 @@ impl Patches {
 
         let filter_mask = match mask.bit_buffer() {
             AllOr::All => return Ok(None),
-            AllOr::None => return self.clone().into_nullable_values().map(Some),
+            AllOr::None => {
+                return self.clone().into_nullable_values(ctx.session()).map(Some);
+            }
             AllOr::Some(masked) => {
                 let patch_indices = self.indices().clone().execute::<PrimitiveArray>(ctx)?;
                 match_each_unsigned_integer_ptype!(patch_indices.ptype(), |P| {
@@ -710,7 +713,7 @@ impl Patches {
             chunk_offsets: None,
             offset_within_chunk: self.offset_within_chunk,
         }
-        .into_nullable_values()
+        .into_nullable_values(ctx.session())
         .map(Some)
     }
 
@@ -718,12 +721,12 @@ impl Patches {
     ///
     /// The values stay logically unchanged (all currently-valid entries remain valid); only the
     /// dtype's nullability flag is set. Used by [`Self::mask`], whose result must be nullable.
-    fn into_nullable_values(self) -> VortexResult<Self> {
+    fn into_nullable_values(self, session: &VortexSession) -> VortexResult<Self> {
         if self.values.dtype().is_nullable() {
             return Ok(self);
         }
         let nullable = self.values.dtype().as_nullable();
-        self.map_values(|values| values.cast(nullable))
+        self.map_values(|values| values.cast(nullable, session))
     }
 
     /// Slice the patches by a range of the patched array.

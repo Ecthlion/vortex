@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::array::ArrayView;
@@ -35,6 +36,7 @@ where
         array: ArrayView<'_, V>,
         _parent: ScalarFnArrayView<'_, NotExpr>,
         _child_idx: usize,
+        _session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         <V as NotReduce>::invert(array)
     }

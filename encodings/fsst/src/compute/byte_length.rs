@@ -20,12 +20,14 @@ use crate::array::FSSTArraySlotsExt;
 impl ByteLengthKernel for FSST {
     fn byte_length(
         array: ArrayView<'_, Self>,
-        _ctx: &mut ExecutionCtx,
+        ctx: &mut ExecutionCtx,
     ) -> VortexResult<Option<ArrayRef>> {
         let nullable = array.dtype().nullability();
         let dtype = DType::Primitive(PType::U64, nullable);
         // Uncompressed lengths are non-nullable and may be less than u64 each
-        let lengths = array.uncompressed_lengths().cast(dtype.clone())?;
+        let lengths = array
+            .uncompressed_lengths()
+            .cast(dtype.clone(), ctx.session())?;
         Ok(Some(match FSST::validity(array)? {
             Validity::NonNullable | Validity::AllValid => lengths,
             Validity::Array(v) => lengths.mask(v)?,

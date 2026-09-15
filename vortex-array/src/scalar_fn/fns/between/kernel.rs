@@ -3,6 +3,7 @@
 
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use super::Between;
 use super::BetweenOptions;
@@ -58,6 +59,7 @@ where
         array: ArrayView<'_, V>,
         parent: ScalarFnArrayView<'_, Between>,
         child_idx: usize,
+        _session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         // Only process the main array child (index 0), not lower (1) or upper (2).
         if child_idx != 0 {

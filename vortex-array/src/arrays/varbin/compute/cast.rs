@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::ExecutionCtx;
@@ -30,7 +31,11 @@ fn build_with_validity(
 }
 
 impl CastReduce for VarBin {
-    fn cast(array: ArrayView<'_, VarBin>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, VarBin>,
+        dtype: &DType,
+        _session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         if !array.dtype().eq_ignore_nullability(dtype) {
             return Ok(None);
         }
@@ -104,7 +109,7 @@ mod tests {
     fn try_cast_varbin_nullable(#[case] source: DType, #[case] target: DType) {
         let varbin = VarBinArray::from_iter(vec![Some("a"), Some("b"), Some("c")], source);
 
-        let res = varbin.into_array().cast(target.clone());
+        let res = varbin.into_array().cast(target.clone(), &SESSION);
         assert_eq!(res.unwrap().dtype(), &target);
     }
 
@@ -118,7 +123,7 @@ mod tests {
         let mut ctx = SESSION.create_execution_ctx();
         let result = varbin
             .into_array()
-            .cast(non_nullable_source)
+            .cast(non_nullable_source, ctx.session())
             .and_then(|a| a.execute::<Canonical>(&mut ctx).map(|c| c.into_array()));
         assert!(result.is_err(), "Expected error, got: {result:?}");
     }

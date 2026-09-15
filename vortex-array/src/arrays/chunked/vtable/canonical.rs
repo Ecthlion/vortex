@@ -197,14 +197,20 @@ fn swizzle_list_chunks(
         let offsets_arr = chunk_array
             .offsets()
             .clone()
-            .cast(DType::Primitive(PType::U64, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::U64, Nullability::NonNullable),
+                ctx.session(),
+            )
             .vortex_expect("Must be able to fit array offsets in u64")
             .execute::<PrimitiveArray>(ctx)?;
 
         let sizes_arr = chunk_array
             .sizes()
             .clone()
-            .cast(DType::Primitive(PType::U64, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::U64, Nullability::NonNullable),
+                ctx.session(),
+            )
             .vortex_expect("Must be able to fit array offsets in u64")
             .execute::<PrimitiveArray>(ctx)?;
 

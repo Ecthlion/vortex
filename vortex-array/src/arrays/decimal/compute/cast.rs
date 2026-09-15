@@ -14,6 +14,7 @@ use vortex_error::vortex_bail;
 use vortex_error::vortex_err;
 use vortex_error::vortex_panic;
 use vortex_mask::Mask;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::ExecutionCtx;
@@ -38,7 +39,11 @@ use crate::scalar_fn::fns::cast::CastReduce;
 use crate::validity::Validity;
 
 impl CastReduce for Decimal {
-    fn cast(array: ArrayView<'_, Decimal>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, Decimal>,
+        dtype: &DType,
+        _session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         // Only nullability changes within the same decimal dtype are reducible without execution.
         // Precision/scale changes need the kernel.
         let DType::Decimal(to_decimal_dtype, to_nullability) = dtype else {
@@ -96,7 +101,7 @@ impl CastKernel for Decimal {
                 return Ok(Some(as_f64));
             }
             // Other primitive targets go through f64, matching the scalar decimal cast.
-            return as_f64.cast(dtype.clone()).map(Some);
+            return as_f64.cast(dtype.clone(), ctx.session()).map(Some);
         }
         let DType::Decimal(to_decimal_dtype, to_nullability) = dtype else {
             return Ok(None);
@@ -487,7 +492,7 @@ mod tests {
         let nullable_dtype = DType::Decimal(decimal_dtype, Nullability::Nullable);
         let casted = array
             .into_array()
-            .cast(nullable_dtype.clone())
+            .cast(nullable_dtype.clone(), ctx.session())
             .unwrap()
             .execute::<DecimalArray>(&mut ctx)
             .unwrap();
@@ -509,7 +514,7 @@ mod tests {
         let non_nullable_dtype = DType::Decimal(decimal_dtype, Nullability::NonNullable);
         let casted = array
             .into_array()
-            .cast(non_nullable_dtype.clone())
+            .cast(non_nullable_dtype.clone(), ctx.session())
             .unwrap()
             .execute::<DecimalArray>(&mut ctx)
             .unwrap();
@@ -531,7 +536,7 @@ mod tests {
         let non_nullable_dtype = DType::Decimal(decimal_dtype, Nullability::NonNullable);
         array
             .into_array()
-            .cast(non_nullable_dtype)
+            .cast(non_nullable_dtype, ctx.session())
             .and_then(|a| a.execute::<Canonical>(&mut ctx).map(|c| c.into_array()))
             .unwrap();
     }
@@ -549,7 +554,7 @@ mod tests {
         let different_dtype = DType::Decimal(DecimalDType::new(15, 3), Nullability::NonNullable);
         let casted = array
             .into_array()
-            .cast(different_dtype)
+            .cast(different_dtype, ctx.session())
             .unwrap()
             .execute::<DecimalArray>(&mut ctx)
             .unwrap();
@@ -573,7 +578,7 @@ mod tests {
         let smaller_dtype = DType::Decimal(DecimalDType::new(10, 2), Nullability::NonNullable);
         let casted = array
             .into_array()
-            .cast(smaller_dtype)
+            .cast(smaller_dtype, ctx.session())
             .unwrap()
             .execute::<DecimalArray>(&mut ctx)
             .unwrap();
@@ -595,7 +600,7 @@ mod tests {
         let smaller_dtype = DType::Decimal(DecimalDType::new(3, 0), Nullability::NonNullable);
         let result = array
             .into_array()
-            .cast(smaller_dtype)
+            .cast(smaller_dtype, ctx.session())
             .and_then(|a| a.execute::<Canonical>(&mut ctx).map(|c| c.into_array()));
 
         assert!(result.is_err());
@@ -619,7 +624,7 @@ mod tests {
         let lower_scale_dtype = DType::Decimal(DecimalDType::new(10, 2), Nullability::NonNullable);
         let result = array
             .into_array()
-            .cast(lower_scale_dtype)
+            .cast(lower_scale_dtype, ctx.session())
             .and_then(|a| a.execute::<Canonical>(&mut ctx).map(|c| c.into_array()));
 
         assert!(result.is_err());
@@ -643,7 +648,7 @@ mod tests {
         let lower_scale_dtype = DType::Decimal(DecimalDType::new(3, 2), Nullability::Nullable);
         let casted = array
             .into_array()
-            .cast(lower_scale_dtype)
+            .cast(lower_scale_dtype, ctx.session())
             .unwrap()
             .execute::<DecimalArray>(&mut ctx)
             .unwrap();
@@ -675,7 +680,7 @@ mod tests {
         let wider_dtype = DType::Decimal(DecimalDType::new(38, 2), Nullability::NonNullable);
         let casted = array
             .into_array()
-            .cast(wider_dtype)
+            .cast(wider_dtype, ctx.session())
             .unwrap()
             .execute::<DecimalArray>(&mut ctx)
             .unwrap();
@@ -702,7 +707,7 @@ mod tests {
         let wider_dtype = DType::Decimal(DecimalDType::new(18, 2), Nullability::NonNullable);
         let casted = array
             .into_array()
-            .cast(wider_dtype)
+            .cast(wider_dtype, ctx.session())
             .unwrap()
             .execute::<DecimalArray>(&mut ctx)
             .unwrap();
@@ -731,7 +736,7 @@ mod tests {
         // Casting to an unsupported dtype is rejected when the cast is bound.
         let result = array
             .into_array()
-            .cast(DType::Utf8(Nullability::NonNullable))
+            .cast(DType::Utf8(Nullability::NonNullable), ctx.session())
             .and_then(|a| a.execute::<Canonical>(&mut ctx).map(|c| c.into_array()));
 
         assert!(result.is_err());
@@ -865,7 +870,10 @@ mod tests {
         let dtype = DecimalDType::new(6, 2);
         let array = DecimalArray::new(buffer![125i32, 250, -375], dtype, Validity::NonNullable);
         let target = DType::Primitive(PType::F64, Nullability::NonNullable);
-        let casted = array.into_array().cast(target.clone()).unwrap();
+        let casted = array
+            .into_array()
+            .cast(target.clone(), &array_session())
+            .unwrap();
         assert_eq!(casted.dtype(), &target);
 
         let mut ctx = array_session().create_execution_ctx();
@@ -881,7 +889,10 @@ mod tests {
         let values = [Some(100i32), None, Some(-200)];
         let array = DecimalArray::from_option_iter(values, DecimalDType::new(6, 2));
         let target = DType::Primitive(PType::F64, Nullability::Nullable);
-        let casted = array.into_array().cast(target.clone()).unwrap();
+        let casted = array
+            .into_array()
+            .cast(target.clone(), &array_session())
+            .unwrap();
         assert_eq!(casted.dtype(), &target);
 
         let mut ctx = array_session().create_execution_ctx();
@@ -910,7 +921,10 @@ mod tests {
         let buf = buffer![i32::MAX, i32::MIN, 12345];
         let array = DecimalArray::new(buf, dtype, Validity::AllInvalid);
         let target = DType::Primitive(PType::F64, Nullability::Nullable);
-        let casted = array.into_array().cast(target.clone()).unwrap();
+        let casted = array
+            .into_array()
+            .cast(target.clone(), &array_session())
+            .unwrap();
         assert_eq!(casted.dtype(), &target);
 
         let primitive = casted

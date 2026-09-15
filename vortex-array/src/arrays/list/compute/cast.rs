@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::ExecutionCtx;
@@ -16,7 +17,11 @@ use crate::scalar_fn::fns::cast::CastKernel;
 use crate::scalar_fn::fns::cast::CastReduce;
 
 impl CastReduce for List {
-    fn cast(array: ArrayView<'_, List>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, List>,
+        dtype: &DType,
+        session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         let Some(target_element_type) = dtype.as_list_element_opt() else {
             return Ok(None);
         };
@@ -28,7 +33,9 @@ impl CastReduce for List {
             return Ok(None);
         };
 
-        let new_elements = array.elements().cast((**target_element_type).clone())?;
+        let new_elements = array
+            .elements()
+            .cast((**target_element_type).clone(), session)?;
 
         Ok(Some(
             unsafe { ListArray::new_unchecked(new_elements, array.offsets().clone(), validity) }
@@ -51,7 +58,9 @@ impl CastKernel for List {
             .validity()?
             .cast_nullability(dtype.nullability(), array.len(), ctx)?;
 
-        let new_elements = array.elements().cast((**target_element_type).clone())?;
+        let new_elements = array
+            .elements()
+            .cast((**target_element_type).clone(), ctx.session())?;
 
         Ok(Some(
             unsafe { ListArray::new_unchecked(new_elements, array.offsets().clone(), validity) }
@@ -103,7 +112,7 @@ mod tests {
         let result = list
             .clone()
             .into_array()
-            .cast(target_dtype.clone())
+            .cast(target_dtype.clone(), &SESSION)
             .unwrap();
         assert_eq!(result.dtype(), &target_dtype);
         assert_eq!(result.len(), list.len());
@@ -123,7 +132,7 @@ mod tests {
 
         let result = list
             .into_array()
-            .cast(target_dtype)
+            .cast(target_dtype, &SESSION)
             .and_then(|a| a.execute::<Canonical>(&mut SESSION.create_execution_ctx()))
             .map(|c| c.into_array());
         assert!(result.is_err());
@@ -148,7 +157,7 @@ mod tests {
 
         let result = list
             .into_array()
-            .cast(target_dtype)
+            .cast(target_dtype, &SESSION)
             .and_then(|a| a.execute::<Canonical>(&mut SESSION.create_execution_ctx()))
             .map(|c| c.into_array());
         assert!(result.is_err());
@@ -167,10 +176,13 @@ mod tests {
             Nullability::NonNullable,
         );
 
-        let result = list.into_array().cast(target_dtype).and_then(|a| {
-            a.execute::<RecursiveCanonical>(&mut SESSION.create_execution_ctx())
-                .map(|c| c.0.into_array())
-        });
+        let result = list
+            .into_array()
+            .cast(target_dtype, &SESSION)
+            .and_then(|a| {
+                a.execute::<RecursiveCanonical>(&mut SESSION.create_execution_ctx())
+                    .map(|c| c.0.into_array())
+            });
         assert!(result.is_err());
     }
 

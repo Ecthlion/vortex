@@ -3,6 +3,7 @@
 
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::IntoArray;
@@ -14,7 +15,11 @@ use crate::scalar::Scalar;
 use crate::scalar_fn::fns::cast::CastReduce;
 
 impl CastReduce for Null {
-    fn cast(array: ArrayView<'_, Null>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, Null>,
+        dtype: &DType,
+        _session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         if !dtype.is_nullable() {
             vortex_bail!("Cannot cast Null to {}", dtype);
         }
@@ -44,7 +49,10 @@ mod tests {
     #[test]
     fn test_cast_null_to_null() {
         let null_array = NullArray::new(5);
-        let result = null_array.into_array().cast(DType::Null).unwrap();
+        let result = null_array
+            .into_array()
+            .cast(DType::Null, &array_session())
+            .unwrap();
         assert_eq!(result.len(), 5);
         assert_eq!(result.dtype(), &DType::Null);
     }
@@ -54,7 +62,10 @@ mod tests {
         let null_array = NullArray::new(5);
         let result = null_array
             .into_array()
-            .cast(DType::Primitive(PType::I32, Nullability::Nullable))
+            .cast(
+                DType::Primitive(PType::I32, Nullability::Nullable),
+                &array_session(),
+            )
             .unwrap();
 
         // Should create a ConstantArray of nulls
@@ -78,9 +89,10 @@ mod tests {
     #[test]
     fn test_cast_null_to_non_nullable_fails() {
         let null_array = NullArray::new(5);
-        let result = null_array
-            .into_array()
-            .cast(DType::Primitive(PType::I32, Nullability::NonNullable));
+        let result = null_array.into_array().cast(
+            DType::Primitive(PType::I32, Nullability::NonNullable),
+            &array_session(),
+        );
         assert!(result.is_err());
     }
 

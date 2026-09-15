@@ -9,13 +9,18 @@ use vortex_array::dtype::DType;
 use vortex_array::dtype::Nullability::NonNullable;
 use vortex_array::scalar_fn::fns::cast::CastReduce;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::delta::Delta;
 use crate::delta::array::DeltaArrayExt;
 use crate::delta::array::DeltaArraySlotsExt;
 
 impl CastReduce for Delta {
-    fn cast(array: ArrayView<'_, Self>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, Self>,
+        dtype: &DType,
+        session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         let DType::Primitive(target_ptype, target_nullability) = dtype else {
             return Ok(None);
         };
@@ -29,8 +34,10 @@ impl CastReduce for Delta {
             return Ok(None);
         }
 
-        let casted_bases = array.bases().cast(dtype.with_nullability(NonNullable))?;
-        let casted_deltas = array.deltas().cast(dtype.clone())?;
+        let casted_bases = array
+            .bases()
+            .cast(dtype.with_nullability(NonNullable), session)?;
+        let casted_deltas = array.deltas().cast(dtype.clone(), session)?;
 
         Ok(Some(
             Delta::try_new(casted_bases, casted_deltas, array.offset(), array.len())?.into_array(),
@@ -77,7 +84,10 @@ mod tests {
 
         let casted = array
             .into_array()
-            .cast(DType::Primitive(PType::U32, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::U32, Nullability::NonNullable),
+                &SESSION,
+            )
             .unwrap();
 
         assert_arrays_eq!(
@@ -99,7 +109,10 @@ mod tests {
 
         let casted = array
             .into_array()
-            .cast(DType::Primitive(PType::F32, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::F32, Nullability::NonNullable),
+                &SESSION,
+            )
             .unwrap();
 
         assert_arrays_eq!(
@@ -115,9 +128,10 @@ mod tests {
         let values = PrimitiveArray::from_iter([10u32, 20, 5, 30, 15]);
         let array = Delta::try_from_primitive_array(&values, &mut SESSION.create_execution_ctx())?;
 
-        let casted = array
-            .into_array()
-            .cast(DType::Primitive(PType::U32, Nullability::Nullable))?;
+        let casted = array.into_array().cast(
+            DType::Primitive(PType::U32, Nullability::Nullable),
+            &SESSION,
+        )?;
 
         assert_eq!(
             casted.dtype(),
@@ -139,9 +153,10 @@ mod tests {
             PrimitiveArray::from_option_iter([Some(10u32), None, Some(30), Some(15), None]);
         let array = Delta::try_from_primitive_array(&values, &mut SESSION.create_execution_ctx())?;
 
-        let casted = array
-            .into_array()
-            .cast(DType::Primitive(PType::U32, Nullability::Nullable))?;
+        let casted = array.into_array().cast(
+            DType::Primitive(PType::U32, Nullability::Nullable),
+            &SESSION,
+        )?;
 
         assert_arrays_eq!(
             casted,
@@ -162,7 +177,10 @@ mod tests {
         #[expect(deprecated)]
         let result = array
             .into_array()
-            .cast(DType::Primitive(PType::U32, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::U32, Nullability::NonNullable),
+                &SESSION,
+            )
             .and_then(|a| a.to_canonical().map(|c| c.into_array()));
 
         assert!(
@@ -181,7 +199,10 @@ mod tests {
 
         let casted = array
             .into_array()
-            .cast(DType::Primitive(PType::U32, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::U32, Nullability::NonNullable),
+                &SESSION,
+            )
             .unwrap();
         assert_eq!(
             casted.dtype(),
@@ -208,7 +229,10 @@ mod tests {
 
         let casted = array
             .into_array()
-            .cast(DType::Primitive(PType::U32, Nullability::Nullable))
+            .cast(
+                DType::Primitive(PType::U32, Nullability::Nullable),
+                &SESSION,
+            )
             .unwrap();
         assert_eq!(
             casted.dtype(),

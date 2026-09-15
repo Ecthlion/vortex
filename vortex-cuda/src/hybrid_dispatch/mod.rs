@@ -92,7 +92,7 @@ pub async fn try_gpu_dispatch(
             .await;
     }
 
-    match DispatchPlan::new(array, ctx.dispatch_mode())? {
+    match DispatchPlan::new(array, ctx.dispatch_mode(), ctx.session())? {
         DispatchPlan::Standalone => {
             trace!(encoding = %array.encoding_id(), "standalone dispatch");
             ctx.cuda_session()

@@ -30,6 +30,7 @@ use crate::dtype::PType;
 use crate::dtype::i256;
 use crate::scalar::DecimalValue;
 use crate::scalar::Scalar;
+use crate::scalar_fn::fns::cast::Cast;
 use crate::scalar_fn::fns::operators::Operator;
 
 /// Compute the arithmetic mean of an array.
@@ -97,8 +98,9 @@ impl BinaryCombined for Mean {
             vortex_bail!("grouped mean over decimals is not yet supported");
         }
         let target = DType::Primitive(PType::F64, Nullability::Nullable);
-        let sum = sum.cast(target.clone())?;
-        let count = count.cast(target.clone())?;
+        // No session is available here; the casts resolve when the result executes.
+        let sum = Cast::new(sum, target.clone()).into_array();
+        let count = Cast::new(count, target.clone()).into_array();
 
         let non_zero = count
             .binary(

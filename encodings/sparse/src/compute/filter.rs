@@ -140,7 +140,7 @@ mod tests {
                 buffer![1u64, 2, 4].into_array(),
                 buffer![100i32, 200, 300]
                     .into_array()
-                    .cast(null_fill_value.dtype().clone())
+                    .cast(null_fill_value.dtype().clone(), &SESSION)
                     .unwrap(),
                 5,
                 null_fill_value,

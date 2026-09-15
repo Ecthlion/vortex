@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::IntoArray;
@@ -14,10 +15,14 @@ use crate::dtype::DType;
 use crate::scalar_fn::fns::cast::CastReduce;
 
 impl CastReduce for Chunked {
-    fn cast(array: ArrayView<'_, Chunked>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, Chunked>,
+        dtype: &DType,
+        session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         let mut cast_chunks = Vec::new();
         for chunk in array.iter_chunks() {
-            cast_chunks.push(chunk.cast(dtype.clone())?);
+            cast_chunks.push(chunk.cast(dtype.clone(), session)?);
         }
 
         // SAFETY: casting all chunks retains all chunks have same DType
@@ -68,7 +73,10 @@ mod test {
         .into_array();
 
         let result = root
-            .cast(DType::Primitive(PType::U64, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::U64, Nullability::NonNullable),
+                ctx.session(),
+            )
             .unwrap();
         assert_arrays_eq!(result, PrimitiveArray::from_iter([0u64, 1, 2, 3]), &mut ctx);
     }

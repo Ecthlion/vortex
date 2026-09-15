@@ -40,6 +40,7 @@ use crate::scalar_fn::ReduceNode;
 use crate::scalar_fn::ScalarFnId;
 use crate::scalar_fn::ScalarFnVTable;
 use crate::scalar_fn::ScalarFnVTableExt;
+use crate::scalar_fn::SimplifyCtx;
 use crate::scalar_fn::fns::literal::Literal;
 
 /// A cast expression that converts values to a target data type.
@@ -150,18 +151,20 @@ impl ScalarFnVTable for Cast {
         Ok(None)
     }
 
-    fn simplify_untyped(
+    /// Folds a cast of a literal with the session's cast rules.
+    ///
+    /// A failing cast (e.g. null to a non-nullable dtype) is left in place so the error surfaces
+    /// at execution time rather than during optimization.
+    fn simplify(
         &self,
         target_dtype: &DType,
         expr: &Expression,
+        ctx: &dyn SimplifyCtx,
     ) -> VortexResult<Option<Expression>> {
         let Some(scalar) = expr.child(0).as_opt::<Literal>() else {
             return Ok(None);
         };
-        // The optimizer has no session, so the literal is cast with the rules of the default
-        // session. A failing cast (e.g. null to a non-nullable dtype) is left in place so the
-        // error surfaces at execution time rather than during optimization.
-        Ok(scalar.cast(target_dtype).ok().map(lit))
+        Ok(scalar.cast_ctx(target_dtype, ctx.session()).ok().map(lit))
     }
 
     fn validity(&self, dtype: &DType, expression: &Expression) -> VortexResult<Option<Expression>> {
@@ -260,7 +263,7 @@ mod tests {
             lit(3i32),
             DType::Primitive(PType::F64, Nullability::NonNullable),
         );
-        let optimized = expr.optimize(&test_harness::struct_dtype())?;
+        let optimized = expr.optimize(&test_harness::struct_dtype(), &SESSION)?;
 
         let scalar = optimized
             .as_opt::<Literal>()
@@ -280,7 +283,7 @@ mod tests {
             lit(decimal),
             DType::Primitive(PType::F64, Nullability::NonNullable),
         );
-        let optimized = expr.optimize(&test_harness::struct_dtype())?;
+        let optimized = expr.optimize(&test_harness::struct_dtype(), &SESSION)?;
 
         let scalar = optimized
             .as_opt::<Literal>()
@@ -302,7 +305,7 @@ mod tests {
             ))),
             target.clone(),
         );
-        let optimized = expr.optimize(&test_harness::struct_dtype())?;
+        let optimized = expr.optimize(&test_harness::struct_dtype(), &SESSION)?;
 
         assert!(optimized.as_opt::<Literal>().is_none());
         assert_eq!(optimized.as_opt::<Cast>(), Some(&target));
@@ -342,7 +345,7 @@ mod tests {
         // Optimizer rules that run while the cast is built may already report the failure.
         let mut ctx = SESSION.create_execution_ctx();
         let result = array
-            .cast(target.clone())
+            .cast(target.clone(), ctx.session())
             .and_then(|cast| cast.execute::<ArrayRef>(&mut ctx));
         assert!(
             result.is_err(),
@@ -496,7 +499,7 @@ mod tests {
         let mut ctx = session.create_execution_ctx();
         buffer![1i32, 2, 3]
             .into_array()
-            .cast(target)?
+            .cast(target, session)?
             .execute::<ArrayRef>(&mut ctx)
     }
 
@@ -589,7 +592,7 @@ mod tests {
         // Standard cast: folded while the cast is built.
         let folded = ConstantArray::new(Scalar::from(7i32), 3)
             .into_array()
-            .cast(i64_dtype())?;
+            .cast(i64_dtype(), ctx.session())?;
         assert!(
             folded.as_opt::<ScalarFn>().is_none(),
             "not folded: {folded}"
@@ -598,14 +601,14 @@ mod tests {
         // Cast known only to the session's rule: left in place and executed through the rule.
         let deferred = ConstantArray::new(Scalar::from(7i32), 3)
             .into_array()
-            .cast(utf8.clone())?;
+            .cast(utf8.clone(), ctx.session())?;
         assert!(
             deferred.as_opt::<ScalarFn>().is_some(),
             "folded: {deferred}"
         );
         assert_eq!(deferred.execute_scalar(0, &mut ctx)?, Scalar::from("x"));
 
-        let expr = cast(lit(7i32), utf8).optimize(&test_harness::struct_dtype())?;
+        let expr = cast(lit(7i32), utf8).optimize(&test_harness::struct_dtype(), ctx.session())?;
         assert!(expr.as_opt::<Literal>().is_none(), "folded: {expr}");
         Ok(())
     }

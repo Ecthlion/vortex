@@ -304,8 +304,9 @@ impl VTable for Sparse {
         array: ArrayView<'_, Self>,
         parent: &ArrayRef,
         child_idx: usize,
+        session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
-        RULES.evaluate(array, parent, child_idx)
+        RULES.evaluate(array, parent, child_idx, session)
     }
 
     fn execute(array: Array<Self>, ctx: &mut ExecutionCtx) -> VortexResult<ExecutionResult> {
@@ -763,7 +764,7 @@ mod test {
     fn sparse_array(fill_value: Scalar) -> ArrayRef {
         // merged array: [null, null, 100, null, null, 200, null, null, 300, null]
         let mut values = buffer![100i32, 200, 300].into_array();
-        values = values.cast(fill_value.dtype().clone()).unwrap();
+        values = values.cast(fill_value.dtype().clone(), &SESSION).unwrap();
 
         Sparse::try_new(buffer![2u64, 5, 8].into_array(), values, 10, fill_value)
             .unwrap()

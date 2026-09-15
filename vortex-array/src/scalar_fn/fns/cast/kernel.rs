@@ -178,7 +178,7 @@ fn cast_canonical(
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<Option<ArrayRef>> {
     match canonical {
-        CanonicalView::Null(a) => <Null as CastReduce>::cast(a, dtype),
+        CanonicalView::Null(a) => <Null as CastReduce>::cast(a, dtype, ctx.session()),
         CanonicalView::Bool(a) => <Bool as CastKernel>::cast(a, dtype, ctx),
         CanonicalView::Primitive(a) => <Primitive as CastKernel>::cast(a, dtype, ctx),
         CanonicalView::Decimal(a) => <Decimal as CastKernel>::cast(a, dtype, ctx),
@@ -188,7 +188,7 @@ fn cast_canonical(
         CanonicalView::FixedSizeList(a) => <FixedSizeList as CastKernel>::cast(a, dtype, ctx),
         CanonicalView::Struct(a) => struct_cast(a, dtype, ctx),
         CanonicalView::Union(_) => vortex_bail!("Union arrays don't support casting (yet)"),
-        CanonicalView::Extension(a) => <Extension as CastReduce>::cast(a, dtype),
+        CanonicalView::Extension(a) => <Extension as CastReduce>::cast(a, dtype, ctx.session()),
         CanonicalView::Variant(_) => vortex_bail!("Variant arrays don't support casting"),
     }
 }
@@ -205,7 +205,11 @@ fn cast_canonical(
 ///
 /// Returns `Ok(None)` if the rule doesn't apply to this array/dtype combination.
 pub trait CastReduce: VTable {
-    fn cast(array: ArrayView<'_, Self>, dtype: &DType) -> VortexResult<Option<ArrayRef>>;
+    fn cast(
+        array: ArrayView<'_, Self>,
+        dtype: &DType,
+        session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>>;
 }
 
 /// Execute kernel for cast: perform the actual value conversion, potentially reading buffers.
@@ -239,12 +243,13 @@ where
         array: ArrayView<'_, V>,
         parent: ScalarFnArrayView<'_, Cast>,
         _child_idx: usize,
+        session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         let dtype = parent.options;
         if array.dtype() == dtype {
             return Ok(Some(array.array().clone()));
         }
-        <V as CastReduce>::cast(array, dtype)
+        <V as CastReduce>::cast(array, dtype, session)
     }
 }
 

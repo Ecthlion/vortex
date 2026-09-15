@@ -117,12 +117,12 @@ impl DataSource for LayoutReaderDataSource {
 
         let projection = scan_request
             .projection
-            .optimize_recursive(self.reader.dtype())?
+            .optimize_recursive(self.reader.dtype(), &self.session)?
             .bind(self.reader.dtype())?;
         let filter = scan_request
             .filter
             .map(|expr| {
-                expr.optimize_recursive(self.reader.dtype())?
+                expr.optimize_recursive(self.reader.dtype(), &self.session)?
                     .bind(self.reader.dtype())
             })
             .transpose()?;

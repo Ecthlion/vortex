@@ -23,6 +23,7 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::array::ArrayView;
@@ -41,7 +42,11 @@ pub trait ArrayReduceRule<V: VTable>: Debug + Send + Sync + 'static {
     /// - `Ok(Some(new_array))` if the rule applied successfully
     /// - `Ok(None)` if the rule doesn't apply
     /// - `Err(e)` if an error occurred
-    fn reduce(&self, array: ArrayView<'_, V>) -> VortexResult<Option<ArrayRef>>;
+    fn reduce(
+        &self,
+        array: ArrayView<'_, V>,
+        session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>>;
 }
 
 /// A metadata-only rewrite rule where a child encoding rewrites its parent (Layer 2).
@@ -64,6 +69,7 @@ pub trait ArrayParentReduceRule<V: VTable>: Debug + Send + Sync + 'static {
         array: ArrayView<'_, V>,
         parent: <Self::Parent as Matcher>::Match<'_>,
         child_idx: usize,
+        session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>>;
 }
 
@@ -77,6 +83,7 @@ pub trait DynArrayParentReduceRule<V: VTable>: Debug + Send + Sync {
         array: ArrayView<'_, V>,
         parent: &ArrayRef,
         child_idx: usize,
+        session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>>;
 }
 
@@ -108,11 +115,13 @@ impl<V: VTable, K: ArrayParentReduceRule<V>> DynArrayParentReduceRule<V>
         child: ArrayView<'_, V>,
         parent: &ArrayRef,
         child_idx: usize,
+        session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         let Some(parent_view) = K::Parent::try_match(parent) else {
             return Ok(None);
         };
-        self.rule.reduce_parent(child, parent_view, child_idx)
+        self.rule
+            .reduce_parent(child, parent_view, child_idx, session)
     }
 }
 
@@ -131,9 +140,13 @@ impl<V: VTable> ReduceRuleSet<V> {
     }
 
     /// Evaluate the reduction rules on the given array.
-    pub fn evaluate(&self, array: ArrayView<'_, V>) -> VortexResult<Option<ArrayRef>> {
+    pub fn evaluate(
+        &self,
+        array: ArrayView<'_, V>,
+        session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         for rule in self.rules.iter() {
-            if let Some(reduced) = rule.reduce(array)? {
+            if let Some(reduced) = rule.reduce(array, session)? {
                 trace_op!(record_reduce_applied(array.array(), *rule, &reduced));
                 return Ok(Some(reduced));
             }
@@ -176,6 +189,7 @@ impl<V: VTable> ParentRuleSet<V> {
         child: ArrayView<'_, V>,
         parent: &ArrayRef,
         child_idx: usize,
+        session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         for rule in self.rules.iter() {
             if !rule.matches(parent) {
@@ -187,7 +201,7 @@ impl<V: VTable> ParentRuleSet<V> {
                 ));
                 continue;
             }
-            if let Some(reduced) = rule.reduce_parent(child, parent, child_idx)? {
+            if let Some(reduced) = rule.reduce_parent(child, parent, child_idx, session)? {
                 // Debug assertions because these checks are already run elsewhere.
                 #[cfg(debug_assertions)]
                 {

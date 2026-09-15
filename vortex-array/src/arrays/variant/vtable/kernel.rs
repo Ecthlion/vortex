@@ -123,7 +123,7 @@ impl ExecuteParentKernel<Variant> for VariantGetKernel {
             return make_fallback(ctx).map(Some);
         }
 
-        let typed = typed.cast(parent.dtype().clone())?;
+        let typed = typed.cast(parent.dtype().clone(), ctx.session())?;
         let typed_mask = typed.validity()?.execute_mask(typed.len(), ctx)?;
         if typed_mask.all_true() {
             return Ok(Some(typed));

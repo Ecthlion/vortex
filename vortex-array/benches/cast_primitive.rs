@@ -47,9 +47,12 @@ fn cast_u16_to_u32(bencher: Bencher, n: usize) {
     bencher
         .with_inputs(|| (arr.clone(), SESSION.create_execution_ctx()))
         .bench_refs(|(a, ctx)| {
-            a.cast(DType::Primitive(PType::U32, Nullability::Nullable))
-                .unwrap()
-                .execute::<Canonical>(ctx)
+            a.cast(
+                DType::Primitive(PType::U32, Nullability::Nullable),
+                &SESSION,
+            )
+            .unwrap()
+            .execute::<Canonical>(ctx)
         });
 }
 
@@ -66,7 +69,7 @@ fn cast_u32_to_u8(bencher: Bencher, n: usize) {
     bencher
         .with_inputs(|| (arr.clone(), SESSION.create_execution_ctx()))
         .bench_refs(|(a, ctx)| {
-            a.cast(DType::Primitive(PType::U8, Nullability::Nullable))
+            a.cast(DType::Primitive(PType::U8, Nullability::Nullable), &SESSION)
                 .unwrap()
                 .execute::<Canonical>(ctx)
         });
@@ -84,9 +87,12 @@ fn cast_i32_to_u32(bencher: Bencher, n: usize) {
     bencher
         .with_inputs(|| (arr.clone(), SESSION.create_execution_ctx()))
         .bench_refs(|(a, ctx)| {
-            a.cast(DType::Primitive(PType::U32, Nullability::Nullable))
-                .unwrap()
-                .execute::<Canonical>(ctx)
+            a.cast(
+                DType::Primitive(PType::U32, Nullability::Nullable),
+                &SESSION,
+            )
+            .unwrap()
+            .execute::<Canonical>(ctx)
         });
 }
 
@@ -99,10 +105,10 @@ fn cast_i64_to_decimal38_scale2(bencher: Bencher, n: usize) {
     bencher
         .with_inputs(|| (arr.clone(), SESSION.create_execution_ctx()))
         .bench_refs(|(a, ctx)| {
-            a.cast(DType::Decimal(
-                DecimalDType::new(38, 2),
-                Nullability::NonNullable,
-            ))
+            a.cast(
+                DType::Decimal(DecimalDType::new(38, 2), Nullability::NonNullable),
+                &SESSION,
+            )
             .unwrap()
             .execute::<Canonical>(ctx)
         });
@@ -116,10 +122,10 @@ fn cast_i32_to_decimal9_scale2(bencher: Bencher, n: usize) {
     bencher
         .with_inputs(|| (arr.clone(), SESSION.create_execution_ctx()))
         .bench_refs(|(a, ctx)| {
-            a.cast(DType::Decimal(
-                DecimalDType::new(9, 2),
-                Nullability::NonNullable,
-            ))
+            a.cast(
+                DType::Decimal(DecimalDType::new(9, 2), Nullability::NonNullable),
+                &SESSION,
+            )
             .unwrap()
             .execute::<Canonical>(ctx)
         });
@@ -133,10 +139,10 @@ fn cast_i32_to_decimal9_scale0(bencher: Bencher, n: usize) {
     bencher
         .with_inputs(|| (arr.clone(), SESSION.create_execution_ctx()))
         .bench_refs(|(a, ctx)| {
-            a.cast(DType::Decimal(
-                DecimalDType::new(9, 0),
-                Nullability::NonNullable,
-            ))
+            a.cast(
+                DType::Decimal(DecimalDType::new(9, 0), Nullability::NonNullable),
+                &SESSION,
+            )
             .unwrap()
             .execute::<Canonical>(ctx)
         });

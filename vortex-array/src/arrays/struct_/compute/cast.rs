@@ -61,7 +61,7 @@ pub(crate) fn struct_cast(
         return Ok(None);
     };
 
-    let cast_fields = struct_cast_fields(array, target_sdtype)?;
+    let cast_fields = struct_cast_fields(array, target_sdtype, ctx.session())?;
 
     let validity = array
         .validity()?
@@ -78,6 +78,7 @@ pub(crate) fn struct_cast(
 pub(crate) fn struct_cast_fields(
     array: ArrayView<Struct>,
     target_type: &StructFields,
+    session: &VortexSession,
 ) -> VortexResult<Vec<ArrayRef>> {
     let source_sdtype = array.struct_fields();
 
@@ -92,7 +93,7 @@ pub(crate) fn struct_cast_fields(
     // Re-order, handle fields by value instead.
     if fields_match_order {
         for (field, target_type) in array.iter_unmasked_fields().zip_eq(target_type.fields()) {
-            let cast_field = field.cast(target_type)?;
+            let cast_field = field.cast(target_type, session)?;
             cast_fields.push(cast_field);
         }
     } else {
@@ -112,7 +113,9 @@ pub(crate) fn struct_cast_fields(
                 }
                 Some(src_field_idx) => {
                     // Field exists in source field. Cast it to the target type.
-                    let cast_field = array.unmasked_field(src_field_idx).cast(target_type)?;
+                    let cast_field = array
+                        .unmasked_field(src_field_idx)
+                        .cast(target_type, session)?;
                     cast_fields.push(cast_field);
                 }
             }
@@ -302,7 +305,7 @@ mod tests {
             Nullability::NonNullable,
         );
 
-        let result = empty_struct.cast(target_dtype.clone()).unwrap();
+        let result = empty_struct.cast(target_dtype.clone(), &SESSION).unwrap();
         assert_eq!(result.dtype(), &target_dtype);
         assert_eq!(result.len(), 0);
     }
@@ -320,7 +323,7 @@ mod tests {
 
         let cast = struct_array
             .into_array()
-            .cast(target_dtype.clone())
+            .cast(target_dtype.clone(), &SESSION)
             .unwrap();
         assert_eq!(cast.dtype(), &target_dtype);
         assert_eq!(cast.len(), 3);
@@ -354,7 +357,7 @@ mod tests {
 
         let result = struct_array
             .into_array()
-            .cast(target_dtype.clone())
+            .cast(target_dtype.clone(), &SESSION)
             .unwrap();
         assert_eq!(result.dtype(), &target_dtype);
         assert_eq!(result.len(), 3);

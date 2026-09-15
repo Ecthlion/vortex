@@ -19,12 +19,14 @@ use crate::OnPairArraySlotsExt;
 impl ByteLengthKernel for OnPair {
     fn byte_length(
         array: vortex_array::ArrayView<'_, Self>,
-        _ctx: &mut vortex_array::ExecutionCtx,
+        ctx: &mut vortex_array::ExecutionCtx,
     ) -> vortex_error::VortexResult<Option<vortex_array::ArrayRef>> {
         let nullable = array.dtype().nullability();
         let dtype = DType::Primitive(PType::U64, nullable);
         // Uncompressed lengths are non-nullable and may be less than u64 each
-        let lengths = array.uncompressed_lengths().cast(dtype.clone())?;
+        let lengths = array
+            .uncompressed_lengths()
+            .cast(dtype.clone(), ctx.session())?;
         Ok(Some(match OnPair::validity(array)? {
             Validity::NonNullable | Validity::AllValid => lengths,
             Validity::Array(v) => lengths.mask(v)?,

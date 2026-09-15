@@ -4,6 +4,7 @@
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_error::vortex_ensure;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::ExecutionCtx;
@@ -16,10 +17,10 @@ use crate::arrays::ScalarFn;
 use crate::arrays::scalar_fn::ExactScalarFn;
 use crate::arrays::scalar_fn::ScalarFnArrayExt;
 use crate::arrays::scalar_fn::ScalarFnArrayView;
-use crate::builtins::ArrayBuiltins;
 use crate::kernel::ExecuteParentKernel;
 use crate::optimizer::rules::ArrayParentReduceRule;
 use crate::scalar::Scalar;
+use crate::scalar_fn::fns::cast::Cast;
 use crate::scalar_fn::fns::fill_null::FillNull as FillNullExpr;
 use crate::validity::Validity;
 
@@ -80,7 +81,10 @@ pub(super) fn short_circuit(
             Validity::NonNullable | Validity::AllValid
         )
     {
-        return array.clone().cast(fill_value.dtype().clone()).map(Some);
+        // No session is available here; the cast resolves when the result executes.
+        return Ok(Some(
+            Cast::new(array.clone(), fill_value.dtype().clone()).into_array(),
+        ));
     }
 
     // If all values are null, replace the entire array with the fill value.
@@ -122,6 +126,7 @@ where
         array: ArrayView<'_, V>,
         parent: ScalarFnArrayView<'_, FillNullExpr>,
         child_idx: usize,
+        _session: &VortexSession,
     ) -> VortexResult<Option<ArrayRef>> {
         // Only process the input child (index 0), not the fill_value child (index 1).
         if child_idx != 0 {

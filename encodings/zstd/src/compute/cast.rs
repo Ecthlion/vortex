@@ -9,13 +9,18 @@ use vortex_array::dtype::Nullability;
 use vortex_array::scalar_fn::fns::cast::CastReduce;
 use vortex_array::vtable::child_to_validity;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::Zstd;
 use crate::ZstdData;
 use crate::ZstdSlots;
 
 impl CastReduce for Zstd {
-    fn cast(array: ArrayView<'_, Self>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, Self>,
+        dtype: &DType,
+        _session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         if !dtype.eq_ignore_nullability(array.dtype()) {
             // Type changes can't be handled in ZSTD, need to decode and tweak.
             // TODO(aduffy): handle trivial conversions like Binary -> UTF8, integer widening, etc.
@@ -105,7 +110,10 @@ mod tests {
 
         let casted = zstd
             .into_array()
-            .cast(DType::Primitive(PType::I64, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::I64, Nullability::NonNullable),
+                ctx.session(),
+            )
             .unwrap();
         assert_eq!(
             casted.dtype(),
@@ -128,7 +136,10 @@ mod tests {
 
         let casted = zstd
             .into_array()
-            .cast(DType::Primitive(PType::U32, Nullability::Nullable))
+            .cast(
+                DType::Primitive(PType::U32, Nullability::Nullable),
+                ctx.session(),
+            )
             .unwrap();
         assert_eq!(
             casted.dtype(),
@@ -146,7 +157,10 @@ mod tests {
         let zstd = Zstd::from_primitive(&values, 0, 128, &mut ctx).unwrap();
         let sliced = zstd.slice(1..5).unwrap();
         let casted = sliced
-            .cast(DType::Primitive(PType::U32, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::U32, Nullability::NonNullable),
+                ctx.session(),
+            )
             .unwrap();
         assert_eq!(
             casted.dtype(),
@@ -175,7 +189,10 @@ mod tests {
         let zstd = Zstd::from_primitive(&values, 0, 128, &mut ctx).unwrap();
         let sliced = zstd.slice(1..5).unwrap();
         let casted = sliced
-            .cast(DType::Primitive(PType::U32, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::U32, Nullability::NonNullable),
+                ctx.session(),
+            )
             .unwrap();
         assert_eq!(
             casted.dtype(),

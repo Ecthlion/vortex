@@ -14,6 +14,7 @@ use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 use vortex_error::vortex_err;
 use vortex_mask::Mask;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::ExecutionCtx;
@@ -47,7 +48,11 @@ use crate::scalar_fn::fns::cast::CastReduce;
 use crate::validity::Validity;
 
 impl CastReduce for Primitive {
-    fn cast(array: ArrayView<'_, Primitive>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, Primitive>,
+        dtype: &DType,
+        _session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         // Only the same ptype is reducible without execution; type changes need the kernel
         // to verify values fit in the target range.
         let DType::Primitive(new_ptype, new_nullability) = dtype else {
@@ -671,7 +676,7 @@ mod test {
 
         // cast from u32 to u8
         let p = arr
-            .cast(PType::U8.into())
+            .cast(PType::U8.into(), ctx.session())
             .unwrap()
             .execute::<PrimitiveArray>(&mut ctx)
             .unwrap();
@@ -681,7 +686,10 @@ mod test {
         // to nullable
         let p = p
             .into_array()
-            .cast(DType::Primitive(PType::U8, Nullability::Nullable))
+            .cast(
+                DType::Primitive(PType::U8, Nullability::Nullable),
+                ctx.session(),
+            )
             .unwrap()
             .execute::<PrimitiveArray>(&mut ctx)
             .unwrap();
@@ -695,7 +703,10 @@ mod test {
         // back to non-nullable
         let p = p
             .into_array()
-            .cast(DType::Primitive(PType::U8, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::U8, Nullability::NonNullable),
+                ctx.session(),
+            )
             .unwrap()
             .execute::<PrimitiveArray>(&mut ctx)
             .unwrap();
@@ -705,7 +716,10 @@ mod test {
         // to nullable u32
         let p = p
             .into_array()
-            .cast(DType::Primitive(PType::U32, Nullability::Nullable))
+            .cast(
+                DType::Primitive(PType::U32, Nullability::Nullable),
+                ctx.session(),
+            )
             .unwrap()
             .execute::<PrimitiveArray>(&mut ctx)
             .unwrap();
@@ -719,7 +733,10 @@ mod test {
         // to non-nullable u8
         let p = p
             .into_array()
-            .cast(DType::Primitive(PType::U8, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::U8, Nullability::NonNullable),
+                ctx.session(),
+            )
             .unwrap()
             .execute::<PrimitiveArray>(&mut ctx)
             .unwrap();
@@ -732,7 +749,7 @@ mod test {
         let mut ctx = array_session().create_execution_ctx();
         let arr = buffer![0u32, 10, 200].into_array();
         let u8arr = arr
-            .cast(PType::F32.into())
+            .cast(PType::F32.into(), ctx.session())
             .unwrap()
             .execute::<PrimitiveArray>(&mut ctx)
             .unwrap();
@@ -749,7 +766,10 @@ mod test {
         let decimal_dtype = DecimalDType::new(5, 2);
         let casted = PrimitiveArray::from_iter([42i32, -7])
             .into_array()
-            .cast(DType::Decimal(decimal_dtype, Nullability::NonNullable))?
+            .cast(
+                DType::Decimal(decimal_dtype, Nullability::NonNullable),
+                ctx.session(),
+            )?
             .execute::<DecimalArray>(&mut ctx)?;
 
         assert_eq!(
@@ -768,10 +788,10 @@ mod test {
         let source_ptr = source.as_slice::<i32>().as_ptr();
         let casted = source
             .into_array()
-            .cast(DType::Decimal(
-                DecimalDType::new(9, 0),
-                Nullability::NonNullable,
-            ))?
+            .cast(
+                DType::Decimal(DecimalDType::new(9, 0), Nullability::NonNullable),
+                ctx.session(),
+            )?
             .execute::<DecimalArray>(&mut ctx)?;
 
         assert_eq!(casted.buffer::<i32>().as_ptr(), source_ptr);
@@ -790,10 +810,10 @@ mod test {
             .statistics()
             .compute_all(&[Stat::Min, Stat::Max], &mut ctx)?;
         let casted = source
-            .cast(DType::Decimal(
-                DecimalDType::new(9, 0),
-                Nullability::NonNullable,
-            ))?
+            .cast(
+                DType::Decimal(DecimalDType::new(9, 0), Nullability::NonNullable),
+                ctx.session(),
+            )?
             .execute::<DecimalArray>(&mut ctx)?;
 
         assert_eq!(casted.buffer::<i32>().as_ptr(), source_ptr);
@@ -807,10 +827,10 @@ mod test {
         let source_ptr = source.as_slice::<i32>().as_ptr();
         let casted = source
             .into_array()
-            .cast(DType::Decimal(
-                DecimalDType::new(9, 0),
-                Nullability::Nullable,
-            ))?
+            .cast(
+                DType::Decimal(DecimalDType::new(9, 0), Nullability::Nullable),
+                ctx.session(),
+            )?
             .execute::<DecimalArray>(&mut ctx)?;
 
         assert_eq!(casted.buffer::<i32>().as_ptr(), source_ptr);
@@ -824,12 +844,10 @@ mod test {
     #[test]
     fn cast_same_width_signed_integer_to_decimal_checks_precision() -> VortexResult<()> {
         let mut ctx = array_session().create_execution_ctx();
-        let casted = PrimitiveArray::from_iter([i32::MAX])
-            .into_array()
-            .cast(DType::Decimal(
-                DecimalDType::new(9, 0),
-                Nullability::NonNullable,
-            ))?;
+        let casted = PrimitiveArray::from_iter([i32::MAX]).into_array().cast(
+            DType::Decimal(DecimalDType::new(9, 0), Nullability::NonNullable),
+            ctx.session(),
+        )?;
 
         let error = casted.execute::<DecimalArray>(&mut ctx).unwrap_err();
         assert!(error.to_string().contains("does not fit in precision"));
@@ -842,7 +860,10 @@ mod test {
         let decimal_dtype = DecimalDType::new(20, 0);
         let casted = PrimitiveArray::from_iter([u64::MAX])
             .into_array()
-            .cast(DType::Decimal(decimal_dtype, Nullability::NonNullable))?
+            .cast(
+                DType::Decimal(decimal_dtype, Nullability::NonNullable),
+                ctx.session(),
+            )?
             .execute::<DecimalArray>(&mut ctx)?;
 
         assert_eq!(casted.values_type(), DecimalType::I128);
@@ -856,7 +877,7 @@ mod test {
         let dtype = DType::Decimal(DecimalDType::new(38, 20), Nullability::NonNullable);
         let casted = PrimitiveArray::from_iter([u64::MAX])
             .into_array()
-            .cast(dtype)?;
+            .cast(dtype, ctx.session())?;
         let actual = casted.execute::<DecimalArray>(&mut ctx).unwrap_err();
 
         assert!(
@@ -873,7 +894,10 @@ mod test {
         let decimal_dtype = DecimalDType::new(2, -2);
         let casted = PrimitiveArray::from_iter([200u8])
             .into_array()
-            .cast(DType::Decimal(decimal_dtype, Nullability::NonNullable))?
+            .cast(
+                DType::Decimal(decimal_dtype, Nullability::NonNullable),
+                ctx.session(),
+            )?
             .execute::<DecimalArray>(&mut ctx)?;
 
         assert_eq!(casted.values_type(), DecimalType::I8);
@@ -887,7 +911,10 @@ mod test {
         let decimal_dtype = DecimalDType::new(1, -19);
         let casted = PrimitiveArray::from_iter([10_000_000_000_000_000_000u64])
             .into_array()
-            .cast(DType::Decimal(decimal_dtype, Nullability::NonNullable))?
+            .cast(
+                DType::Decimal(decimal_dtype, Nullability::NonNullable),
+                ctx.session(),
+            )?
             .execute::<DecimalArray>(&mut ctx)?;
 
         assert_eq!(casted.values_type(), DecimalType::I8);
@@ -901,7 +928,10 @@ mod test {
         let decimal_dtype = DecimalDType::new(39, 2);
         let casted = PrimitiveArray::from_iter([42i64])
             .into_array()
-            .cast(DType::Decimal(decimal_dtype, Nullability::NonNullable))?
+            .cast(
+                DType::Decimal(decimal_dtype, Nullability::NonNullable),
+                ctx.session(),
+            )?
             .execute::<DecimalArray>(&mut ctx)?;
 
         assert_eq!(casted.values_type(), DecimalType::I256);
@@ -915,7 +945,10 @@ mod test {
         let decimal_dtype = DecimalDType::new(39, 2);
         let casted = PrimitiveArray::new(buffer![i64::MAX, i64::MIN], Validity::AllInvalid)
             .into_array()
-            .cast(DType::Decimal(decimal_dtype, Nullability::Nullable))?
+            .cast(
+                DType::Decimal(decimal_dtype, Nullability::Nullable),
+                ctx.session(),
+            )?
             .execute::<DecimalArray>(&mut ctx)?;
 
         assert!(matches!(casted.validity(), Ok(Validity::AllInvalid)));
@@ -929,14 +962,20 @@ mod test {
         let decimal_dtype = DecimalDType::new(3, -2);
         let casted = PrimitiveArray::from_iter([1_200i32, -500])
             .into_array()
-            .cast(DType::Decimal(decimal_dtype, Nullability::NonNullable))?
+            .cast(
+                DType::Decimal(decimal_dtype, Nullability::NonNullable),
+                ctx.session(),
+            )?
             .execute::<DecimalArray>(&mut ctx)?;
 
         assert_eq!(casted.buffer::<i16>().as_ref(), &[12, -5]);
 
         let error = PrimitiveArray::from_iter([42i32])
             .into_array()
-            .cast(DType::Decimal(decimal_dtype, Nullability::NonNullable))?
+            .cast(
+                DType::Decimal(decimal_dtype, Nullability::NonNullable),
+                ctx.session(),
+            )?
             .execute::<DecimalArray>(&mut ctx)
             .unwrap_err();
         assert!(error.to_string().contains("would lose precision"));
@@ -949,7 +988,10 @@ mod test {
         let decimal_dtype = DecimalDType::new(3, -128);
         let casted = PrimitiveArray::from_iter([0i32])
             .into_array()
-            .cast(DType::Decimal(decimal_dtype, Nullability::NonNullable))?
+            .cast(
+                DType::Decimal(decimal_dtype, Nullability::NonNullable),
+                ctx.session(),
+            )?
             .execute::<DecimalArray>(&mut ctx)?;
 
         assert_eq!(casted.buffer::<i16>().as_ref(), &[0]);
@@ -962,7 +1004,10 @@ mod test {
         let decimal_dtype = DecimalDType::new(3, 1);
         let casted = PrimitiveArray::new(buffer![999i32, 42], Validity::from_iter([false, true]))
             .into_array()
-            .cast(DType::Decimal(decimal_dtype, Nullability::Nullable))?
+            .cast(
+                DType::Decimal(decimal_dtype, Nullability::Nullable),
+                ctx.session(),
+            )?
             .execute::<DecimalArray>(&mut ctx)?;
 
         assert_eq!(casted.buffer::<i16>().as_ref()[1], 420);
@@ -976,12 +1021,10 @@ mod test {
     #[test]
     fn cast_integer_to_decimal_checks_precision() -> VortexResult<()> {
         let mut ctx = array_session().create_execution_ctx();
-        let casted = PrimitiveArray::from_iter([100i32])
-            .into_array()
-            .cast(DType::Decimal(
-                DecimalDType::new(2, 1),
-                Nullability::NonNullable,
-            ))?;
+        let casted = PrimitiveArray::from_iter([100i32]).into_array().cast(
+            DType::Decimal(DecimalDType::new(2, 1), Nullability::NonNullable),
+            ctx.session(),
+        )?;
 
         let error = casted.execute::<DecimalArray>(&mut ctx).unwrap_err();
         assert!(error.to_string().contains("does not fit in precision"));
@@ -991,12 +1034,10 @@ mod test {
     #[test]
     fn cast_floating_primitive_to_decimal_fails() -> VortexResult<()> {
         let mut ctx = array_session().create_execution_ctx();
-        let casted = PrimitiveArray::from_iter([1.0f64])
-            .into_array()
-            .cast(DType::Decimal(
-                DecimalDType::new(3, 1),
-                Nullability::NonNullable,
-            ))?;
+        let casted = PrimitiveArray::from_iter([1.0f64]).into_array().cast(
+            DType::Decimal(DecimalDType::new(3, 1), Nullability::NonNullable),
+            ctx.session(),
+        )?;
 
         let error = casted.execute::<DecimalArray>(&mut ctx).unwrap_err();
         assert!(
@@ -1012,7 +1053,7 @@ mod test {
         let arr = buffer![-1i32].into_array();
         #[expect(deprecated)]
         let error = arr
-            .cast(PType::U32.into())
+            .cast(PType::U32.into(), &array_session())
             .and_then(|a| a.to_canonical().map(|c| c.into_array()))
             .unwrap_err();
         assert!(matches!(error, VortexError::Compute(..)));
@@ -1025,7 +1066,7 @@ mod test {
         #[expect(deprecated)]
         let err = arr
             .into_array()
-            .cast(PType::I32.into())
+            .cast(PType::I32.into(), &array_session())
             .and_then(|a| a.to_canonical().map(|c| c.into_array()))
             .unwrap_err();
 
@@ -1045,7 +1086,10 @@ mod test {
         );
         let p = arr
             .into_array()
-            .cast(DType::Primitive(PType::U32, Nullability::Nullable))
+            .cast(
+                DType::Primitive(PType::U32, Nullability::Nullable),
+                ctx.session(),
+            )
             .unwrap()
             .execute::<PrimitiveArray>(&mut ctx)
             .unwrap();
@@ -1077,7 +1121,7 @@ mod test {
 
         let dst = src
             .into_array()
-            .cast(PType::I32.into())?
+            .cast(PType::I32.into(), ctx.session())?
             .execute::<PrimitiveArray>(&mut ctx)?;
         let dst_ptr = dst.as_slice::<i32>().as_ptr();
 
@@ -1094,7 +1138,7 @@ mod test {
         let arr = buffer![u32::MAX].into_array();
         #[expect(deprecated)]
         let err = arr
-            .cast(PType::I32.into())
+            .cast(PType::I32.into(), &array_session())
             .and_then(|a| a.to_canonical().map(|c| c.into_array()))
             .unwrap_err();
         assert!(matches!(err, VortexError::Compute(..)));
@@ -1108,7 +1152,10 @@ mod test {
         let arr = PrimitiveArray::new(buffer![0xFFu8, 0xFF], Validity::AllInvalid);
         let casted = arr
             .into_array()
-            .cast(DType::Primitive(PType::I8, Nullability::Nullable))?
+            .cast(
+                DType::Primitive(PType::I8, Nullability::Nullable),
+                ctx.session(),
+            )?
             .execute::<PrimitiveArray>(&mut ctx)?;
         assert_eq!(casted.len(), 2);
         assert!(matches!(casted.validity(), Ok(Validity::AllInvalid)));
@@ -1128,7 +1175,10 @@ mod test {
         );
         let casted = arr
             .into_array()
-            .cast(DType::Primitive(PType::I32, Nullability::Nullable))?
+            .cast(
+                DType::Primitive(PType::I32, Nullability::Nullable),
+                ctx.session(),
+            )?
             .execute::<PrimitiveArray>(&mut ctx)?;
         assert_arrays_eq!(
             casted,
@@ -1147,7 +1197,10 @@ mod test {
         );
         let casted = arr
             .into_array()
-            .cast(DType::Primitive(PType::U8, Nullability::Nullable))?
+            .cast(
+                DType::Primitive(PType::U8, Nullability::Nullable),
+                ctx.session(),
+            )?
             .execute::<PrimitiveArray>(&mut ctx)?;
         assert_arrays_eq!(
             casted,

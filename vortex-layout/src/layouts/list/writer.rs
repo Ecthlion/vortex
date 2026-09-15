@@ -292,7 +292,10 @@ fn global_offsets(
     first: bool,
     exec_ctx: &mut ExecutionCtx,
 ) -> VortexResult<ArrayRef> {
-    let widened = offsets.cast(DType::Primitive(PType::U64, Nullability::NonNullable))?;
+    let widened = offsets.cast(
+        DType::Primitive(PType::U64, Nullability::NonNullable),
+        exec_ctx.session(),
+    )?;
     let based = if element_base == 0 {
         widened
     } else {

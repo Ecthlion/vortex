@@ -66,8 +66,12 @@ impl ZipKernel for ListView {
 
         // `if_false`'s elements share the element dtype up to nullability; normalize so both chunks
         // of the concatenated elements array have an identical dtype.
-        let true_elements = if_true.elements().cast(result_elements_dtype.clone())?;
-        let false_elements = if_false.elements().cast(result_elements_dtype.clone())?;
+        let true_elements = if_true
+            .elements()
+            .cast(result_elements_dtype.clone(), ctx.session())?;
+        let false_elements = if_false
+            .elements()
+            .cast(result_elements_dtype.clone(), ctx.session())?;
 
         // `if_false` views index into the second half of the concatenated elements.
         let false_shift = true_elements.len() as u64;
@@ -202,7 +206,10 @@ fn push_element_chunks(array: ArrayRef, chunks: &mut Vec<ArrayRef>) {
 fn to_u64(array: &ArrayRef, ctx: &mut ExecutionCtx) -> VortexResult<Buffer<u64>> {
     array
         .clone()
-        .cast(DType::Primitive(PType::U64, Nullability::NonNullable))?
+        .cast(
+            DType::Primitive(PType::U64, Nullability::NonNullable),
+            ctx.session(),
+        )?
         .execute::<Buffer<u64>>(ctx)
 }
 

@@ -8,19 +8,24 @@ use vortex_array::builtins::ArrayBuiltins;
 use vortex_array::dtype::DType;
 use vortex_array::scalar_fn::fns::cast::CastReduce;
 use vortex_error::VortexResult;
+use vortex_session::VortexSession;
 
 use crate::r#for::FoR;
 use crate::r#for::array::FoRArrayExt;
 use crate::r#for::array::FoRArraySlotsExt;
 impl CastReduce for FoR {
-    fn cast(array: ArrayView<'_, Self>, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
+    fn cast(
+        array: ArrayView<'_, Self>,
+        dtype: &DType,
+        session: &VortexSession,
+    ) -> VortexResult<Option<ArrayRef>> {
         // FoR only supports integer types
         if !dtype.is_int() {
             return Ok(None);
         }
 
         // For type changes between integers, cast the components
-        let casted_child = array.encoded().cast(dtype.clone())?;
+        let casted_child = array.encoded().cast(dtype.clone(), session)?;
         let casted_reference = array.reference_scalar().cast(dtype)?;
 
         Ok(Some(
@@ -71,7 +76,10 @@ mod tests {
 
         let casted = for_array
             .into_array()
-            .cast(DType::Primitive(PType::I64, Nullability::NonNullable))
+            .cast(
+                DType::Primitive(PType::I64, Nullability::NonNullable),
+                &SESSION,
+            )
             .unwrap();
         assert_eq!(
             casted.dtype(),
@@ -93,7 +101,10 @@ mod tests {
 
         let casted = for_array
             .into_array()
-            .cast(DType::Primitive(PType::I64, Nullability::Nullable))
+            .cast(
+                DType::Primitive(PType::I64, Nullability::Nullable),
+                &SESSION,
+            )
             .unwrap();
         assert_eq!(
             casted.dtype(),
