@@ -149,14 +149,16 @@ DUMMY = """
 #if defined(VORTEX_FAKE_LINK) || defined(NANOARROW_FAKE_LINK) || defined(CUDA_FAKE_LINK) || defined(NVTX_FAKE_LINK)
 #error Private adapter dependency usage requirements leaked
 #endif
-#if defined(CUDF_WITH_VORTEX) || defined(CUDF_NDSH_WITH_VORTEX)
-#error Unexpected benchmark Vortex definition
+#if defined(EXPECT_VORTEX) != defined(KVIKIO_FAKE_LINK) || defined(EXPECT_VORTEX) != defined(CUDF_WITH_VORTEX)
+#error Query dependency or opt-in definition missing or leaked
 #endif
-#if defined(EXPECT_VORTEX) != defined(KVIKIO_FAKE_LINK) || defined(EXPECT_VORTEX) != defined(CUDF_NDSH_QUERY_EXTENSION)
-#error Query dependency or extension missing or leaked
+#ifdef CUDF_WITH_VORTEX
+#if CUDF_WITH_VORTEX != 1
+#error Query opt-in definition must be 1
 #endif
-#ifdef EXPECT_VORTEX
-#include CUDF_NDSH_QUERY_EXTENSION
+#include "utilities.hpp"
+int ndsh_vortex_io_stub();
+int main() { return ndsh_vortex_io_stub(); }
 #else
 int main() { return 0; }
 #endif
@@ -169,7 +171,7 @@ IO_STUB = """
 #if !defined(VORTEX_FAKE_LINK) || !defined(NANOARROW_FAKE_LINK) || !defined(CUDA_FAKE_LINK) || !defined(NVTX_FAKE_LINK)
 #error Missing private adapter dependency usage requirements
 #endif
-#if defined(CUDF_NDSH_QUERY_EXTENSION) || defined(CUDF_WITH_VORTEX) || defined(CUDF_NDSH_WITH_VORTEX) || defined(EXPECT_VORTEX) || defined(KVIKIO_FAKE_LINK)
+#if defined(CUDF_WITH_VORTEX) || defined(EXPECT_VORTEX) || defined(KVIKIO_FAKE_LINK)
 #error Benchmark definitions leaked into the adapter
 #endif
 int ndsh_vortex_io_stub() { return 0; }
@@ -198,13 +200,7 @@ class BuildIntegrationTests(unittest.TestCase):
         for path in (MODULE, SMOKE, IO_TEST):
             self.write(self.fake / path, (ROOT / path).read_text(encoding="utf-8"))
         self.write(self.fake / IO, IO_STUB)
-        for query in QUERIES:
-            self.write(
-                self.fake / SOURCES / f"q{query:02}.inc",
-                '#include "utilities.hpp"\n'
-                "int ndsh_vortex_io_stub();\n"
-                "int main() { return ndsh_vortex_io_stub(); }\n",
-            )
+
         self.write(NDSH / "utilities.hpp", "// Requires the query's private upstream include directory.\n")
         sources = patch_postimages()
         option, hook = patch_hook(sources)
@@ -314,7 +310,12 @@ class BuildIntegrationTests(unittest.TestCase):
 
 class BenchmarkSourceTests(unittest.TestCase):
     def source(self, path, function=None):
-        source = (ROOT / path).read_text(encoding="utf-8")
+        if path.parent == NDSH:
+            sources = patch_postimages()
+            self.assertIn(path, sources, f"Missing exported patch postimage: {path}")
+            source = sources[path]
+        else:
+            source = (ROOT / path).read_text(encoding="utf-8")
         if function is not None:
             # These free functions end at column zero; nested scopes stay indented.
             source = self.require_match(
@@ -345,7 +346,7 @@ class BenchmarkSourceTests(unittest.TestCase):
         sync = r"CUDF_CUDA_TRY\(cudaStreamSynchronize\(stream.get\(\)\)\);"
         for query in QUERIES:
             with self.subTest(query=query):
-                local = self.source(SOURCES / f"q{query:02}.inc", f"ndsh_q{query}_local")
+                local = self.source(NDSH / f"q{query:02}.cpp", f"ndsh_q{query}_local")
                 execution = self.require_match(
                     local,
                     r"ndsh::exec_local_benchmark\(\s*state, files.tables, use_vortex, cold, \[&\] \{ (.*) \}\);",

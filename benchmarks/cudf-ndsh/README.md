@@ -134,12 +134,12 @@ and separately labeled baselines.
 
 ## Maintaining the integration
 
-- [`src/vortex_ndsh/`](src/vortex_ndsh/) owns the adapter, local benchmarks, CPU
-  references, and fixture/cache helpers. Each `qNN.inc` is included once, after its cuDF
-  query definitions through the target-private `CUDF_NDSH_QUERY_EXTENSION`, reusing
-  the query implementation rather than copying it.
+- [`src/vortex_ndsh/`](src/vortex_ndsh/) owns the adapter, CPU references, and shared
+  fixture/cache helpers. The cuDF patch defines the local comparison benchmarks directly
+  in `cpp/benchmarks/ndsh/qNN.cpp`, alongside the original Parquet benchmarks, guarded
+  by `CUDF_WITH_VORTEX`. Both reuse the same query implementation.
 - [`vortex.cmake`](vortex.cmake) owns build/benchmark wiring;
-  [`tests/`](tests/) contains the adapter and smoke executables. The cuDF patch owns
+  [`tests/`](tests/) contains the adapter and smoke executables. The cuDF patch also owns
   query reader/consumer callbacks, named-table generation, and the opt-in CPM loader.
 - Edit cuDF integration in ignored `build/cudf-ndsh-src`, based on
   `5339497a1a17d799687cbf189fb113411fb015ca`; do not modify `/home/ubuntu/cudf`.

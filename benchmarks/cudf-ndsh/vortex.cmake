@@ -26,8 +26,7 @@ block()
   foreach(query IN ITEMS 01 05 06 09 10)
     target_link_libraries(NDSH_Q${query}_NVBENCH PRIVATE NDSH_VORTEX_IO kvikio::kvikio)
     target_include_directories(NDSH_Q${query}_NVBENCH PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/ndsh")
-    target_compile_definitions(NDSH_Q${query}_NVBENCH
-                               PRIVATE CUDF_NDSH_QUERY_EXTENSION="vortex_ndsh/q${query}.inc")
+    target_compile_definitions(NDSH_Q${query}_NVBENCH PRIVATE CUDF_WITH_VORTEX=1)
   endforeach()
 
   # Explicit targets: exercise real cuDF, C++ wrapper, and CUDA FFI symbols before building NDS-H.
