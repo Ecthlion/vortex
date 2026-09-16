@@ -76,6 +76,14 @@ pub(crate) unsafe trait Record: Copy + Send + Sync + 'static {
 /// Defines a record type of `$bytes` bytes aligned to `$align`, with its `take` and `filter`
 /// kernels. Widths with an AVX2 gather lane name it with `gather = <lane>`.
 macro_rules! record {
+    // Widths with a gather lane ride the AVX2 gather; every other width still runs the scalar
+    // loop compiled with AVX2 enabled so it keeps the wider vector moves.
+    (@avx2_take $lane:ty) => {
+        super::take::avx2::take_avx2::<Self, $lane, I>
+    };
+    (@avx2_take) => {
+        super::take::avx2::take_scalar_avx2::<Self, I>
+    };
     (
         $(#[$meta:meta])*
         $name:ident, $bytes:literal, align = $align:literal $(, gather = $lane:ty)?
@@ -111,18 +119,12 @@ macro_rules! record {
                 indices: &[I],
                 allocator: &BufferAllocatorRef,
             ) -> Buffer<Self> {
-                $(
-                    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-                    if *super::take::HAS_AVX2 {
-                        // SAFETY: AVX2 was detected above, and `Record` guarantees an initialised
-                        // representation the same size as the `$lane` gather lane.
-                        return unsafe {
-                            super::take::avx2::take_avx2::<Self, $lane, I>(
-                                values, indices, allocator,
-                            )
-                        };
-                    }
-                )?
+                #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+                if *super::take::HAS_AVX2 {
+                    // SAFETY: AVX2 was detected above, and `Record` guarantees an initialised
+                    // representation the same size as any gather lane it names.
+                    return unsafe { record!(@avx2_take $($lane)?)(values, indices, allocator) };
+                }
                 take_values_scalar(values, indices, allocator)
             }
 

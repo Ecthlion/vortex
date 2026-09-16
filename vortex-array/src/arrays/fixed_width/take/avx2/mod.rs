@@ -89,6 +89,23 @@ where
     })
 }
 
+/// The scalar take loop compiled with AVX2 enabled, for record widths without a gather lane.
+///
+/// Compiling the loop under `avx2` lets it use VEX-encoded and 256-bit moves for wide records,
+/// which is measurably faster than the baseline `x86-64` codegen for 16 and 32-byte records.
+///
+/// # Safety
+///
+/// The caller must ensure the `avx2` feature is enabled.
+#[target_feature(enable = "avx2")]
+pub(in crate::arrays::fixed_width) unsafe fn take_scalar_avx2<R: Record, I: UnsignedPType>(
+    values: &[R],
+    indices: &[I],
+    allocator: &BufferAllocatorRef,
+) -> Buffer<R> {
+    take_values_scalar(values, indices, allocator)
+}
+
 const fn i32_gather_can_address(values_len: usize) -> bool {
     values_len <= i32::MAX as usize + 1
 }
