@@ -21,7 +21,11 @@ use core::alloc::Layout;
 /// feature) nothing is ever freed; the whole linear memory is reclaimed when the per-decode
 /// instance is dropped.
 pub fn alloc(len: usize) -> *mut u8 {
-    let layout = Layout::from_size_align(len.max(1), 8).expect("allocation too large");
+    // A null return is how the host learns an allocation failed; a size that cannot even be
+    // described as a layout is the same failure, not a panic.
+    let Ok(layout) = Layout::from_size_align(len.max(1), 8) else {
+        return core::ptr::null_mut();
+    };
     // SAFETY: the layout has non-zero size.
     let ptr = unsafe { alloc::alloc::alloc(layout) };
     if ptr.is_null() {

@@ -42,6 +42,7 @@ use vortex_file::WriteOptionsSessionExt;
 use vortex_io::VortexReadAt;
 use vortex_io::session::RuntimeSession;
 use vortex_layout::session::LayoutSession;
+use vortex_session::SessionExt;
 use vortex_session::VortexSession;
 use vortex_wasm::abi::ABI_VERSION;
 use vortex_wasm::embed_kernel;
@@ -79,7 +80,9 @@ fn expected() -> ArrayRef {
 
 /// Write a file of bit-packable integers, optionally embedding the bitpacked kernel.
 async fn write_file(kernel: Option<EmbeddedKernel>) -> VortexResult<ByteBufferMut> {
-    let mut options = writer_session().write_options();
+    // The hand-built writer session registers no editions, and the point here is the encoding the
+    // reader lacks rather than which edition permits it.
+    let mut options = writer_session().write_options().disable_editions();
     if let Some(kernel) = kernel {
         options = options.with_wasm_kernel(kernel);
     }
@@ -175,11 +178,10 @@ async fn kernels_do_not_leak_into_the_callers_session() -> VortexResult<()> {
     scan_all(file).await?;
 
     assert!(
-        session
+        !session
             .get::<ArraySession>()
             .registry()
-            .find(&ArrayId::new(BITPACKED_ID))
-            .is_none(),
+            .contains_key(&ArrayId::from(BITPACKED_ID)),
         "opening a file must not register its kernels on the caller's session"
     );
     Ok(())

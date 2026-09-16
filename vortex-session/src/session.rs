@@ -176,6 +176,16 @@ impl VortexSession {
         Self(SharedSessionVars::default())
     }
 
+    /// Copy this session's variables into a new, independent session.
+    ///
+    /// Unlike [`Clone`], which shares the backing store, a variable registered on either the
+    /// original or the fork is invisible to the other. The variables themselves are shared by
+    /// `Arc`, so one that carries its own shared handle — a registry, say — must be forked and
+    /// re-[`register`](Self::register)ed on the copy for the two sessions to diverge in it.
+    pub fn fork(&self) -> Self {
+        Self(self.0.fork())
+    }
+
     /// Inserts `V::default()` if no variable of type `V` is present yet, copy-on-write.
     ///
     /// The default is constructed *before* the map is updated, so `V::default()` never runs under a

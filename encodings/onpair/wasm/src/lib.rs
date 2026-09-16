@@ -9,26 +9,25 @@
 //! delegate and the kernel returns a single `Materialized` node.
 //!
 //! Serialized parts consumed:
-//! - **metadata**: prost `OnPairMetadata` `{1: uncompressed_lengths_ptype, 2: bits,
-//!   3: dict_size, 4: total_tokens, 5: dict_offsets_ptype, 6: codes_ptype,
-//!   7: codes_offsets_ptype}`;
-//! - **buffers**: `[dict_bytes]` — the dictionary blob, over-padded by
-//!   [`onpair::MAX_TOKEN_SIZE`] so the decoder's fixed-width token read stays in bounds;
-//! - **children**: `[dict_offsets (dict_size + 1), codes (total_tokens),
-//!   codes_offsets (len + 1), uncompressed_lengths (len), [validity]]`.
+//! - **metadata**: prost `OnPairMetadata` `{1: uncompressed_lengths_ptype, 3: dict_size,
+//!   4: codes_len, 5: dict_offsets_ptype, 6: codes_ptype, 7: codes_offsets_ptype}`;
+//! - **buffers**: `[dict_bytes]` — the dictionary blob, read-padded by
+//!   [`onpair::MAX_TOKEN_SIZE`] so the decoder's fixed-width token copy stays in bounds;
+//! - **children**: `[dict_offsets (dict_size + 1), codes (codes_len), codes_offsets (len + 1),
+//!   uncompressed_lengths (len), [validity]]`.
 //!
 //! Every child ptype is read from the metadata rather than assumed: the cascading compressor
-//! narrows these integer children (`codes` to U8 when `bits <= 8`, `dict_offsets` to U16, and so
-//! on), and the recorded ptype is what says how wide they actually are on disk. The kernel widens
-//! them back to the `u32`/`u16` the decoder wants.
+//! narrows these integer children (`codes` to U8 for a small dictionary, `dict_offsets` to U16,
+//! and so on), and the recorded ptype is what says how wide they actually are on disk. The kernel
+//! widens them back to the `u32`/`u16` the decoder wants.
 //!
 //! # Untrusted input
 //!
-//! `onpair::Parts` is documented as built by struct literal from deserialized storage, so its
-//! arrays may be corrupt — and [`onpair::Parts::validate`] exists for exactly that. Calling it
-//! once up front turns a malformed dictionary or an out-of-range code into a clean kernel error
-//! instead of a panic, which in a `panic = "abort"` guest would reach the host as an opaque trap.
-//! The decoder was written for this threat model, so the kernel adds almost nothing to it.
+//! `onpair` was written for exactly this threat model. [`CompactDictionaryView::validate`]
+//! checks the dictionary's offsets, token sizes, and read padding before a view exists at all,
+//! and the decoders bounds-check every code — but they do so by *panicking*, which in a
+//! `panic = "abort"` guest reaches the host as an opaque trap. So the kernel checks the codes
+//! itself first, and a corrupt file becomes a clean kernel error instead.
 //!
 //! # A sliced array reads more than it needs
 //!
@@ -48,8 +47,9 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use onpair::MAX_TOKEN_SIZE;
-use onpair::Parts;
+use onpair::CompactDictionaryView;
+use onpair::DictionaryView;
+use onpair::Token;
 use vortex_wasm_guest::GuestError;
 use vortex_wasm_guest::GuestResult;
 use vortex_wasm_guest::WasmEncoding;
@@ -81,9 +81,8 @@ const VALIDITY: usize = 4;
 #[derive(Default)]
 struct OnPairMeta {
     uncompressed_lengths_ptype: Option<PType>,
-    bits: u32,
     dict_size: u32,
-    total_tokens: u64,
+    codes_len: u64,
     dict_offsets_ptype: Option<PType>,
     codes_ptype: Option<PType>,
     codes_offsets_ptype: Option<PType>,
@@ -105,9 +104,8 @@ fn parse_metadata(bytes: &[u8]) -> GuestResult<OnPairMeta> {
                 meta.uncompressed_lengths_ptype =
                     Some(PType::from_discriminant(v).ok_or(GuestError::new("bad lengths ptype"))?)
             }
-            (2, Field::Varint(v)) => meta.bits = v as u32,
             (3, Field::Varint(v)) => meta.dict_size = v as u32,
-            (4, Field::Varint(v)) => meta.total_tokens = v,
+            (4, Field::Varint(v)) => meta.codes_len = v,
             (5, Field::Varint(v)) => {
                 meta.dict_offsets_ptype = Some(
                     PType::from_discriminant(v).ok_or(GuestError::new("bad dict offsets ptype"))?,
@@ -139,11 +137,11 @@ fn widen_u32(values: &PrimitiveView) -> GuestResult<Vec<u32>> {
         .collect()
 }
 
-/// Widen a narrowed integer child to `u16`, the width `onpair` wants for codes.
-fn widen_u16(values: &PrimitiveView, range: core::ops::Range<usize>) -> GuestResult<Vec<u16>> {
+/// Widen a narrowed integer child to [`Token`], the width `onpair` wants for codes.
+fn widen_tokens(values: &PrimitiveView, range: core::ops::Range<usize>) -> GuestResult<Vec<Token>> {
     range
         .map(|i| {
-            u16::try_from(values.value_u64(i))
+            Token::try_from(values.value_u64(i))
                 .map_err(|_| GuestError::new("onpair code exceeds u16"))
         })
         .collect()
@@ -162,14 +160,6 @@ impl WasmEncoding for OnPair {
     fn children(header: &NodeHeader<'_>) -> GuestResult<Vec<ChildSpec>> {
         let meta = parse_metadata(header.metadata)?;
         guest_ensure!(
-            (9..=16).contains(&meta.bits),
-            "onpair bits must be in 9..=16"
-        );
-        guest_ensure!(
-            u64::from(meta.dict_size) <= 1u64 << meta.bits,
-            "onpair dict_size exceeds 2^bits"
-        );
-        guest_ensure!(
             header.n_children == 4 || header.n_children == 5,
             "onpair expects 4 or 5 children"
         );
@@ -181,7 +171,7 @@ impl WasmEncoding for OnPair {
         ));
         specs.push(ChildSpec::values(
             DTypeExpr::primitive(OnPairMeta::ptype(meta.codes_ptype), false),
-            meta.total_tokens,
+            meta.codes_len,
         ));
         // Row boundaries into `codes`, so len + 1 like any offsets child.
         specs.push(ChildSpec::values(
@@ -199,8 +189,6 @@ impl WasmEncoding for OnPair {
     }
 
     fn decode(node: &NodeView<'_>, plan: &mut PlanBuilder) -> GuestResult<NodeId> {
-        let meta = parse_metadata(node.metadata)?;
-
         guest_ensure!(node.nbuffers() == 1, "onpair expects one dictionary buffer");
         let dict_bytes = node.buffer(0)?;
 
@@ -242,25 +230,20 @@ impl WasmEncoding for OnPair {
             "onpair codes offsets end exceeds the codes child"
         );
 
+        // The dictionary is validated — offsets, token sizes, read padding — before a view of it
+        // exists at all; this is what turns a corrupt dictionary into an error rather than a
+        // panic the host can only report as a trap.
         let dict_offsets = widen_u32(&dict_offsets)?;
-        let codes = widen_u16(&codes, code_start..code_end)?;
-        let parts = Parts {
-            dict_bytes,
-            dict_offsets: &dict_offsets,
-            bits: meta.bits,
-            codes: &codes,
-        };
+        let dict = CompactDictionaryView::validate(dict_bytes, &dict_offsets)
+            .map_err(|_| GuestError::new("onpair dictionary is malformed"))?;
 
-        // `Parts` is built by struct literal from file bytes, so validate before decoding: this is
-        // what turns a corrupt dictionary or an out-of-range code into an error rather than a
-        // panic the host can only report as a trap. Also confirms the buffer carries the
-        // decoder's trailing padding.
-        parts.validate().map_err(|_| {
-            GuestError::new("onpair parts are not decodable: bad dictionary or out-of-range code")
-        })?;
+        // The decoders bounds-check codes too, but by panicking. Check first so a lying code
+        // stream is a clean error as well.
+        let codes = widen_tokens(&codes, code_start..code_end)?;
+        let ntok = dict.num_tokens();
         guest_ensure!(
-            dict_bytes.len() >= MAX_TOKEN_SIZE || dict_offsets.len() <= 1,
-            "onpair dictionary buffer is missing decoder padding"
+            codes.iter().all(|&code| usize::from(code) < ntok),
+            "onpair code does not index the dictionary"
         );
 
         // The per-row lengths both size the output and split it, so they must agree with what the
@@ -274,14 +257,15 @@ impl WasmEncoding for OnPair {
                 .ok_or(GuestError::new("onpair uncompressed lengths overflow"))?;
         }
         guest_ensure!(
-            total == onpair::decompressed_len(parts),
+            total == onpair::decoded_len(&codes, dict),
             "onpair uncompressed lengths disagree with the codes stream"
         );
 
         let mut out: Vec<u8> = Vec::with_capacity(total);
-        let written = onpair::decompress_into(parts, out.spare_capacity_mut());
+        let written = onpair::try_decode_into(&codes, dict, out.spare_capacity_mut())
+            .map_err(|_| GuestError::new("onpair output buffer too small"))?;
         guest_ensure!(written == total, "onpair decoded an unexpected byte count");
-        // SAFETY: `decompress_into` initialized exactly `written` bytes of the spare capacity
+        // SAFETY: `try_decode_into` initialized exactly `written` bytes of the spare capacity
         // reserved above, and `written == total <= capacity`.
         unsafe { out.set_len(written) };
 

@@ -15,13 +15,16 @@
 //! tag      := kind | (nullable << 6) | (derived << 7)
 //! kind     := 0 Null | 1 Bool | 2 Primitive | 3 Decimal | 4 Utf8 | 5 Binary
 //!           | 6 List | 7 FixedSizeList | 8 Struct | 9 Union | 10 Variant | 11 Extension
+//!           | 12 Map
 //!
 //! Primitive     : u8 ptype
 //! Decimal       : u8 precision, i8 scale
 //! List          : dtype
 //! FixedSizeList : varint size, dtype
 //! Struct        : varint n, n × (varint name_len, utf8 name, dtype)
+//! Union         : varint n, n × (varint name_len, utf8 name, u8 type_id, dtype)
 //! Extension     : varint id_len, utf8 id, varint meta_len, meta, dtype (storage)
+//! Map           : u8 keys_sorted, dtype (key), dtype (value)
 //! others        : ε
 //! ```
 //!
@@ -36,7 +39,8 @@
 //! ```text
 //! Parent          : ε                    the node's own dtype
 //! Field           : varint i, dtype      struct field i of the inner type
-//! Element         : dtype                list / fixed-size-list element of the inner type
+//! Element         : dtype                list / fixed-size-list element, or map entry
+//!                                        struct, of the inner type
 //! Storage         : dtype                storage type of the inner extension type
 //! Nullable        : dtype                the inner type, made nullable
 //! NonNullable     : dtype                the inner type, made non-nullable
@@ -123,12 +127,17 @@ pub enum DTypeKind {
     FixedSizeList(u32),
     /// A struct with `n` fields.
     Struct(usize),
-    /// A union.
-    Union,
+    /// A union with `n` variants.
+    Union(usize),
     /// A dynamically typed value.
     Variant,
     /// A user-defined extension type.
     Extension,
+    /// A map from keys to values; `keys_sorted` says whether each entry's keys are sorted.
+    Map {
+        /// Whether keys within each map value are sorted.
+        keys_sorted: bool,
+    },
 }
 
 /// A borrowed, lazily parsed view of an encoded [`DType`].
@@ -197,9 +206,20 @@ impl<'a> DTypeView<'a> {
                     usize::try_from(n).map_err(|_| GuestError::new("field count overflow"))?,
                 )
             }
-            kind::UNION => DTypeKind::Union,
+            kind::UNION => {
+                let (n, _) = read_varint(payload, 0)?;
+                DTypeKind::Union(
+                    usize::try_from(n).map_err(|_| GuestError::new("variant count overflow"))?,
+                )
+            }
             kind::VARIANT => DTypeKind::Variant,
             kind::EXTENSION => DTypeKind::Extension,
+            kind::MAP => DTypeKind::Map {
+                keys_sorted: *payload
+                    .first()
+                    .ok_or(GuestError::new("truncated map dtype"))?
+                    != 0,
+            },
             _ => return Err(GuestError::new("bad dtype kind")),
         })
     }
@@ -225,6 +245,28 @@ impl<'a> DTypeView<'a> {
             _ => return Err(GuestError::new("dtype is not a list")),
         };
         Self::new(&self.bytes[payload_start..])
+    }
+
+    /// The key type of a `Map`.
+    pub fn map_key(&self) -> GuestResult<DTypeView<'a>> {
+        if !matches!(self.kind()?, DTypeKind::Map { .. }) {
+            return Err(GuestError::new("dtype is not a map"));
+        }
+        Self::new(
+            self.bytes
+                .get(2..)
+                .ok_or(GuestError::new("truncated map dtype"))?,
+        )
+    }
+
+    /// The value type of a `Map`.
+    pub fn map_value(&self) -> GuestResult<DTypeView<'a>> {
+        let key = self.map_key()?;
+        Self::new(
+            self.bytes
+                .get(2 + key.encoded_len()?..)
+                .ok_or(GuestError::new("truncated map dtype"))?,
+        )
     }
 
     /// The storage type of an `Extension`.
@@ -267,8 +309,30 @@ impl<'a> DTypeView<'a> {
         let DTypeKind::Struct(n) = self.kind()? else {
             return Err(GuestError::new("dtype is not a struct"));
         };
-        if index >= n {
-            return Err(GuestError::new("struct field index out of bounds"));
+        let (name, _, dtype) = self.named_entry(index, n, false)?;
+        Ok((name, dtype))
+    }
+
+    /// The name, type tag, and type of union variant `index`.
+    ///
+    /// The tag is what the data uses to select the variant; it is not necessarily `index`.
+    pub fn variant(&self, index: usize) -> GuestResult<(&'a [u8], u8, DTypeView<'a>)> {
+        let DTypeKind::Union(n) = self.kind()? else {
+            return Err(GuestError::new("dtype is not a union"));
+        };
+        self.named_entry(index, n, true)
+    }
+
+    /// Entry `index` of a struct or union body: its name, its type tag (0 for a struct), and its
+    /// type. Walks the preceding entries, since they are variable-length.
+    fn named_entry(
+        &self,
+        index: usize,
+        count: usize,
+        with_type_ids: bool,
+    ) -> GuestResult<(&'a [u8], u8, DTypeView<'a>)> {
+        if index >= count {
+            return Err(GuestError::new("dtype entry index out of bounds"));
         }
         let mut offset = 1 + read_varint(&self.bytes[1..], 0)?.1;
         for i in 0..=index {
@@ -278,17 +342,26 @@ impl<'a> DTypeView<'a> {
                 .checked_add(
                     usize::try_from(name_len).map_err(|_| GuestError::new("name too long"))?,
                 )
-                .ok_or(GuestError::new("truncated struct dtype"))?;
+                .ok_or(GuestError::new("truncated dtype entry"))?;
             let name = self
                 .bytes
                 .get(name_start..name_end)
-                .ok_or(GuestError::new("truncated struct field name"))?;
+                .ok_or(GuestError::new("truncated dtype entry name"))?;
+            let (type_id, dtype_start) = if with_type_ids {
+                let tag = *self
+                    .bytes
+                    .get(name_end)
+                    .ok_or(GuestError::new("truncated union type tag"))?;
+                (tag, name_end + 1)
+            } else {
+                (0, name_end)
+            };
             if i == index {
-                return Ok((name, Self::new(&self.bytes[name_end..])?));
+                return Ok((name, type_id, Self::new(&self.bytes[dtype_start..])?));
             }
-            offset = name_end + Self::skip(self.bytes, name_end, 0)?;
+            offset = dtype_start + Self::skip(self.bytes, dtype_start, 0)?;
         }
-        Err(GuestError::new("struct field index out of bounds"))
+        Err(GuestError::new("dtype entry index out of bounds"))
     }
 
     /// The encoded length of the type starting at `offset`.
@@ -301,7 +374,7 @@ impl<'a> DTypeView<'a> {
             .ok_or(GuestError::new("truncated dtype"))?;
         let mut len = 1usize;
         match tag & dtype_tag::KIND_MASK {
-            kind::NULL | kind::BOOL | kind::UTF8 | kind::BINARY | kind::UNION | kind::VARIANT => {}
+            kind::NULL | kind::BOOL | kind::UTF8 | kind::BINARY | kind::VARIANT => {}
             kind::PRIMITIVE => len += 1,
             kind::DECIMAL => len += 2,
             kind::LIST => len += Self::skip(bytes, offset + len, depth + 1)?,
@@ -309,14 +382,17 @@ impl<'a> DTypeView<'a> {
                 len += read_varint(bytes, offset + len)?.1;
                 len += Self::skip(bytes, offset + len, depth + 1)?;
             }
-            kind::STRUCT => {
+            kind::STRUCT | kind::UNION => {
+                // Identical bodies, except that each union entry carries a one-byte type tag.
+                let tag_len = usize::from(tag & dtype_tag::KIND_MASK == kind::UNION);
                 let (n, n_bytes) = read_varint(bytes, offset + len)?;
                 len += n_bytes;
                 for _ in 0..n {
                     let (name_len, name_bytes) = read_varint(bytes, offset + len)?;
                     len += name_bytes
                         + usize::try_from(name_len)
-                            .map_err(|_| GuestError::new("name too long"))?;
+                            .map_err(|_| GuestError::new("name too long"))?
+                        + tag_len;
                     len += Self::skip(bytes, offset + len, depth + 1)?;
                 }
             }
@@ -327,6 +403,11 @@ impl<'a> DTypeView<'a> {
                         + usize::try_from(blob_len)
                             .map_err(|_| GuestError::new("extension blob too long"))?;
                 }
+                len += Self::skip(bytes, offset + len, depth + 1)?;
+            }
+            kind::MAP => {
+                len += 1;
+                len += Self::skip(bytes, offset + len, depth + 1)?;
                 len += Self::skip(bytes, offset + len, depth + 1)?;
             }
             _ => return Err(GuestError::new("bad dtype kind")),
@@ -434,6 +515,37 @@ impl DTypeExpr {
         expr
     }
 
+    /// A union of `(name, type_id, dtype)` variants.
+    ///
+    /// `type_id` is the tag the data uses to select the variant, and need not be its position.
+    pub fn union_(
+        variants: impl IntoIterator<Item = (&'static str, u8, DTypeExpr)>,
+        nullable: bool,
+    ) -> Self {
+        let mut body = Vec::new();
+        let mut n = 0u64;
+        for (name, type_id, dtype) in variants {
+            write_varint(&mut body, name.len() as u64);
+            body.extend_from_slice(name.as_bytes());
+            body.push(type_id);
+            body.extend_from_slice(&dtype.bytes);
+            n += 1;
+        }
+        let mut expr = Self::literal(kind::UNION, nullable);
+        write_varint(&mut expr.bytes, n);
+        expr.bytes.extend_from_slice(&body);
+        expr
+    }
+
+    /// A map from `key` to `value`. Keys must be non-nullable.
+    pub fn map(key: DTypeExpr, value: DTypeExpr, keys_sorted: bool, nullable: bool) -> Self {
+        let mut expr = Self::literal(kind::MAP, nullable);
+        expr.bytes.push(u8::from(keys_sorted));
+        expr.bytes.extend_from_slice(&key.bytes);
+        expr.bytes.extend_from_slice(&value.bytes);
+        expr
+    }
+
     fn derived(op: u8, inner: DTypeExpr) -> Self {
         let mut bytes = Vec::with_capacity(1 + inner.bytes.len());
         bytes.push(dtype_tag::DERIVED | op);
@@ -450,7 +562,7 @@ impl DTypeExpr {
         Self { bytes }
     }
 
-    /// The element type of the list `inner`.
+    /// The element type of the list `inner`, or the `{key, value}` entry struct of the map `inner`.
     pub fn element(inner: DTypeExpr) -> Self {
         Self::derived(derive_op::ELEMENT, inner)
     }

@@ -33,11 +33,13 @@ use vortex_fastlanes::BitPackedData;
 use vortex_fsst::FSST;
 use vortex_fsst::fsst_compress;
 use vortex_fsst::fsst_train_compressor;
-use vortex_onpair::DEFAULT_DICT12_CONFIG;
+use vortex_onpair::DEFAULT_CONFIG;
 use vortex_onpair::OnPair;
 use vortex_onpair::onpair_compress;
 use vortex_runend::RunEnd;
 use vortex_runend::RunEndArrayExt;
+use vortex_runend::RunEndArraySlotsExt;
+use vortex_session::SessionExt;
 use vortex_session::VortexSession;
 use vortex_session::registry::ReadContext;
 use vortex_wasm::register_wasm_encodings;
@@ -48,7 +50,7 @@ const BITPACKED_KERNEL: &[u8] = include_bytes!("fixtures/bitpacked_kernel.wasm")
 const FSST_KERNEL: &[u8] = include_bytes!("fixtures/fsst_kernel.wasm");
 /// The `vortex.runend` kernel (`encodings/runend/wasm`).
 const RUNEND_KERNEL: &[u8] = include_bytes!("fixtures/runend_kernel.wasm");
-/// The `vortex.onpair` kernel (`encodings/experimental/onpair/wasm`).
+/// The `vortex.onpair` kernel (`encodings/onpair/wasm`).
 const ONPAIR_KERNEL: &[u8] = include_bytes!("fixtures/onpair_kernel.wasm");
 
 /// Serialize `array` exactly as a file would, then deserialize it in a session that has no native
@@ -379,7 +381,7 @@ fn onpair_decodes_via_wasm() -> VortexResult<()> {
         .map(|i| format!("/api/v2/orders/{}/items/{}", i % 64, i % 9))
         .collect();
     let array = VarBinViewArray::from_iter_str(strings.iter()).into_array();
-    let compressed = onpair_compress(&array, DEFAULT_DICT12_CONFIG, &mut ctx)?;
+    let compressed = onpair_compress(&array, DEFAULT_CONFIG, &mut ctx)?;
 
     let decoded = round_trip_via_wasm(
         compressed.into_array(),
@@ -401,7 +403,7 @@ fn onpair_nullable_decodes_via_wasm() -> VortexResult<()> {
         .collect();
     let array =
         VarBinViewArray::from_iter_nullable_str(strings.iter().map(|s| s.as_deref())).into_array();
-    let compressed = onpair_compress(&array, DEFAULT_DICT12_CONFIG, &mut ctx)?;
+    let compressed = onpair_compress(&array, DEFAULT_CONFIG, &mut ctx)?;
 
     let decoded = round_trip_via_wasm(
         compressed.into_array(),
@@ -424,7 +426,7 @@ fn onpair_sliced_decodes_via_wasm() -> VortexResult<()> {
         .map(|i| format!("shard-{}/part-{}.parquet", i % 48, i % 11))
         .collect();
     let array = VarBinViewArray::from_iter_str(strings.iter()).into_array();
-    let compressed = onpair_compress(&array, DEFAULT_DICT12_CONFIG, &mut ctx)?;
+    let compressed = onpair_compress(&array, DEFAULT_CONFIG, &mut ctx)?;
     let sliced = compressed.into_array().slice(137..298)?;
     let expected = VarBinViewArray::from_iter_str(strings[137..298].iter()).into_array();
 

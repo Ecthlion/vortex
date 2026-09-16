@@ -259,7 +259,7 @@ impl Plan {
                     ctx.dtype,
                 )?;
                 let (descriptor, _) = ArrayDescriptor::parse(&self.aux, offset + consumed)?;
-                descriptor.build(guest_mem, &dtype)
+                descriptor.build(guest_mem, &dtype, exec)
             }
             OP_CHILD => (ctx.child)(usize::try_from(node.a)?),
             OP_TAKE => {

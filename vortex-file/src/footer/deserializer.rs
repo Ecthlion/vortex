@@ -253,7 +253,6 @@ impl FooterDeserializer {
 
         Ok(DeserializeStep::Done(self.parse_footer(
             initial_offset,
-            &self.buffer,
             &footer_segment,
             &layout_segment,
             dtype,
@@ -405,13 +404,13 @@ impl FooterDeserializer {
     fn parse_footer(
         &self,
         initial_offset: u64,
-        initial_read: &[u8],
         footer_segment: &PostscriptSegment,
         layout_segment: &PostscriptSegment,
         dtype: DType,
         file_stats: Option<FileStatistics>,
         metadata: Arc<[(String, SegmentSpec)]>,
     ) -> VortexResult<Footer> {
+        let initial_read = self.buffer.as_slice();
         let footer_bytes = checked_segment_slice(initial_read, initial_offset, footer_segment)?;
 
         let layout_bytes = FlatBuffer::copy_from(checked_segment_slice(

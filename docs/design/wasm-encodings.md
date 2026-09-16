@@ -55,7 +55,7 @@ pure decode libraries so semantics match by construction:
 | `encodings/fastlanes/wasm` | `fastlanes.bitpacked` | the [`fastlanes`] crate's unpack kernels |
 | `encodings/runend/wasm` | `vortex.runend` | nothing — it gathers instead of decoding (5.9 KB) |
 | `encodings/fsst/wasm` | `vortex.fsst` | [`fsst`] (fsst-rs)'s `Decompressor` |
-| `encodings/experimental/onpair/wasm` | `vortex.onpair` | the [`onpair`] crate's `decompress_into` |
+| `encodings/onpair/wasm` | `vortex.onpair` | the [`onpair`] crate's `try_decode_into` |
 
 The kernel crates are workspace-excluded (they carry their own size-optimized release profiles
 and build standalone for `wasm32-unknown-unknown`); the parity contract with the native encoding
@@ -106,8 +106,8 @@ properties fall out of where the id lives:
   `vortex-file`.
 - **A file's kernels are scoped to that file.** The loader forks the array registry rather than
   registering into the caller's session, so two files using the same encoding id cannot end up
-  decoded by each other's code. (`Registry::clone` shares its map; `Registry::fork` is the
-  independent copy this needs.)
+  decoded by each other's code. (Cloning a session or an `ArraySession` shares the underlying
+  map; `VortexSession::fork` and `ArraySession::fork` are the independent copies this needs.)
 
 The declared `abi_version` is checked before the module is compiled, and the module's own
 `vx_abi_version` export is checked before it is run — the first catches a stale kernel cheaply, the
@@ -309,7 +309,7 @@ rebuilds the symbol table with `fsst::Symbol::from_slice` and bulk-decompresses 
 heap with **the same [`fsst`] crate `Decompressor` the native canonical path uses**; the prefix
 sums of the uncompressed lengths are exactly the output utf8 offsets. Blob: **~26 KB**.
 
-### `vortex.onpair` (`encodings/experimental/onpair/wasm`)
+### `vortex.onpair` (`encodings/onpair/wasm`)
 
 OnPair is FSST-shaped — a trained dictionary in buffer 0, a stream of fixed-width codes indexing
 it, per-row code boundaries, per-row uncompressed lengths — so its kernel is the same
@@ -317,18 +317,19 @@ it, per-row code boundaries, per-row uncompressed lengths — so its kernel is t
 recording, because neither was true of the first two kernels.
 
 **Every child ptype comes from the metadata.** The four integer children flow through the ordinary
-cascading compressor, which narrows them: `codes` to U8 when `bits <= 8`, `dict_offsets` to U16 when
-the dictionary is small. The recorded ptype is the only thing that says how wide they are on disk,
-and the kernel widens them back to the `u16`/`u32` the decoder's `Parts` wants. A kernel that
-assumed the natural widths would misread a well-formed file.
+cascading compressor, which narrows them: `codes` to U8 for a small dictionary, `dict_offsets` to
+U16. The recorded ptype is the only thing that says how wide they are on disk, and the kernel widens
+them back to the `u16`/`u32` the decoder wants. A kernel that assumed the natural widths would
+misread a well-formed file.
 
-**The decoder was already written for untrusted input.** `onpair::Parts` is built by struct literal
-from deserialized bytes, so the crate provides `Parts::validate` — dictionary offsets strictly
-increasing, no token over `MAX_TOKEN_SIZE`, the trailing decoder padding present, every code in
-range. The kernel calls it once before decoding, which is what turns a corrupt file into a clean
-error rather than a guest panic the host can only report as an opaque trap. It also cross-checks the
-sum of `uncompressed_lengths` against `decompressed_len(parts)`, since those two independently
-describe the same output and only agree if the file is honest. Blob: **~28 KB**.
+**The decoder was already written for untrusted input — but it panics.** `onpair` validates the
+dictionary (`CompactDictionaryView::validate`: offsets, token sizes, the trailing read padding)
+before a view of it exists, and its decoders bounds-check every code. The checks are real; the
+failure mode is a panic, which in a `panic = "abort"` guest reaches the host as an opaque trap. So
+the kernel validates the dictionary through the fallible constructor and range-checks the codes
+itself first, and a corrupt file becomes a clean kernel error. It also cross-checks the sum of
+`uncompressed_lengths` against `decoded_len`, since those two independently describe the same
+output and only agree if the file is honest. Blob: **~28 KB**.
 
 The one wart is a dependency, not a design problem: `onpair` links `rand` for dictionary *training*,
 which pulls `getrandom`, which refuses to build for `wasm32-unknown-unknown` without a backend. The

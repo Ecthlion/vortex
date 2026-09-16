@@ -17,6 +17,7 @@ use vortex_error::vortex_bail;
 use vortex_file::EmbeddedKernel;
 use vortex_file::EmbeddedKernelLoader;
 use vortex_file::EmbeddedKernelSession;
+use vortex_session::SessionExt;
 use vortex_session::VortexSession;
 
 use crate::WasmEncodingPlugin;
@@ -54,24 +55,25 @@ impl EmbeddedKernelLoader for WasmKernelLoader {
                 );
             }
             arrays.register(WasmEncodingPlugin::try_new(
-                ArrayId::new(kernel.id()),
+                ArrayId::from(kernel.id()),
                 kernel.module().as_slice(),
             )?);
         }
 
-        let mut builder = session.to_builder();
-        *builder.get_mut::<ArraySession>() = arrays;
-        Ok(builder.build())
+        // A forked session shares nothing with the caller's, so installing the forked registry on
+        // it leaves the caller's encodings exactly as they were.
+        let scoped = session.fork();
+        scoped.register(arrays);
+        Ok(scoped)
     }
 }
 
 /// Install [`WasmKernelLoader`] on `session`, so files opened with it may supply their own
 /// decoders.
 pub fn with_wasm_kernel_loader(session: VortexSession) -> VortexSession {
-    let mut builder = session.to_builder();
-    *builder.get_mut::<EmbeddedKernelSession>() =
+    *session.get_mut::<EmbeddedKernelSession>() =
         EmbeddedKernelSession::new(Arc::new(WasmKernelLoader));
-    builder.build()
+    session
 }
 
 /// Prepare a `.wasm` module for embedding in a Vortex file as the decoder for encoding `id`.

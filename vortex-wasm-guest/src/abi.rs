@@ -113,13 +113,16 @@ pub mod dtype_kind {
     pub const FIXED_SIZE_LIST: u8 = 7;
     /// A struct; payload is a varint field count then `(varint name_len, name, dtype)` each.
     pub const STRUCT: u8 = 8;
-    /// A union.
+    /// A union; payload is a varint variant count then `(varint name_len, name, u8 type_id,
+    /// dtype)` each.
     pub const UNION: u8 = 9;
     /// A dynamically typed value.
     pub const VARIANT: u8 = 10;
     /// An extension type; payload is a varint-prefixed id, varint-prefixed metadata, and the
     /// storage dtype.
     pub const EXTENSION: u8 = 11;
+    /// A map; payload is a `u8` keys-sorted flag, the key dtype, then the value dtype.
+    pub const MAP: u8 = 12;
 }
 
 /// Derivation opcodes: a type named as a path from the parent rather than spelled out.

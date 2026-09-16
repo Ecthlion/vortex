@@ -81,7 +81,7 @@ exclude = [
     "encodings/fastlanes/wasm",
     "encodings/fsst/wasm",
     "encodings/runend/wasm",
-    "encodings/experimental/onpair/wasm",
+    "encodings/onpair/wasm",
 ]
 resolver = "3"
 

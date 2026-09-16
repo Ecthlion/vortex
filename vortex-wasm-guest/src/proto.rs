@@ -79,7 +79,10 @@ impl<'a> ProtoReader<'a> {
             0 => Field::Varint(self.varint()?),
             1 => {
                 let bytes = self.take(8)?;
-                Field::Fixed64(u64::from_le_bytes(bytes.try_into().expect("8 bytes")))
+                let bytes = bytes
+                    .try_into()
+                    .map_err(|_| GuestError::new("proto: truncated fixed64"))?;
+                Field::Fixed64(u64::from_le_bytes(bytes))
             }
             2 => {
                 let len = usize::try_from(self.varint()?)
@@ -88,7 +91,10 @@ impl<'a> ProtoReader<'a> {
             }
             5 => {
                 let bytes = self.take(4)?;
-                Field::Fixed32(u32::from_le_bytes(bytes.try_into().expect("4 bytes")))
+                let bytes = bytes
+                    .try_into()
+                    .map_err(|_| GuestError::new("proto: truncated fixed32"))?;
+                Field::Fixed32(u32::from_le_bytes(bytes))
             }
             _ => return Err(GuestError::new("proto: unsupported wire type")),
         };

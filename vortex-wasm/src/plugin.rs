@@ -22,20 +22,20 @@
 
 use std::sync::Arc;
 
+use vortex_array::ArrayDeserialization;
 use vortex_array::ArrayId;
 use vortex_array::ArrayPlugin;
 use vortex_array::ArrayRef;
+use vortex_array::ArraySerialization;
 use vortex_array::Canonical;
 use vortex_array::VortexSessionExecute;
-use vortex_array::buffer::BufferHandle;
-use vortex_array::dtype::DType;
-use vortex_array::serde::ArrayChildren;
 use vortex_array::session::ArraySession;
 use vortex_buffer::ByteBuffer;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 use vortex_error::vortex_ensure;
 use vortex_error::vortex_err;
+use vortex_session::SessionExt;
 use vortex_session::VortexSession;
 
 use crate::ChildMode;
@@ -78,7 +78,7 @@ impl ArrayPlugin for WasmEncodingPlugin {
         &self,
         _array: &ArrayRef,
         _session: &VortexSession,
-    ) -> VortexResult<Option<Vec<u8>>> {
+    ) -> VortexResult<Option<ArraySerialization>> {
         // Deserialization returns the decoded (canonical) array, so no array ever carries this
         // plugin's encoding id in memory; writing the encoding happens through the native VTable.
         vortex_bail!(
@@ -89,13 +89,18 @@ impl ArrayPlugin for WasmEncodingPlugin {
 
     fn deserialize(
         &self,
-        dtype: &DType,
-        len: usize,
-        metadata: &[u8],
-        buffers: &[BufferHandle],
-        children: &dyn ArrayChildren,
+        parts: ArrayDeserialization<'_>,
         session: &VortexSession,
     ) -> VortexResult<ArrayRef> {
+        // The plugin is registered under exactly one wire id, so `serialized_id` is always ours.
+        let ArrayDeserialization {
+            serialized_id: _,
+            dtype,
+            len,
+            metadata,
+            buffers,
+            children,
+        } = parts;
         let mut ctx = session.create_execution_ctx();
 
         let buffers: Vec<ByteBuffer> = buffers
@@ -180,8 +185,8 @@ pub fn register_wasm_encodings(
     let arrays = session.get::<ArraySession>();
     let mut registered = Vec::new();
     for (id, wasm_bytes) in kernels {
-        let array_id = ArrayId::new(&id);
-        if arrays.registry().find(&array_id).is_some() {
+        let array_id = ArrayId::from(id.as_str());
+        if arrays.registry().contains_key(&array_id) {
             // The reader has a native decoder for this encoding; it supersedes the kernel.
             continue;
         }

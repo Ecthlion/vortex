@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 # The embeddable WASM decoder kernel for `vortex.onpair`, living alongside the native encoding in
-# `encodings/experimental/onpair`. It links the same `onpair` crate the native VTable uses, so
+# `encodings/onpair`. It links the same `onpair` crate the native VTable uses, so
 # decompression semantics are identical by construction. Build with:
 #   cargo build --target wasm32-unknown-unknown --release
 #
@@ -21,14 +21,14 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-onpair = "0.0.4"
+onpair = "0.2.1"
 # `onpair` pulls `rand` for *training*, which pulls `getrandom`, which has no backend for
 # wasm32-unknown-unknown. `.cargo/config.toml` selects the custom backend and `src/lib.rs`
 # supplies the shim; a decoder kernel never draws randomness. Dropping this dependency needs a
 # `train`/`compress` feature gate upstream.
 getrandom = "0.3"
 # `runtime` off: `onpair` links `std`, so the SDK's allocator/panic handler would collide.
-vortex-wasm-guest = { path = "../../../../vortex-wasm-guest", default-features = false }
+vortex-wasm-guest = { path = "../../../vortex-wasm-guest", default-features = false }
 
 [profile.release]
 opt-level = "z"

@@ -20,9 +20,11 @@
 use vortex_array::dtype::DType;
 use vortex_array::dtype::DecimalDType;
 use vortex_array::dtype::FieldName;
+use vortex_array::dtype::MapDType;
 use vortex_array::dtype::Nullability;
 use vortex_array::dtype::PType;
 use vortex_array::dtype::StructFields;
+use vortex_array::dtype::UnionVariants;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 use vortex_error::vortex_ensure;
@@ -46,6 +48,7 @@ const KIND_STRUCT: u8 = 8;
 const KIND_UNION: u8 = 9;
 const KIND_VARIANT: u8 = 10;
 const KIND_EXTENSION: u8 = 11;
+const KIND_MAP: u8 = 12;
 
 /// Derivation opcodes, mirroring the guest SDK's `abi::dtype_derivation`.
 const DERIVE_PARENT: u8 = 0;
@@ -62,7 +65,8 @@ const DERIVE_NON_NULLABLE: u8 = 5;
 /// few hundred bytes of nested `List` tags and overflow the host stack.
 pub(crate) const MAX_DEPTH: usize = 32;
 
-/// Cap on struct fields in a guest-written type, so a varint count cannot drive an unbounded loop.
+/// Cap on struct fields or union variants in a guest-written type, so a varint count cannot
+/// drive an unbounded loop.
 const MAX_FIELDS: usize = 4096;
 
 fn write_varint(out: &mut Vec<u8>, mut value: u64) {
@@ -146,7 +150,24 @@ fn encode_into(out: &mut Vec<u8>, dtype: &DType, depth: usize) -> VortexResult<(
                 encode_into(out, &field, depth + 1)?;
             }
         }
-        DType::Union(_) => out.push(KIND_UNION | n),
+        DType::Union(variants, _) => {
+            // A struct entry plus the variant's type tag, which the data uses to select it and
+            // need not be the variant's position.
+            out.push(KIND_UNION | n);
+            write_varint(out, variants.len() as u64);
+            for ((name, variant), type_id) in variants
+                .names()
+                .iter()
+                .zip(variants.variants())
+                .zip(variants.type_ids())
+            {
+                let name = name.as_ref();
+                write_varint(out, name.len() as u64);
+                out.extend_from_slice(name.as_bytes());
+                out.push(*type_id);
+                encode_into(out, &variant, depth + 1)?;
+            }
+        }
         DType::Variant(_) => out.push(KIND_VARIANT | n),
         DType::Extension(ext) => {
             out.push(KIND_EXTENSION | n);
@@ -158,6 +179,12 @@ fn encode_into(out: &mut Vec<u8>, dtype: &DType, depth: usize) -> VortexResult<(
             // could rebuild the vtable anyway.
             write_varint(out, 0);
             encode_into(out, ext.storage_dtype(), depth + 1)?;
+        }
+        DType::Map(map, _) => {
+            out.push(KIND_MAP | n);
+            out.push(u8::from(map.keys_sorted()));
+            encode_into(out, &map.key_dtype(), depth + 1)?;
+            encode_into(out, &map.value_dtype(), depth + 1)?;
         }
     }
     Ok(())
@@ -229,35 +256,22 @@ fn decode_at(
             DType::FixedSizeList(element.into(), u32::try_from(size)?, nullability)
         }
         KIND_STRUCT => {
-            let (n_fields, n) = read_varint(bytes, offset + consumed)?;
+            let (entries, n) =
+                decode_named_entries(bytes, offset + consumed, parent, depth, false)?;
             consumed += n;
-            let n_fields = usize::try_from(n_fields)?;
-            vortex_ensure!(
-                n_fields <= MAX_FIELDS,
-                "dtype expression declares {n_fields} struct fields, more than the {MAX_FIELDS} allowed"
-            );
-            let mut names: Vec<FieldName> = Vec::with_capacity(n_fields);
-            let mut fields = Vec::with_capacity(n_fields);
-            for _ in 0..n_fields {
-                let (name_len, n) = read_varint(bytes, offset + consumed)?;
-                consumed += n;
-                let name_len = usize::try_from(name_len)?;
-                let name = bytes
-                    .get(offset + consumed..offset + consumed + name_len)
-                    .ok_or_else(|| vortex_err!("truncated struct field name"))?;
-                consumed += name_len;
-                names.push(
-                    std::str::from_utf8(name)
-                        .map_err(|_| vortex_err!("struct field name is not valid UTF-8"))?
-                        .into(),
-                );
-                let (field, n) = decode_at(bytes, offset + consumed, parent, depth + 1)?;
-                consumed += n;
-                fields.push(field);
-            }
-            DType::Struct(StructFields::new(names.into(), fields), nullability)
+            DType::Struct(
+                StructFields::new(entries.names.into(), entries.dtypes),
+                nullability,
+            )
         }
-        KIND_UNION => DType::Union(nullability),
+        KIND_UNION => {
+            let (entries, n) = decode_named_entries(bytes, offset + consumed, parent, depth, true)?;
+            consumed += n;
+            DType::Union(
+                UnionVariants::try_new(entries.names.into(), entries.dtypes, entries.type_ids)?,
+                nullability,
+            )
+        }
         KIND_VARIANT => DType::Variant(nullability),
         KIND_EXTENSION => {
             // Reconstructing an extension type needs its vtable, which lives in a host registry
@@ -267,9 +281,78 @@ fn decode_at(
                 "a kernel cannot write an extension dtype literal; derive it from the parent instead"
             )
         }
+        KIND_MAP => {
+            let keys_sorted = *bytes
+                .get(offset + consumed)
+                .ok_or_else(|| vortex_err!("truncated map dtype"))?
+                != 0;
+            consumed += 1;
+            let (key, n) = decode_at(bytes, offset + consumed, parent, depth + 1)?;
+            consumed += n;
+            let (value, n) = decode_at(bytes, offset + consumed, parent, depth + 1)?;
+            consumed += n;
+            // `try_new` is where a nullable key — which Arrow maps forbid — is rejected.
+            DType::Map(MapDType::try_new(key, value, keys_sorted)?, nullability)
+        }
         other => vortex_bail!("bad dtype kind {other} in a kernel's type expression"),
     };
     Ok((dtype, consumed))
+}
+
+/// The named, typed entries of a struct or union literal.
+struct NamedEntries {
+    names: Vec<FieldName>,
+    dtypes: Vec<DType>,
+    /// Union type tags; empty for a struct.
+    type_ids: Vec<u8>,
+}
+
+/// Decode `varint n, n × (varint name_len, name, [u8 type_id,] dtype)` — the shared body of the
+/// struct and union productions, which differ only in whether each entry carries a type tag.
+fn decode_named_entries(
+    bytes: &[u8],
+    offset: usize,
+    parent: &DType,
+    depth: usize,
+    with_type_ids: bool,
+) -> VortexResult<(NamedEntries, usize)> {
+    let (count, mut consumed) = read_varint(bytes, offset)?;
+    let count = usize::try_from(count)?;
+    vortex_ensure!(
+        count <= MAX_FIELDS,
+        "dtype expression declares {count} named entries, more than the {MAX_FIELDS} allowed"
+    );
+    let mut entries = NamedEntries {
+        names: Vec::with_capacity(count),
+        dtypes: Vec::with_capacity(count),
+        type_ids: Vec::with_capacity(if with_type_ids { count } else { 0 }),
+    };
+    for _ in 0..count {
+        let (name_len, n) = read_varint(bytes, offset + consumed)?;
+        consumed += n;
+        let name_len = usize::try_from(name_len)?;
+        let name = bytes
+            .get(offset + consumed..offset + consumed + name_len)
+            .ok_or_else(|| vortex_err!("truncated dtype entry name"))?;
+        consumed += name_len;
+        entries.names.push(
+            std::str::from_utf8(name)
+                .map_err(|_| vortex_err!("dtype entry name is not valid UTF-8"))?
+                .into(),
+        );
+        if with_type_ids {
+            entries.type_ids.push(
+                *bytes
+                    .get(offset + consumed)
+                    .ok_or_else(|| vortex_err!("truncated union type tag"))?,
+            );
+            consumed += 1;
+        }
+        let (dtype, n) = decode_at(bytes, offset + consumed, parent, depth + 1)?;
+        consumed += n;
+        entries.dtypes.push(dtype);
+    }
+    Ok((entries, consumed))
 }
 
 fn decode_derivation(
@@ -310,6 +393,8 @@ fn decode_derivation(
         }
         DERIVE_ELEMENT => match &inner {
             DType::List(element, _) | DType::FixedSizeList(element, ..) => element.as_ref().clone(),
+            // A map's "element" is its `{key, value}` entry, which is how map arrays store it.
+            DType::Map(map, _) => map.entries_dtype(),
             other => vortex_bail!("cannot take the element type of non-list dtype {other}"),
         },
         DERIVE_STORAGE => match &inner {
@@ -347,7 +432,6 @@ mod tests {
     #[case(DType::Primitive(PType::F16, Nullability::NonNullable))]
     #[case(DType::Utf8(Nullability::Nullable))]
     #[case(DType::Binary(Nullability::NonNullable))]
-    #[case(DType::Union(Nullability::Nullable))]
     #[case(DType::Variant(Nullability::Nullable))]
     fn scalar_dtypes_round_trip(#[case] dtype: DType) -> VortexResult<()> {
         let bytes = encode(&dtype)?;
@@ -384,6 +468,58 @@ mod tests {
         let (decoded, consumed) = decode(&bytes, &DType::Null)?;
         assert_eq!(decoded, dtype);
         assert_eq!(consumed, bytes.len());
+        Ok(())
+    }
+
+    /// A union carries its variants' type tags, which need not be their positions.
+    #[test]
+    fn union_dtypes_round_trip_with_their_type_tags() -> VortexResult<()> {
+        let names: Vec<FieldName> = vec!["int".into(), "text".into()];
+        let dtype = DType::Union(
+            UnionVariants::try_new(
+                names.into(),
+                vec![
+                    DType::Primitive(PType::I32, Nullability::NonNullable),
+                    DType::Utf8(Nullability::Nullable),
+                ],
+                vec![3, 7],
+            )?,
+            Nullability::Nullable,
+        );
+        let bytes = encode(&dtype)?;
+        let (decoded, consumed) = decode(&bytes, &DType::Null)?;
+        assert_eq!(decoded, dtype);
+        assert_eq!(consumed, bytes.len());
+        let DType::Union(variants, _) = decoded else {
+            unreachable!()
+        };
+        assert_eq!(variants.type_ids(), &[3, 7]);
+        Ok(())
+    }
+
+    #[test]
+    fn map_dtypes_round_trip_and_derive_their_entries() -> VortexResult<()> {
+        let map = MapDType::try_new(
+            DType::Utf8(Nullability::NonNullable),
+            DType::Primitive(PType::I64, Nullability::Nullable),
+            true,
+        )?;
+        let entries = map.entries_dtype();
+        let dtype = DType::Map(map, Nullability::Nullable);
+        let bytes = encode(&dtype)?;
+        let (decoded, consumed) = decode(&bytes, &DType::Null)?;
+        assert_eq!(decoded, dtype);
+        assert_eq!(consumed, bytes.len());
+        // ELEMENT(PARENT) of a map is its `{key, value}` entry struct.
+        assert_eq!(
+            decode(&[DERIVED | DERIVE_ELEMENT, DERIVED | DERIVE_PARENT], &dtype)?.0,
+            entries
+        );
+        // A literal with a nullable key is refused, as the native constructor refuses it.
+        let mut nullable_key = vec![KIND_MAP, 0];
+        nullable_key.extend(encode(&DType::Utf8(Nullability::Nullable))?);
+        nullable_key.extend(encode(&DType::Null)?);
+        assert!(decode(&nullable_key, &DType::Null).is_err());
         Ok(())
     }
 
@@ -504,8 +640,10 @@ mod tests {
         assert!(decode(&[KIND_PRIMITIVE], &DType::Null).is_err());
         assert!(decode(&[KIND_DECIMAL, 10], &DType::Null).is_err());
         assert!(decode(&[KIND_LIST], &DType::Null).is_err());
-        // A struct promising a field it does not carry.
+        // A struct promising a field it does not carry, and a union whose entry stops before its
+        // type tag.
         assert!(decode(&[KIND_STRUCT, 1], &DType::Null).is_err());
+        assert!(decode(&[KIND_UNION, 1, 1, b'a'], &DType::Null).is_err());
     }
 
     #[test]

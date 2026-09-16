@@ -234,7 +234,12 @@ impl ArrayDescriptor {
     }
 
     /// Build the Vortex array this descriptor names, checking it against the expected dtype.
-    pub(crate) fn build(&self, mem: &[u8], dtype: &DType) -> VortexResult<ArrayRef> {
+    pub(crate) fn build(
+        &self,
+        mem: &[u8],
+        dtype: &DType,
+        ctx: &mut ExecutionCtx,
+    ) -> VortexResult<ArrayRef> {
         let nullable = dtype.is_nullable();
         let validity = self.validity(mem, nullable)?;
 
@@ -283,6 +288,7 @@ impl ArrayDescriptor {
                     data,
                     dtype.clone(),
                     validity,
+                    ctx,
                 )?
                 .into_array()
             }
@@ -372,7 +378,7 @@ mod tests {
         mem.mem.extend_from_slice(&frame);
 
         let (descriptor, _) = ArrayDescriptor::parse(&mem.mem, at)?;
-        descriptor.build(&mem.mem, dtype)
+        descriptor.build(&mem.mem, dtype, &mut ctx)
     }
 
     #[test]
@@ -446,11 +452,13 @@ mod tests {
         mem[at + 16..at + 20].copy_from_slice(&9999u32.to_le_bytes());
 
         let (descriptor, _) = ArrayDescriptor::parse(&mem, at).expect("descriptor parses");
+        let mut ctx = array_session().create_execution_ctx();
         assert!(
             descriptor
                 .build(
                     &mem,
-                    &DType::Primitive(PType::I32, Nullability::NonNullable)
+                    &DType::Primitive(PType::I32, Nullability::NonNullable),
+                    &mut ctx,
                 )
                 .is_err()
         );
