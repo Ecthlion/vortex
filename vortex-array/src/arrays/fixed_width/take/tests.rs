@@ -10,7 +10,6 @@ use vortex_error::VortexResult;
 use super::records::take_byte_records;
 use super::slices::take_slices;
 use super::slices::take_slices_constant_length;
-use super::take_values;
 use crate::ArrayRef;
 use crate::IntoArray;
 use crate::VortexSessionExecute;
@@ -20,6 +19,10 @@ use crate::arrays::ConstantArray;
 use crate::arrays::DecimalArray;
 use crate::arrays::PiecewiseSequenceArray;
 use crate::arrays::PrimitiveArray;
+use crate::arrays::fixed_width::Record;
+use crate::arrays::fixed_width::record::Record2;
+use crate::arrays::fixed_width::record::Record4;
+use crate::arrays::fixed_width::record::Record16;
 use crate::assert_arrays_eq;
 use crate::compute::conformance::take::test_take_conformance;
 use crate::dtype::DecimalDType;
@@ -32,15 +35,45 @@ fn allocator() -> BufferAllocatorRef {
 
 #[test]
 fn take_four_byte_records() {
-    let values = [[1u8, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]];
-    let taken = take_values(&values, &[2u32, 0], &allocator());
-    assert_eq!(taken.as_slice(), &[[9, 10, 11, 12], [1, 2, 3, 4]]);
+    let values = [
+        Record4::from_bytes([1, 2, 3, 4]),
+        Record4::from_bytes([5, 6, 7, 8]),
+        Record4::from_bytes([9, 10, 11, 12]),
+    ];
+    let taken = Record4::take(&values, &[2u32, 0], &allocator());
+    assert_eq!(taken.as_slice(), &[values[2], values[0]]);
 }
 
 #[test]
-fn take_eight_byte_values() {
-    let taken = take_values(&[10i64, 20, 30], &[1u16, 2, 0], &allocator());
-    assert_eq!(taken.as_slice(), &[20, 30, 10]);
+fn take_two_byte_records() {
+    let values: Vec<Record2> = (1u16..=300)
+        .map(|x| Record2::from_bytes(x.to_le_bytes()))
+        .collect();
+    let indices: Vec<u32> = (0..300).collect();
+    let taken = Record2::take(&values, &indices, &allocator());
+    assert_eq!(taken.as_slice(), values.as_slice());
+}
+
+#[test]
+fn take_sixteen_byte_records() {
+    let values: Vec<Record16> = (0u128..200)
+        .map(|x| Record16::from_bytes(x.to_le_bytes()))
+        .collect();
+    let indices: Vec<u32> = (0..200).rev().collect();
+    let taken = Record16::take(&values, &indices, &allocator());
+    let expected: Vec<Record16> = values.iter().rev().copied().collect();
+    assert_eq!(taken.as_slice(), expected.as_slice());
+}
+
+#[test]
+fn take_falls_back_for_misaligned_records() -> VortexResult<()> {
+    // Slicing a byte off the front leaves the buffer 4 bytes per record but no longer 4-aligned.
+    let values = Buffer::from_iter(0u8..13)
+        .into_byte_buffer()
+        .slice_unaligned(1..13);
+    let taken = take_byte_records(&values, 4, 3, &[2u32, 0], &allocator())?;
+    assert_eq!(taken.as_slice(), &[9, 10, 11, 12, 1, 2, 3, 4]);
+    Ok(())
 }
 
 #[rstest]

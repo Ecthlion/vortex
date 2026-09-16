@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-mod avx2;
+pub(super) mod avx2;
 mod records;
 mod scalar;
 mod slices;
@@ -12,14 +12,12 @@ mod tests;
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
 use std::sync::LazyLock;
 
-use vortex_buffer::Buffer;
-use vortex_buffer::BufferAllocatorRef;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 use vortex_mask::Mask;
 
 use self::records::take_byte_records;
-use self::scalar::take_values_scalar;
+pub(super) use self::scalar::take_values_scalar;
 use self::slices::take_slices;
 use self::slices::take_slices_constant_length;
 use super::FixedWidthArray;
@@ -37,13 +35,11 @@ use crate::arrays::piecewise_sequence::constant_unsigned_usize;
 use crate::arrays::piecewise_sequence::maybe_contiguous_slices;
 use crate::builtins::ArrayBuiltins;
 use crate::dtype::DType;
-use crate::dtype::UnsignedPType;
-use crate::dtype::half::f16;
 use crate::match_each_unsigned_integer_ptype;
 use crate::scalar::Scalar;
 
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-static HAS_AVX2: LazyLock<bool> = LazyLock::new(|| is_x86_feature_detected!("avx2"));
+pub(super) static HAS_AVX2: LazyLock<bool> = LazyLock::new(|| is_x86_feature_detected!("avx2"));
 
 impl<V: FixedWidthArray> TakeExecute for V {
     fn take(
@@ -53,44 +49,6 @@ impl<V: FixedWidthArray> TakeExecute for V {
     ) -> VortexResult<Option<ArrayRef>> {
         take(array, indices, ctx)
     }
-}
-
-/// A fixed-width value whose initialized bytes may be moved through integer SIMD lanes.
-///
-/// # Safety
-///
-/// Implementors must have no uninitialized bytes. The shared AVX2 gather reads the complete
-/// representation through a same-width integer lane before writing those bytes back unchanged.
-pub(crate) unsafe trait FixedWidthTakeValue: Copy {}
-
-macro_rules! impl_fixed_width_take_value {
-    ($($ty:ty),+ $(,)?) => {
-        $(
-            // SAFETY: These scalar representations contain no padding or uninitialized bytes.
-            unsafe impl FixedWidthTakeValue for $ty {}
-        )+
-    };
-}
-
-impl_fixed_width_take_value!(u8, u16, u32, u64, i8, i16, i32, i64, f16, f32, f64,);
-
-// SAFETY: Byte arrays have no padding and every byte is initialized.
-unsafe impl<const N: usize> FixedWidthTakeValue for [u8; N] {}
-
-pub(crate) fn take_values<T: FixedWidthTakeValue, I: UnsignedPType>(
-    values: &[T],
-    indices: &[I],
-    allocator: &BufferAllocatorRef,
-) -> Buffer<T> {
-    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-    if *HAS_AVX2 {
-        // SAFETY: AVX2 was detected above and `FixedWidthTakeValue` guarantees an initialized byte
-        // representation. The AVX2 dispatcher retains Primitive's existing scalar fallbacks and
-        // out-of-bounds behavior for every value width.
-        return unsafe { avx2::take_avx2(values, indices, allocator) };
-    }
-
-    take_values_scalar(values, indices, allocator)
 }
 
 pub(crate) fn take<V: FixedWidthArray>(

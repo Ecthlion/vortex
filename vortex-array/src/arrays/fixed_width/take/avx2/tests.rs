@@ -9,36 +9,76 @@ use std::panic::catch_unwind;
 use vortex_buffer::Buffer;
 use vortex_buffer::BufferAllocatorRef;
 
-use super::super::FixedWidthTakeValue;
-use super::take_avx2;
+use self::gather::Avx2Gather;
+use self::gather::GatherFn;
+use super::*;
+use crate::arrays::fixed_width::Record;
+use crate::arrays::fixed_width::record::Record4;
+use crate::arrays::fixed_width::record::Record8;
 use crate::dtype::UnsignedPType;
 
-fn take_avx2_if_supported<V: FixedWidthTakeValue, I: UnsignedPType>(
-    values: &[V],
+/// Pairs a record type with the AVX2 gather lane of the same width.
+trait GatherRecord: Record + RefUnwindSafe {
+    type Lane;
+    fn from_index(index: usize) -> Self;
+}
+
+impl GatherRecord for Record4 {
+    type Lane = u32;
+    fn from_index(index: usize) -> Self {
+        Self::from_bytes(u32::try_from(index).unwrap().to_le_bytes())
+    }
+}
+
+impl GatherRecord for Record8 {
+    type Lane = u64;
+    fn from_index(index: usize) -> Self {
+        Self::from_bytes(u64::try_from(index).unwrap().to_le_bytes())
+    }
+}
+
+fn records<R: GatherRecord>(range: impl IntoIterator<Item = usize>) -> Vec<R> {
+    range.into_iter().map(R::from_index).collect()
+}
+
+fn take_avx2_if_supported<R: GatherRecord, I: UnsignedPType>(
+    values: &[R],
     indices: &[I],
-) -> Option<Buffer<V>> {
+) -> Option<Buffer<R>>
+where
+    Avx2Gather: GatherFn<u8, R::Lane>
+        + GatherFn<u16, R::Lane>
+        + GatherFn<u32, R::Lane>
+        + GatherFn<u64, R::Lane>,
+{
     if !is_x86_feature_detected!("avx2") {
         return None;
     }
 
-    // SAFETY: AVX2 support was detected above, and `FixedWidthTakeValue` guarantees that every
-    // byte in the values is initialized.
-    Some(unsafe { take_avx2(values, indices, &BufferAllocatorRef::statically_allocated()) })
+    // SAFETY: AVX2 support was detected above, and `Record` guarantees that every byte in the
+    // values is initialized.
+    Some(unsafe {
+        take_avx2::<R, R::Lane, I>(values, indices, &BufferAllocatorRef::statically_allocated())
+    })
 }
 
-fn assert_avx2_take_panics<V, I>(values: &[V], indices: &[I], expected: &str)
+fn assert_avx2_take_panics<R, I>(values: &[R], indices: &[I], expected: &str)
 where
-    V: FixedWidthTakeValue + RefUnwindSafe,
+    R: GatherRecord,
     I: UnsignedPType + RefUnwindSafe,
+    Avx2Gather: GatherFn<u8, R::Lane>
+        + GatherFn<u16, R::Lane>
+        + GatherFn<u32, R::Lane>
+        + GatherFn<u64, R::Lane>,
 {
     if !is_x86_feature_detected!("avx2") {
         return;
     }
 
-    // SAFETY: AVX2 support was detected above, and `FixedWidthTakeValue` guarantees that every
-    // byte in the values is initialized.
+    // SAFETY: AVX2 support was detected above, and `Record` guarantees that every byte in the
+    // values is initialized.
     let result = catch_unwind(|| unsafe {
-        take_avx2(values, indices, &BufferAllocatorRef::statically_allocated())
+        take_avx2::<R, R::Lane, I>(values, indices, &BufferAllocatorRef::statically_allocated())
     });
     let Err(payload) = result else {
         panic!("take should panic for an invalid index");
@@ -51,13 +91,12 @@ where
 }
 
 macro_rules! test_cases {
-    (index_type => $IDX:ty, value_types => $($VAL:ty),+) => {
+    (index_type => $IDX:ty, record_types => $($REC:ty),+) => {
         paste::paste! {
             $(
                 #[test]
-                #[allow(clippy::cast_possible_truncation)]
-                fn [<test_avx2_take_simple_ $IDX _ $VAL>]() {
-                    let values: Vec<$VAL> = (1..=127).map(|x| x as $VAL).collect();
+                fn [<test_avx2_take_simple_ $IDX _ $REC:snake>]() {
+                    let values = records::<$REC>(1..=127);
                     let indices: Vec<$IDX> = (0..127).collect();
 
                     let Some(result) = take_avx2_if_supported(&values, &indices) else {
@@ -67,9 +106,8 @@ macro_rules! test_cases {
                 }
 
                 #[test]
-                #[allow(clippy::cast_possible_truncation)]
-                fn [<test_avx2_take_empty_ $IDX _ $VAL>]() {
-                    let values: Vec<$VAL> = vec![];
+                fn [<test_avx2_take_empty_ $IDX _ $REC:snake>]() {
+                    let values: Vec<$REC> = vec![];
                     let indices: Vec<$IDX> = (0..127).collect();
 
                     assert_avx2_take_panics(
@@ -80,9 +118,8 @@ macro_rules! test_cases {
                 }
 
                 #[test]
-                #[allow(clippy::cast_possible_truncation)]
-                fn [<test_avx2_take_invalid_ $IDX _ $VAL>]() {
-                    let values: Vec<$VAL> = (1..=127).map(|x| x as $VAL).collect();
+                fn [<test_avx2_take_invalid_ $IDX _ $REC:snake>]() {
+                    let values = records::<$REC>(1..=127);
                     let indices: Vec<$IDX> = (127..=254).collect();
 
                     assert_avx2_take_panics(&values, &indices, "take index out of bounds");
@@ -92,48 +129,36 @@ macro_rules! test_cases {
     };
 }
 
-test_cases!(
-    index_type => u8,
-    value_types => u32, i32, u64, i64, f32, f64
-);
-test_cases!(
-    index_type => u16,
-    value_types => u32, i32, u64, i64, f32, f64
-);
-test_cases!(
-    index_type => u32,
-    value_types => u32, i32, u64, i64, f32, f64
-);
-test_cases!(
-    index_type => u64,
-    value_types => u32, i32, u64, i64, f32, f64
-);
+test_cases!(index_type => u8, record_types => Record4, Record8);
+test_cases!(index_type => u16, record_types => Record4, Record8);
+test_cases!(index_type => u32, record_types => Record4, Record8);
+test_cases!(index_type => u64, record_types => Record4, Record8);
 
 #[test]
 fn last_valid_u8_index() {
-    let values: Vec<i64> = (0..=255).collect();
+    let values = records::<Record8>(0..=255);
     let indices: Vec<u8> = vec![255; 20];
 
     let Some(result) = take_avx2_if_supported(&values, &indices) else {
         return;
     };
-    assert_eq!(&[255; 20], result.as_slice());
+    assert_eq!(&[Record8::from_index(255); 20], result.as_slice());
 }
 
 #[test]
 fn last_valid_u16_index() {
-    let values: Vec<i64> = (0..=65535).collect();
+    let values = records::<Record8>(0..=65535);
     let indices: Vec<u16> = vec![65535; 20];
 
     let Some(result) = take_avx2_if_supported(&values, &indices) else {
         return;
     };
-    assert_eq!(&[65535; 20], result.as_slice());
+    assert_eq!(&[Record8::from_index(65535); 20], result.as_slice());
 }
 
 #[test]
 fn empty_values_and_indices() {
-    let Some(result) = take_avx2_if_supported::<u32, u32>(&[], &[]) else {
+    let Some(result) = take_avx2_if_supported::<Record4, u32>(&[], &[]) else {
         return;
     };
 
@@ -142,43 +167,23 @@ fn empty_values_and_indices() {
 
 #[test]
 fn i32_gather_addressable_length_boundary() {
-    assert!(super::i32_gather_can_address(i32::MAX as usize + 1));
-    assert!(!super::i32_gather_can_address(i32::MAX as usize + 2));
+    assert!(i32_gather_can_address(i32::MAX as usize + 1));
+    assert!(!i32_gather_can_address(i32::MAX as usize + 2));
 }
 
 #[test]
 fn invalid_index_only_in_simd_block() {
-    let values = vec![10u32, 20, 30];
+    let values = records::<Record4>([10, 20, 30]);
     let indices = vec![3u32, 0, 1, 2, 0, 1, 2, 0, 1];
 
     assert_avx2_take_panics(&values, &indices, "take index out of bounds");
 }
 
 #[test]
-fn simd_array_u8x4() {
-    let values: Vec<[u8; 4]> = (1u32..=200).map(u32::to_le_bytes).collect();
-    let indices: Vec<u32> = (0..200).collect();
-
-    let Some(result) = take_avx2_if_supported(&values, &indices) else {
-        return;
-    };
-    assert_eq!(values.as_slice(), result.as_slice());
-}
-
-#[test]
-fn scalar_fallback_u16() {
-    let values: Vec<u16> = (1..=300).collect();
-    let indices: Vec<u32> = (0..300).collect();
-
-    let Some(result) = take_avx2_if_supported(&values, &indices) else {
-        return;
-    };
-    assert_eq!(values.as_slice(), result.as_slice());
-}
-
-#[test]
-fn scalar_fallback_array_u8x16() {
-    let values: Vec<[u8; 16]> = (0u128..200).map(u128::to_le_bytes).collect();
+fn gather_preserves_arbitrary_record_bytes() {
+    let values: Vec<Record4> = (1u32..=200)
+        .map(|x| Record4::from_bytes(x.to_le_bytes()))
+        .collect();
     let indices: Vec<u32> = (0..200).collect();
 
     let Some(result) = take_avx2_if_supported(&values, &indices) else {
@@ -189,7 +194,7 @@ fn scalar_fallback_array_u8x16() {
 
 #[test]
 fn u32_max_index_in_u32_lane() {
-    let values = vec![0u32; 8];
+    let values = vec![Record4::default(); 8];
     // The first eight indices execute in the SIMD loop; the scalar remainder is valid.
     let indices = vec![0, u32::MAX, 2, 3, 4, 5, 6, 7, 0];
 
@@ -198,7 +203,7 @@ fn u32_max_index_in_u32_lane() {
 
 #[test]
 fn u64_max_index_in_u32_lane() {
-    let values = vec![0u32; 8];
+    let values = vec![Record4::default(); 8];
     // The first four indices execute in the SIMD loop; the scalar remainder is valid.
     let indices = vec![0, u64::MAX, 2, 3, 0];
 
@@ -207,7 +212,7 @@ fn u64_max_index_in_u32_lane() {
 
 #[test]
 fn u64_max_index_in_u64_lane() {
-    let values = vec![0u64; 8];
+    let values = vec![Record8::default(); 8];
     // The first four indices execute in the SIMD loop; the scalar remainder is valid.
     let indices = vec![0, u64::MAX, 2, 3, 0];
 

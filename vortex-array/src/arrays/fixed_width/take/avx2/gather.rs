@@ -27,7 +27,7 @@ use std::arch::x86_64::_mm256_xor_si256;
 use std::convert::identity;
 
 /// Moves one SIMD block of fixed-width values into an output buffer.
-pub(super) trait GatherFn<Index, Lane> {
+pub(in crate::arrays::fixed_width) trait GatherFn<Index, Lane> {
     /// The number of data elements written on each iteration.
     const WIDTH: usize;
     /// The number of indices read on each iteration.
@@ -54,7 +54,7 @@ pub(super) trait GatherFn<Index, Lane> {
 }
 
 /// AVX2 gather implementations for 32- and 64-bit value lanes.
-pub(super) enum Avx2Gather {}
+pub(in crate::arrays::fixed_width) enum Avx2Gather {}
 
 macro_rules! cmpgt_epu32 {
     ($lhs:expr, $rhs:expr) => {{

@@ -24,63 +24,69 @@ use vortex_buffer::BufferMut;
 
 use self::gather::Avx2Gather;
 use self::gather::GatherFn;
-use super::FixedWidthTakeValue;
 use super::take_values_scalar;
+use crate::arrays::fixed_width::Record;
 use crate::dtype::PType;
 use crate::dtype::UnsignedPType;
 use crate::match_each_unsigned_integer_ptype;
 
 /// Takes the specified indices into a new [`Buffer`] using AVX2 SIMD.
 ///
-/// An AVX2 gather only moves raw bytes, so signedness and float-ness are irrelevant — only the
-/// byte width of `V` matters. Any 4-byte value rides the gather through the `u32` lane and any
-/// 8-byte value through the `u64` lane, regardless of its actual type. Values 1 or 2 bytes wide
-/// (AVX2 has no sub-32-bit gather) and wider than 8 bytes fall back to the scalar kernel.
+/// An AVX2 gather only moves raw bytes, so the record's logical type is irrelevant: any 4-byte
+/// record rides the gather through the `u32` lane and any 8-byte record through the `u64` lane.
+/// The caller pairs `R` with the `Lane` of the same size; `Record4` and `Record8` are the only
+/// widths with a gather lane, so narrower and wider records never reach this function.
 ///
-/// [`FixedWidthTakeValue`] guarantees that the complete representation is initialized before it is
-/// read through an integer lane.
+/// [`Record`] guarantees that the complete representation is initialized before it is read
+/// through an integer lane.
 ///
 /// # Safety
 ///
 /// The caller must ensure the `avx2` feature is enabled.
 #[target_feature(enable = "avx2")]
-pub(super) unsafe fn take_avx2<V: FixedWidthTakeValue, I: UnsignedPType>(
-    buffer: &[V],
+pub(in crate::arrays::fixed_width) unsafe fn take_avx2<R, Lane, I>(
+    buffer: &[R],
     indices: &[I],
     allocator: &BufferAllocatorRef,
-) -> Buffer<V> {
+) -> Buffer<R>
+where
+    R: Record,
+    I: UnsignedPType,
+    Avx2Gather:
+        GatherFn<u8, Lane> + GatherFn<u16, Lane> + GatherFn<u32, Lane> + GatherFn<u64, Lane>,
+{
+    const {
+        assert!(
+            size_of::<R>() == size_of::<Lane>(),
+            "gather lane and record must have the same size"
+        );
+    }
+
     if buffer.is_empty() {
         assert!(
             indices.is_empty(),
             "cannot take a non-empty set of indices from an empty buffer"
         );
-        return BufferMut::empty_aligned_in(Alignment::of::<V>(), allocator.clone()).freeze();
+        return BufferMut::empty_aligned_in(Alignment::of::<R>(), allocator.clone()).freeze();
     }
 
-    // Dispatch on the gather lane width. The index type must still be concretized to select the
-    // right `GatherFn` impl, so re-dispatch it with `match_each_unsigned_integer_ptype!`.
-    macro_rules! dispatch {
-        ($lane:ty) => {{
-            match_each_unsigned_integer_ptype!(I::PTYPE, |Idx| {
-                // SAFETY: `Idx` has the same `PTYPE` as `I`, so this is a no-op reinterpret of the
-                // index slice into the concrete type the gather impl is keyed on.
-                let indices = unsafe { std::mem::transmute::<&[I], &[Idx]>(indices) };
-                exec_take::<V, $lane, Idx, Avx2Gather>(buffer, indices, allocator)
-            })
-        }};
+    // The i32 gather interprets u32 lanes as signed offsets. A valid high u32 index needs the
+    // scalar path when the values slice exceeds the non-negative i32 addressable range.
+    if size_of::<Lane>() == size_of::<u32>()
+        && I::PTYPE == PType::U32
+        && !i32_gather_can_address(buffer.len())
+    {
+        return take_values_scalar(buffer, indices, allocator);
     }
 
-    match size_of::<V>() {
-        // The i32 gather interprets u32 lanes as signed offsets. A valid high u32 index needs the
-        // scalar path when the values slice exceeds the non-negative i32 addressable range.
-        4 if I::PTYPE == PType::U32 && !i32_gather_can_address(buffer.len()) => {
-            take_values_scalar(buffer, indices, allocator)
-        }
-        4 => dispatch!(u32),
-        8 => dispatch!(u64),
-        // 1/2-byte and >8-byte values have no AVX2 gather lane, so fall back to scalar.
-        _ => take_values_scalar(buffer, indices, allocator),
-    }
+    // The index type must be concretized to select the right `GatherFn` impl, so re-dispatch it
+    // with `match_each_unsigned_integer_ptype!`.
+    match_each_unsigned_integer_ptype!(I::PTYPE, |Idx| {
+        // SAFETY: `Idx` has the same `PTYPE` as `I`, so this is a no-op reinterpret of the
+        // index slice into the concrete type the gather impl is keyed on.
+        let indices = unsafe { std::mem::transmute::<&[I], &[Idx]>(indices) };
+        exec_take::<R, Lane, Idx, Avx2Gather>(buffer, indices, allocator)
+    })
 }
 
 const fn i32_gather_can_address(values_len: usize) -> bool {
@@ -90,12 +96,12 @@ const fn i32_gather_can_address(values_len: usize) -> bool {
 /// AVX2 core inner loop for a given index type `Idx`, output element type `Out`, and gather
 /// `Lane` type.
 ///
-/// `Out` is the element type written to the output buffer; `Lane` (`u32` or `u64`) is the
+/// `Out` is the record type written to the output buffer; `Lane` (`u32` or `u64`) is the
 /// integer type the gather intrinsics operate on. The caller must pair them so that
-/// `size_of::<Out>() == size_of::<Lane>()` (the only caller, [`take_avx2`], picks `Lane` from
-/// `size_of::<Out>()`). Each valid lane copies the initialized representation of an existing
-/// `Out`; invalid lanes are masked and cause a panic before the output buffer is initialized.
-/// Gather instructions tolerate the source's potentially weaker alignment.
+/// `size_of::<Out>() == size_of::<Lane>()` ([`take_avx2`] asserts this at compile time). Each
+/// valid lane copies the initialized representation of an existing `Out`; invalid lanes are
+/// masked and cause a panic before the output buffer is initialized. Gather instructions
+/// tolerate the source's potentially weaker alignment.
 #[allow(clippy::inline_always)]
 #[inline(always)]
 fn exec_take<Out, Lane, Idx, Gather>(
@@ -104,7 +110,7 @@ fn exec_take<Out, Lane, Idx, Gather>(
     allocator: &BufferAllocatorRef,
 ) -> Buffer<Out>
 where
-    Out: FixedWidthTakeValue,
+    Out: Record,
     Idx: UnsignedPType,
     Gather: GatherFn<Idx, Lane>,
 {
