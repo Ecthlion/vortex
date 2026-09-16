@@ -63,8 +63,9 @@ use vortex_ffi::vx_view;
 const VX_CUDA_OK: c_int = 0;
 const VX_CUDA_ERR: c_int = 1;
 
-/// Enable direct I/O for pooled CUDA file reads.
-pub const VX_CUDA_SCAN_FLAG_DIRECT_IO: u32 = 1 << 0;
+/// Bypass the operating system page cache for pooled data-plane reads.
+/// Footer and zone-map reads remain buffered. Supported only on Linux.
+pub const VX_CUDA_SCAN_FLAG_DIRECT_IO: u32 = 1u32 << 0;
 
 /// Options for scanning a CUDA-compatible Vortex file.
 ///
@@ -154,10 +155,10 @@ pub unsafe extern "C-unwind" fn vx_cuda_array_sink_open_file(
 
 /// Open a CUDA-readable Vortex file sink with a fixed row block size.
 ///
-/// `block_rows` controls the row granularity of CUDA-flat data blocks. Passing zero preserves the
-/// default writer strategy used by [`vx_cuda_array_sink_open_file`]. Any nonzero value disables
-/// byte-size coalescing and outer layout dictionaries so data blocks retain the requested row
-/// granularity.
+/// `block_rows` controls the row granularity of CUDA-flat data blocks. Passing zero uses the default
+/// writer strategy: 8,192-row blocks may be coalesced into data blocks targeting 1 MiB. Any nonzero
+/// value disables byte-size coalescing and outer layout dictionaries, so passing 8,192 is not
+/// equivalent to passing zero.
 ///
 /// Write and scan sizing are independent; scan batches preserve on-disk layout boundaries.
 ///
