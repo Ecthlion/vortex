@@ -169,6 +169,8 @@ fn nvcc_compile_kernel(
     if let Some(host_compiler) =
         env::var_os("VORTEX_CUDA_HOST_COMPILER").filter(|path| !path.is_empty())
     {
+        // Despite its name, --compiler-bindir accepts a compiler executable path.
+        // It is used to honor CMake's host compiler choice; CXX alone does not reliably control NVCC.
         cmd.arg("--compiler-bindir").arg(host_compiler);
     }
     if profile == "debug" {
