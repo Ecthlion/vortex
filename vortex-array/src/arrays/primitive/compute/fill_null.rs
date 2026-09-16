@@ -13,6 +13,7 @@ use crate::array::ArrayView;
 use crate::arrays::BoolArray;
 use crate::arrays::Primitive;
 use crate::arrays::PrimitiveArray;
+use crate::arrays::fixed_width::fill_null::fill_invalid;
 use crate::match_each_native_ptype;
 use crate::scalar::Scalar;
 use crate::scalar_fn::fns::fill_null::FillNullKernel;
@@ -30,15 +31,12 @@ impl FillNullKernel for Primitive {
             Validity::Array(is_valid) => {
                 let is_invalid = is_valid.execute::<BoolArray>(ctx)?.into_bit_buffer().not();
                 match_each_native_ptype!(array.ptype(), |T| {
-                    let mut buffer = array.to_buffer::<T>().into_mut();
                     let fill_value = fill_value
                         .as_primitive()
                         .typed_value::<T>()
                         .vortex_expect("top-level fill_null ensure non-null fill value");
-                    for invalid_index in is_invalid.set_indices() {
-                        buffer[invalid_index] = fill_value;
-                    }
-                    PrimitiveArray::new(buffer.freeze(), result_validity).into_array()
+                    let values = fill_invalid(array.to_buffer::<T>(), fill_value, &is_invalid);
+                    PrimitiveArray::new(values, result_validity).into_array()
                 })
             }
             _ => unreachable!("checked in entry point"),

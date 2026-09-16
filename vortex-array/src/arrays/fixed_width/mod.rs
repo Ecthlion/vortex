@@ -4,6 +4,7 @@
 //! Shared structural operations for fixed-width canonical arrays.
 
 mod array;
+pub(crate) mod fill_null;
 pub(crate) mod filter;
 pub(crate) mod mask;
 pub(crate) mod slice;

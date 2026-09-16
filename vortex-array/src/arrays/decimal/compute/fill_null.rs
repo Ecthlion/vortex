@@ -16,6 +16,7 @@ use crate::array::ArrayView;
 use crate::arrays::BoolArray;
 use crate::arrays::Decimal;
 use crate::arrays::DecimalArray;
+use crate::arrays::fixed_width::fill_null::fill_invalid;
 use crate::dtype::NativeDecimalType;
 use crate::match_each_decimal_value_type;
 use crate::scalar::DecimalValue;
@@ -77,11 +78,8 @@ fn fill_buffer<T: NativeDecimalType>(
     fill_val: T,
     result_validity: Validity,
 ) -> VortexResult<ArrayRef> {
-    let mut buffer = array.buffer::<T>().into_mut();
-    for invalid_index in is_invalid.set_indices() {
-        buffer[invalid_index] = fill_val;
-    }
-    Ok(DecimalArray::new(buffer.freeze(), array.decimal_dtype(), result_validity).into_array())
+    let values = fill_invalid(array.buffer::<T>(), fill_val, is_invalid);
+    Ok(DecimalArray::new(values, array.decimal_dtype(), result_validity).into_array())
 }
 
 #[cfg(test)]
