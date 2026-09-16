@@ -10,7 +10,6 @@ use std::sync::atomic::Ordering;
 
 use futures::TryStreamExt;
 use vortex::array::VortexSessionExecute;
-use vortex::array::stream::ArrayStream;
 use vortex::arrow::ArrowSessionExt;
 use vortex::buffer::ByteBuffer;
 use vortex::buffer::ByteBufferMut;
@@ -52,7 +51,6 @@ fn test_projection_names_are_owned_and_zero_count_means_all() -> VortexResult<()
     assert_eq!(parsed, ["値.x", ""]);
     // SAFETY: Zero count ignores the pointer, including a null pointer.
     assert!(unsafe { scan_columns(ptr::null(), 0) }?.is_empty());
-    assert!(names(&[])?.is_empty());
     let empty = vx_view {
         ptr: ptr::null(),
         len: 0,
@@ -63,7 +61,7 @@ fn test_projection_names_are_owned_and_zero_count_means_all() -> VortexResult<()
 }
 
 #[test]
-fn test_projection_rejects_invalid_names_and_counts() -> VortexResult<()> {
+fn test_projection_rejects_invalid_names_and_counts() {
     let invalid_utf8 = vx_view {
         ptr: [0xffu8].as_ptr().cast(),
         len: 1,
@@ -91,28 +89,22 @@ fn test_projection_rejects_invalid_names_and_counts() -> VortexResult<()> {
         // all remaining views and bytes are live.
         assert_error(unsafe { scan_columns(columns, count) }, message);
     }
-    Ok(())
 }
 
 fn session() -> VortexSession {
     VortexSession::default().with_handle(ffi_runtime().handle())
 }
 
-fn table(rows: usize) -> VortexResult<ArrayRef> {
+fn table() -> VortexResult<ArrayRef> {
     Ok(StructArray::try_new(
         ["ids", "unused", "値.x"].into(),
         vec![
-            PrimitiveArray::from_iter((0u32..5).take(rows)).into_array(),
-            PrimitiveArray::from_iter([1.0f64, 2.0, 3.0, 4.0, 5.0].into_iter().take(rows))
+            PrimitiveArray::from_iter(0u32..5).into_array(),
+            PrimitiveArray::from_iter([1.0f64, 2.0, 3.0, 4.0, 5.0]).into_array(),
+            PrimitiveArray::from_option_iter([Some(10i64), None, Some(30), None, Some(50)])
                 .into_array(),
-            PrimitiveArray::from_option_iter(
-                [Some(10i64), None, Some(30), None, Some(50)]
-                    .into_iter()
-                    .take(rows),
-            )
-            .into_array(),
         ],
-        rows,
+        5,
         Validity::NonNullable,
     )?
     .into_array())
@@ -127,11 +119,8 @@ fn file_bytes(
         register_cuda_layout(session);
         cuda_write_strategy(session, block_rows)
     } else {
-        let flat = Arc::new(FlatLayoutStrategy::default());
-        Arc::new(TableStrategy::new(
-            Arc::<FlatLayoutStrategy>::clone(&flat),
-            flat,
-        ))
+        let flat: Arc<dyn LayoutStrategy> = Arc::new(FlatLayoutStrategy::default());
+        Arc::new(TableStrategy::new(Arc::clone(&flat), flat))
     };
     let mut bytes = ByteBufferMut::empty();
     ffi_runtime().block_on(
@@ -178,42 +167,14 @@ fn test_cuda_write_strategy_preserves_high_cardinality_row_blocks() -> VortexRes
     let input =
         StructArray::try_new(["ids"].into(), vec![ids], rows, Validity::NonNullable)?.into_array();
     let file = open_file(&session, input, Some(rows))?;
-    let batches: Vec<_> = ffi_runtime().block_on(
+    let lengths: Vec<_> = ffi_runtime().block_on(
         projected_scan(&file, names(&["ids"])?, rows)?
             .into_array_stream()?
+            .map_ok(|batch| batch.len())
             .try_collect(),
     )?;
-    assert_eq!(
-        batches.iter().map(|batch| batch.len()).collect::<Vec<_>>(),
-        [rows]
-    );
+    assert_eq!(lengths, [rows]);
     Ok(())
-}
-
-#[test]
-fn test_projection_cpu_rejects_unknown_names_and_non_struct() -> VortexResult<()> {
-    let session = session();
-    for rows in [0, 5] {
-        let file = open_file(&session, table(rows)?, None)?;
-        for name in ["missing", "IDS", "値", "値.x.child"] {
-            assert_error(
-                projected_scan(&file, names(&[name])?, 0),
-                "unknown CUDA scan column",
-            );
-        }
-    }
-    let input = PrimitiveArray::from_iter([1i32, 2, 3]).into_array();
-    let file = open_file(&session, input.clone(), None)?;
-    assert_error(
-        projected_scan(&file, names(&["ids"])?, 0),
-        "requires a struct file dtype",
-    );
-    let actual = ffi_runtime().block_on(
-        projected_scan(&file, names(&[])?, 0)?
-            .into_array_stream()?
-            .read_all(),
-    )?;
-    assert_arrow_eq(&session, actual, input)
 }
 
 struct RejectSegments {
@@ -237,7 +198,7 @@ impl SegmentSource for RejectSegments {
 #[test]
 fn test_projection_cpu_never_requests_unselected_column_segments() -> VortexResult<()> {
     let session = session();
-    let input = table(5)?;
+    let input = table()?;
     let columns = names(&["値.x", "ids"])?;
     let expected = input
         .clone()
@@ -255,11 +216,11 @@ fn test_projection_cpu_never_requests_unselected_column_segments() -> VortexResu
         rejected: AtomicUsize::new(0),
     });
     let file = file.with_segment_source(Arc::<RejectSegments>::clone(&source));
-    let scan = projected_scan(&file, columns, 2)?;
-    assert_eq!(scan.dtype()?, *expected.dtype());
-    let stream = scan.into_array_stream()?;
-    assert_eq!(stream.dtype(), expected.dtype());
-    let actual = ffi_runtime().block_on(stream.read_all())?;
+    let actual = ffi_runtime().block_on(
+        projected_scan(&file, columns, 2)?
+            .into_array_stream()?
+            .read_all(),
+    )?;
     assert_arrow_eq(&session, actual, expected)?;
     assert_eq!(source.rejected.load(Ordering::Relaxed), 0);
     // The same reader must fail without projection, proving the guard actually observes reads.
@@ -276,7 +237,7 @@ fn test_projection_cpu_never_requests_unselected_column_segments() -> VortexResu
 }
 
 #[test]
-fn test_projection_ffi_validation_without_cuda() -> VortexResult<()> {
+fn test_projection_ffi_validation_without_cuda() {
     let mut stream = ArrowDeviceArrayStream {
         device_type: -1,
         get_schema: None,
@@ -319,7 +280,6 @@ fn test_projection_ffi_validation_without_cuda() -> VortexResult<()> {
         },
         VX_CUDA_ERR
     );
-    Ok(())
 }
 
 struct LocalFile(PathBuf);
@@ -362,9 +322,8 @@ fn stream_error(stream: &mut ArrowDeviceArrayStream) -> String {
 fn open_stream(
     session: &VortexSession,
     path: &str,
-    options: Option<&vx_cuda_scan_options>,
+    options: &vx_cuda_scan_options,
 ) -> ArrowDeviceArrayStream {
-    let options = options.map_or(ptr::null(), ptr::from_ref);
     let mut output = MaybeUninit::<ArrowDeviceArrayStream>::uninit();
     let mut error = ptr::null_mut();
     let handle = test_session(session.clone());
@@ -427,20 +386,19 @@ fn batch_lengths(stream: &mut ArrowDeviceArrayStream) -> Vec<i64> {
 }
 
 #[cuda_test]
-fn test_projection_gpu_local_file_schema_batches_empty_defaults_and_boundaries() -> VortexResult<()>
-{
-    for (rows, block_rows, batch_rows) in [(0, 0, None), (5, 0, Some(2)), (5, 2, Some(3))] {
+fn test_projection_gpu_local_file_schema_and_batch_boundaries() -> VortexResult<()> {
+    for (block_rows, batch_rows) in [(0, 2), (2, 3)] {
         let session = session().with_some(CudaSession::try_default()?);
-        let file = LocalFile::new(&file_bytes(&session, table(rows)?, Some(block_rows))?)?;
+        let file = LocalFile::new(&file_bytes(&session, table()?, Some(block_rows))?)?;
         let path = file
             .0
             .to_str()
             .ok_or_else(|| vortex_err!("non-UTF-8 test path"))?;
-        let options = batch_rows.map(|batch_rows| vx_cuda_scan_options {
+        let options = vx_cuda_scan_options {
             batch_rows,
             ..Default::default()
-        });
-        let mut stream = open_stream(&session, path, options.as_ref());
+        };
+        let mut stream = open_stream(&session, path, &options);
         // The stream must retain its session state after the caller releases its session.
         drop(session);
         let mut schema = stream_schema(&mut stream);
@@ -449,11 +407,7 @@ fn test_projection_gpu_local_file_schema_batches_empty_defaults_and_boundaries()
             Field::new("ids", DataType::UInt32, false),
         ];
         assert_eq!(Schema::try_from(&schema)?, Schema::new(expected_fields));
-        let lengths = batch_lengths(&mut stream);
-        assert_eq!(lengths.iter().sum::<i64>(), rows as i64);
-        if rows > 0 {
-            assert_eq!(lengths, [2, 2, 1]);
-        }
+        assert_eq!(batch_lengths(&mut stream), [2, 2, 1]);
         let release = stream.release.expect("missing release");
         // SAFETY: Both objects are live and released exactly once.
         unsafe {

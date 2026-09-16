@@ -21,7 +21,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 QUERIES = (1, 5, 6, 9, 10)
-TARGETS = ("NDSH_VORTEX_BUILD_SMOKE", "NDSH_VORTEX_IO_TEST", *(f"NDSH_Q{q:02}_NVBENCH" for q in QUERIES))
+IO_TEST = "NDSH_VORTEX_IO_TEST"
+TARGETS = (IO_TEST, *(f"NDSH_Q{q:02}_NVBENCH" for q in QUERIES))
 COMPILERS = ("CMAKE_C_COMPILER", "CMAKE_CXX_COMPILER", "CMAKE_CUDA_COMPILER", "CMAKE_CUDA_HOST_COMPILER")
 BUILD_ENVIRONMENT = (
     "PATH",
@@ -65,7 +66,7 @@ BUILD_ENVIRONMENT = (
 
 
 def digest(path: Path) -> str:
-    with Path(path).open("rb") as stream:
+    with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
@@ -258,7 +259,7 @@ def record_toolchain(runner: Runner) -> dict:
     """Record configured compiler identities before enforcing the CUDA >= 12.8 requirement."""
     cache = {}
     for line in (runner.work / "cudf-build/CMakeCache.txt").read_text().splitlines():
-        if line and not line.startswith(("#", "//")) and "=" in line:
+        if not line.startswith(("#", "//")) and "=" in line:
             key, value = line.split("=", 1)
             cache[key.split(":", 1)[0]] = value
     names = (
@@ -469,8 +470,7 @@ def benchmark(args: argparse.Namespace, recipe: dict):
         },
     )
     runner.run("gpu", ["nvidia-smi", "--query-gpu=name,driver_version,memory.total,utilization.gpu", "--format=csv"])
-    for name in TARGETS[:2]:
-        runner.run(name, [binaries / name], results)
+    runner.run(IO_TEST, [binaries / IO_TEST], results)
     for query in args.queries:
         output = results / f"sf{args.scale_factor:g}-q{query}.json"
         runner.run(output.stem, benchmark_command(binaries / f"NDSH_Q{query:02}_NVBENCH", query, args, output), results)

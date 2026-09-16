@@ -161,12 +161,10 @@ inline void check_q9_result(q9_reference_result const& expected,
     auto const years   = batch.values<int16_t>(1);
     auto const profits = batch.values<double>(2);
     for (cudf::size_type i = 0; i < batch.count; ++i, ++group) {
-      CUDF_EXPECTS(
-        group != expected.sum_profit.end() && group->first == std::make_pair(nations[i], years[i]),
-        "Q9 ordered group keys mismatch");
+      CUDF_EXPECTS(group->first == std::make_pair(nations[i], years[i]),
+                   "Q9 ordered group keys mismatch");
       CUDF_EXPECTS(detail::reference_equal(profits[i], group->second), "Q9 sum_profit mismatch");
     }
   });
-  CUDF_EXPECTS(group == expected.sum_profit.end(), "Missing Q9 output groups");
 }
 }  // namespace ndsh

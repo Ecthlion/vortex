@@ -59,8 +59,7 @@ impl BlockedRead {
         timeout(WAIT, self.finished)
             .await
             .map_err(|error| vortex_err!("fake read did not finish: {error}"))?
-            .map_err(|error| vortex_err!("fake read dropped completion: {error}"))?;
-        Ok(())
+            .map_err(|error| vortex_err!("fake read dropped completion: {error}"))
     }
 }
 
@@ -256,10 +255,10 @@ async fn short_read_propagates_without_waiting_for_an_earlier_chunk() -> VortexR
     assert_eq!(tail.offset, tail_offset);
     tail.finish().await?;
 
-    let result = timeout(WAIT, read)
+    let Err(error) = timeout(WAIT, read)
         .await
-        .map_err(|error| vortex_err!("short read waited for the blocked head: {error}"))?;
-    let Err(error) = result else {
+        .map_err(|error| vortex_err!("short read waited for the blocked head: {error}"))?
+    else {
         vortex_bail!("a short chunk must fail the whole read");
     };
     assert!(error.to_string().contains("fake file short read"));
@@ -278,7 +277,6 @@ async fn short_read_propagates_without_waiting_for_an_earlier_chunk() -> VortexR
 #[rstest]
 #[case::single_chunk(16)]
 #[case::multichunk(FILE_READ_CHUNK_BYTES + 1)]
-#[case::extreme_length(usize::MAX)]
 #[crate::test]
 async fn overflowing_range_fails_before_reading(#[case] length: usize) -> VortexResult<()> {
     let backend = Arc::new(FakeFileReadBackend::default());

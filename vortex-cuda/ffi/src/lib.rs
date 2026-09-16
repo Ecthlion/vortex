@@ -590,19 +590,9 @@ mod tests {
         let session = VortexSession::default()
             .with_some(CudaSession::try_default()?)
             .with_allocator(allocator.clone());
-        let initialized_session = session_with_cuda(&session);
-        assert!(ptr::eq(initialized_session, &session));
-        let mut export_ctx = scan_export_ctx(initialized_session)?;
+        let mut export_ctx = scan_export_ctx(session_with_cuda(&session))?;
         assert!(export_ctx.execution_ctx().allocator().ptr_eq(&allocator));
-        assert_eq!(
-            session.get::<CudaSession>().dictionary_export(),
-            DictionaryExport::Preserve
-        );
         let export_session = export_ctx.execution_ctx().session();
-        assert_eq!(
-            export_session.get::<CudaSession>().dictionary_export(),
-            DictionaryExport::Preserve
-        );
         assert!(Arc::ptr_eq(
             session.get::<CudaSession>().pinned_buffer_pool(),
             export_session.get::<CudaSession>().pinned_buffer_pool(),

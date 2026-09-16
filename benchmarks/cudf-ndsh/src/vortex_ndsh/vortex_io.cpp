@@ -323,7 +323,7 @@ cudf::io::table_with_metadata vortex_io::read_vortex(std::string const& path,
       impl_->session.get(),
       file_path,
       &options,
-      column_views.empty() ? nullptr : column_views.data(),
+      column_views.data(),
       column_views.size(),
       input.value.get(),
       &error);
@@ -336,11 +336,10 @@ cudf::io::table_with_metadata vortex_io::read_vortex(std::string const& path,
   detail::check_flat_schema(*schema.get());
   cudf::io::table_with_metadata result;
   for (int64_t i = 0; i < schema->n_children; ++i) {
-    cudf::io::column_name_info info;
+    auto& info        = result.metadata.schema_info.emplace_back();
     auto const& field = *schema->children[i];
     info.name         = field.name ? field.name : "";
     info.is_nullable  = (field.flags & ARROW_FLAG_NULLABLE) != 0;
-    result.metadata.schema_info.push_back(std::move(info));
   }
 
   std::vector<device_batch> batches;

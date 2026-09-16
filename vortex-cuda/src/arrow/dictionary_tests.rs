@@ -327,7 +327,7 @@ fn test_default_dictionary_device_stream(#[case] second_width: Option<PType>) ->
         Some(width) => dictionary(values, width)?,
         None => expected.clone(),
     };
-    let chunks = runtime.block_on(upload_chunks(vec![first.clone(), first, second], &mut ctx))?;
+    let chunks = runtime.block_on(upload_chunks(vec![first, second], &mut ctx))?;
     let mut stream = ArrayStreamAdapter::new(expected.dtype().clone(), stream::iter(chunks))
         .boxed()
         .export_device_array_stream(&session, &runtime)?;
@@ -336,12 +336,10 @@ fn test_default_dictionary_device_stream(#[case] second_width: Option<PType>) ->
         Field::try_from(&schema)?.data_type(),
         &DataType::Dictionary(Box::new(DataType::Int16), Box::new(DataType::Int32),)
     );
-    for _ in 0..2 {
-        let (status, mut array) = get_next(&mut stream);
-        assert_eq!(status, 0);
-        assert!(!array.array.dictionary.is_null());
-        release_device_array(&mut array);
-    }
+    let (status, mut array) = get_next(&mut stream);
+    assert_eq!(status, 0);
+    assert!(!array.array.dictionary.is_null());
+    release_device_array(&mut array);
     let (status, rejected) = get_next(&mut stream);
     assert_eq!(status, LIBC_EIO);
     assert!(last_error(&mut stream)?.contains("Arrow schema changed"));

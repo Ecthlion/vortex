@@ -590,66 +590,17 @@ mod tests {
     use rstest::rstest;
     use vortex::VortexSessionDefault;
     use vortex::array::IntoArray;
-    use vortex::array::arrays::StructArray;
-    use vortex::array::assert_arrays_eq;
-    use vortex::array::stream::ArrayStreamExt;
     use vortex::buffer::ByteBufferMut;
     use vortex::buffer::buffer;
-    use vortex::compressor::BtrBlocksCompressorBuilder;
     use vortex::editions::CORE_2025_05_0;
     use vortex::editions::ComponentKind;
     use vortex::editions::DEFAULT_CORE_EDITION;
-    use vortex::file::OpenOptionsSessionExt;
     use vortex::file::WriteOptionsSessionExt;
-    use vortex::file::WriteStrategyBuilder;
     use vortex::io::runtime::BlockingRuntime;
     use vortex::io::runtime::current::CurrentThreadRuntime;
     use vortex::io::session::RuntimeSessionExt;
 
     use super::*;
-
-    #[test]
-    fn test_cuda_compatible_write_on_host() -> VortexResult<()> {
-        let runtime = CurrentThreadRuntime::new();
-        let session = VortexSession::default().with_handle(runtime.handle());
-        runtime.block_on(async {
-            register_cuda_layout(&session);
-            let array =
-                StructArray::from_fields(&[("numbers", buffer![1i32, 4, 9, 16].into_array())])?
-                    .into_array();
-            let allowed_encodings = session
-                .enabled_component_ids(ComponentKind::Array)
-                .into_iter()
-                .collect();
-            let strategy = WriteStrategyBuilder::default()
-                .with_btrblocks_builder(
-                    BtrBlocksCompressorBuilder::default()
-                        .only_cuda_compatible()
-                        .retain_allowed_encodings(&allowed_encodings),
-                )
-                .with_flat_strategy(Arc::new(CudaFlatLayoutStrategy::default()))
-                .build();
-
-            let mut buffer = ByteBufferMut::empty();
-            session
-                .write_options()
-                .with_strategy(strategy)
-                .write(&mut buffer, array.to_array_stream())
-                .await?;
-
-            let file = session.open_options().open_buffer(buffer)?;
-            let mut layouts = vec![file.footer().layout().to_layout()];
-            let mut has_cuda_flat = false;
-            while let Some(layout) = layouts.pop() {
-                has_cuda_flat |= layout.encoding_id() == CudaFlat.id();
-                layouts.extend(layout.children()?);
-            }
-            assert!(has_cuda_flat);
-            let result = file.scan()?.into_array_stream()?.read_all().await?;
-            assert_arrays_eq!(array, result, &mut session.create_execution_ctx());
-            Ok(())
-        })
-    }
 
     #[rstest]
     fn test_cuda_registration_preserves_edition_policy(

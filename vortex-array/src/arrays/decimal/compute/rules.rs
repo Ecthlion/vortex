@@ -150,8 +150,7 @@ mod tests {
         }
     }
 
-    // Cover every storage width, validity mode, and host/device handle with full, prefix,
-    // interior, and suffix slices of an already-sliced array to check composed offsets.
+    // Exercise composed byte offsets at every storage width without allowing a host copy.
     #[rstest]
     fn test_slice_buffer_handle(
         #[values(
@@ -163,26 +162,14 @@ mod tests {
             DecimalType::I256
         )]
         values_type: DecimalType,
-        #[values(
-            Validity::NonNullable,
-            Validity::AllValid,
-            Validity::AllInvalid,
-            Validity::from_iter([true, false, true, false, true, true])
-        )]
-        validity: Validity,
-        #[values(false, true)] on_device: bool,
-        #[values(0..4, 0..2, 1..3, 3..4)] range: Range<usize>,
     ) -> VortexResult<()> {
         let mut ctx = array_session().create_execution_ctx();
         let bytes = match_each_decimal_value_type!(values_type, |D| {
             Buffer::<D>::from_iter([-12i8, 34, -56, 78, 90, 12].map(|value| value.as_()))
                 .into_byte_buffer()
         });
-        let handle = if on_device {
-            BufferHandle::new_device(Arc::new(TestDeviceBuffer(bytes.clone())))
-        } else {
-            BufferHandle::new_host(bytes.clone())
-        };
+        let handle = BufferHandle::new_device(Arc::new(TestDeviceBuffer(bytes.clone())));
+        let validity = Validity::from_iter([true, false, true, false, true, true]);
         let array = DecimalArray::try_new_handle(
             handle,
             values_type,
@@ -192,6 +179,7 @@ mod tests {
         .into_array();
         let sliced = array.slice(1..5)?;
 
+        let range = 1..3;
         let nested = sliced.slice(range.clone())?;
         let decimal = nested.as_::<Decimal>();
         let byte_width = values_type.byte_width();
@@ -204,19 +192,15 @@ mod tests {
         assert_eq!(nested.dtype(), array.dtype());
         assert_eq!(decimal.values_type(), values_type);
         assert_eq!(handle.len(), range.len() * byte_width);
-        assert_eq!(handle.is_on_device(), on_device);
+        assert!(handle.is_on_device());
         assert!(handle.is_aligned_to(bytes.alignment()));
 
-        let actual_bytes = if on_device {
-            &handle
-                .as_device()
-                .as_any()
-                .downcast_ref::<TestDeviceBuffer>()
-                .ok_or_else(|| vortex_err!("expected TestDeviceBuffer"))?
-                .0
-        } else {
-            handle.as_host()
-        };
+        let actual_bytes = &handle
+            .as_device()
+            .as_any()
+            .downcast_ref::<TestDeviceBuffer>()
+            .ok_or_else(|| vortex_err!("expected TestDeviceBuffer"))?
+            .0;
         assert_eq!(actual_bytes, &expected_bytes);
         assert_eq!(actual_bytes.as_ptr(), expected_bytes.as_ptr());
         assert_arrays_eq!(

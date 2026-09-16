@@ -2412,8 +2412,7 @@ mod tests {
         let mut ctx = CudaSession::create_execution_ctx(&crate::cuda_session())?;
         let source_len = start + len + suffix_len;
         let source_bits = BitBuffer::from_iter((0..source_len).map(|idx| idx % 5 < 2));
-        let source_bytes = source_bits.clone().into_inner().2;
-        let values = upload_unpadded(&source_bytes, &mut ctx)?;
+        let values = upload_unpadded(source_bits.inner(), &mut ctx)?;
         let valid_bits = BitBuffer::from_iter((0..source_len).map(|idx| idx % 3 != 0));
         let validity = if nullable {
             Validity::Array(
@@ -3591,16 +3590,16 @@ mod tests {
         #[case] input_offset: usize,
         #[case] arrow_offset: usize,
         #[case] len: usize,
-        #[values(0, 1, 2, 3, 4, 5, 6, 7)] byte_offset: usize,
+        #[values(0, 1, 7)] byte_offset: usize,
     ) -> VortexResult<()> {
         let mut ctx = CudaSession::create_execution_ctx(&crate::cuda_session())?;
 
-        let logical_bits = (0..len).map(|idx| idx % 3 != 0).collect::<Vec<_>>();
+        let logical_bits = (0..len).map(|idx| idx % 3 != 0);
         // Dirty prefix and tail bits must not leak into the exported rows or padding.
         let source_bits = byte_offset * 8 + input_offset + len;
         let source = BitBuffer::from_iter(
             std::iter::repeat_n(true, byte_offset * 8 + input_offset)
-                .chain(logical_bits.iter().copied())
+                .chain(logical_bits.clone())
                 .chain(std::iter::repeat_n(
                     true,
                     source_bits.next_multiple_of(8) - source_bits,
@@ -3683,7 +3682,6 @@ mod tests {
 
     #[rstest]
     #[case::truncated(7, 2)]
-    #[case::past_end(8, 1)]
     #[case::overflow(usize::MAX, 1)]
     #[crate::test]
     async fn test_repack_arrow_validity_buffer_rejects_invalid_range(

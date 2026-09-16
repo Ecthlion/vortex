@@ -771,7 +771,7 @@ index c152871..b4b2d7d 100644
 +  .add_string_axis("cache", {"warm", "cold"});
 +#endif
 diff --git a/cpp/benchmarks/ndsh/q09.cpp b/cpp/benchmarks/ndsh/q09.cpp
-index 3fd1aa6..4498669 100644
+index 3fd1aa6..e05ed97 100644
 --- a/cpp/benchmarks/ndsh/q09.cpp
 +++ b/cpp/benchmarks/ndsh/q09.cpp
 @@ -1,4 +1,5 @@
@@ -820,13 +820,22 @@ index 3fd1aa6..4498669 100644
  /**
   * @file q09.cpp
   * @brief Implement query 9 of the NDS-H benchmark.
-@@ -225,19 +250,15 @@ struct q9_data {
+@@ -225,25 +250,22 @@ struct q9_data {
    }
  }
  
--q9_data load_data(std::unordered_map<std::string, cuio_source_sink_pair>& sources)
 +template <typename Read>
 +q9_data load_data(Read&& read)
++{
++  return q9_data{read("lineitem", q9_projections.at("lineitem")),
++                 read("nation", q9_projections.at("nation")),
++                 read("orders", q9_projections.at("orders")),
++                 read("part", q9_projections.at("part")),
++                 read("partsupp", q9_projections.at("partsupp")),
++                 read("supplier", q9_projections.at("supplier"))};
++}
++
+ q9_data load_data(std::unordered_map<std::string, cuio_source_sink_pair>& sources)
  {
 -  auto lineitem = read_parquet(
 -    sources.at("lineitem").make_source_info(),
@@ -839,30 +848,19 @@ index 3fd1aa6..4498669 100644
 -                               {"ps_suppkey", "ps_partkey", "ps_supplycost"});
 -  auto supplier =
 -    read_parquet(sources.at("supplier").make_source_info(), {"s_suppkey", "s_nationkey"});
-+  auto lineitem = read("lineitem", q9_projections.at("lineitem"));
-+  auto nation   = read("nation", q9_projections.at("nation"));
-+  auto orders   = read("orders", q9_projections.at("orders"));
-+  auto part     = read("part", q9_projections.at("part"));
-+  auto partsupp = read("partsupp", q9_projections.at("partsupp"));
-+  auto supplier = read("supplier", q9_projections.at("supplier"));
-   return q9_data{std::move(lineitem),
-                  std::move(nation),
-                  std::move(orders),
-@@ -246,6 +267,13 @@ q9_data load_data(std::unordered_map<std::string, cuio_source_sink_pair>& source
-                  std::move(supplier)};
- }
- 
-+q9_data load_data(std::unordered_map<std::string, cuio_source_sink_pair>& sources)
-+{
+-  return q9_data{std::move(lineitem),
+-                 std::move(nation),
+-                 std::move(orders),
+-                 std::move(part),
+-                 std::move(partsupp),
+-                 std::move(supplier)};
 +  return load_data([&](std::string const& name, std::vector<std::string> const& columns) {
 +    return read_parquet(sources.at(name).make_source_info(), columns);
 +  });
-+}
-+
+ }
+ 
  std::unique_ptr<table_with_names> join_data(q9_data const& data)
- {
-   CUDF_BENCHMARK_RANGE();
-@@ -266,7 +294,6 @@ std::unique_ptr<table_with_names> join_data(q9_data const& data)
+@@ -266,7 +288,6 @@ std::unique_ptr<table_with_names> join_data(q9_data const& data)
  }
  
  std::unique_ptr<table_with_names> compute_profit(
@@ -870,7 +868,7 @@ index 3fd1aa6..4498669 100644
    engine_type engine,
    q9_data const& data,
    cuda::stream_ref stream           = cudf::get_default_stream(),
-@@ -313,14 +340,12 @@ void ndsh_q9(nvbench::state& state)
+@@ -313,14 +334,12 @@ void ndsh_q9(nvbench::state& state)
    auto const engine       = engine_from_string(state.get_string("engine"));
  
    std::unordered_map<std::string, cuio_source_sink_pair> sources;
@@ -887,7 +885,7 @@ index 3fd1aa6..4498669 100644
                                         data,
                                         launch.get_stream().get_stream(),
                                         cudf::get_current_device_resource_ref());
-@@ -336,8 +361,7 @@ void ndsh_q9_noio(nvbench::state& state)
+@@ -336,8 +355,7 @@ void ndsh_q9_noio(nvbench::state& state)
    auto const engine       = engine_from_string(state.get_string("engine"));
  
    std::unordered_map<std::string, cuio_source_sink_pair> sources;
@@ -897,7 +895,7 @@ index 3fd1aa6..4498669 100644
  
    q9_data const data = load_data(sources);
  
-@@ -345,8 +369,7 @@ void ndsh_q9_noio(nvbench::state& state)
+@@ -345,8 +363,7 @@ void ndsh_q9_noio(nvbench::state& state)
  
    auto const mem_stats_logger = cudf::memory_stats_logger();
    state.exec(nvbench::exec_tag::sync, [&](nvbench::launch& launch) {
@@ -907,7 +905,7 @@ index 3fd1aa6..4498669 100644
                              data,
                              launch.get_stream().get_stream(),
                              cudf::get_current_device_resource_ref());
-@@ -364,8 +387,7 @@ void ndsh_q9_amount(nvbench::state& state)
+@@ -364,8 +381,7 @@ void ndsh_q9_amount(nvbench::state& state)
    auto const engine       = engine_from_string(state.get_string("engine"));
  
    std::unordered_map<std::string, cuio_source_sink_pair> sources;
@@ -917,7 +915,7 @@ index 3fd1aa6..4498669 100644
  
    q9_data const data      = load_data(sources);
    auto const joined_table = join_data(data);
-@@ -404,3 +426,159 @@ NVBENCH_BENCH(ndsh_q9_amount)
+@@ -404,3 +420,159 @@ NVBENCH_BENCH(ndsh_q9_amount)
    .set_name("ndsh_q9_amount")
    .add_float64_axis("scale_factor", {0.01, 0.1, 1})
    .add_string_axis("engine", {"binaryop", "ast", "transform"});

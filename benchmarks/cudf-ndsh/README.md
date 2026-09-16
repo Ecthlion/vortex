@@ -15,7 +15,7 @@ simplification and build-option changes and do not validate the current branch.
 
 [`reproduce.py`](reproduce.py) fetches pinned cuDF sources, applies
 [`upstream.patch`](upstream.patch), and builds Release cuDF, CUDA-enabled Vortex,
-the smoke/adapter tests, and five query executables. It uses the original generator.
+the adapter test, and five query executables. It uses the original generator.
 
 Requirements:
 
@@ -75,7 +75,7 @@ not tmpfs, for cold-I/O measurements. Commands default to `--timeout=1200`,
 
 `run` checks the recorded clean source revision and binary/library hashes, reuses
 the build environment, and gives the recorded cuDF library precedence on the library
-search path. It runs smoke/adapter checks, then queries **sequentially on device 0**.
+search path. It runs the adapter test, then queries **sequentially on device 0**.
 Each query covers Parquet/Vortex × read/query × warm/cold; Q9 covers all three amount
 engines. Missing, skipped, duplicate, or untimed states fail the run. Use
 `--scale-factor 10` for SF10 or `--queries 6` for a focused run.
@@ -135,7 +135,7 @@ and separately labeled baselines.
 ## Maintaining the integration
 
 - [`src/vortex_ndsh/`](src/vortex_ndsh/) owns the adapter, CPU references, and shared
-  fixture/cache helpers; [`tests/`](tests/) contains adapter and smoke executables.
+  fixture/cache helpers; [`tests/`](tests/) contains the adapter test executable.
 - The cuDF patch adds `CUDF_WITH_VORTEX`-guarded comparisons alongside the original
   Parquet benchmarks in `cpp/benchmarks/ndsh/qNN.cpp`, sharing their query implementation.
   It also owns query reader/consumer callbacks, named-table generation, and the opt-in
@@ -159,10 +159,9 @@ uvx ruff check benchmarks/cudf-ndsh/*.py
 uvx ruff format --check benchmarks/cudf-ndsh/*.py
 ```
 
-Offline Python tests cover opt-in/build isolation, reproduction safeguards, and
-focused timing/ownership guards—not query implementation snapshots. Standalone
-adapter tests check representative batch/slice types and values against independent
-host Arrow fixtures, plus stream completion and result ownership. FFI tests cover
+Offline Python tests cover opt-in/build isolation and reject incomplete or invalid
+benchmark result matrices. Adapter tests check batch/slice types and values against
+independent host Arrow fixtures, plus stream completion and result ownership. FFI tests cover
 the C boundary, projection pruning, and physical batch boundaries. Coverage is not
 exhaustive; offline tests do not replace real cuDF builds or GPU validation.
 

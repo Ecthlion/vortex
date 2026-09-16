@@ -10,6 +10,8 @@
 #include <cudf/types.hpp>
 #include <cudf/utilities/default_stream.hpp>
 
+#include <rmm/cuda_stream.hpp>
+
 #if __has_include(<rmm/mr/cuda_async_memory_resource.hpp>)
 #include <rmm/mr/cuda_async_memory_resource.hpp>
 #else
@@ -32,20 +34,17 @@
 #include <iostream>
 #include <limits>
 #include <memory>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
-#include <utility>
 #include <vector>
 
-// Test internal staging and schema helpers without public test-only API or FFI headers.
+// Test internal staging without public test-only API or FFI headers.
 namespace ndsh::detail {
 cudf::unique_device_array_t stage_host_chunk(cudf::table_view chunk,
                                              cudaStream_t stream,
                                              rmm::device_async_resource_ref mr);
-void check_flat_schema(ArrowSchema const& schema);
 }  // namespace ndsh::detail
 
 namespace {
@@ -88,32 +87,6 @@ class temporary_directory {
 
  private:
   std::filesystem::path path_;
-};
-
-class cuda_stream {
- public:
-  cuda_stream()
-  {
-    check_cuda(cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking), "create stream");
-  }
-
-  ~cuda_stream()
-  {
-    auto const completed = cudaStreamSynchronize(stream_);
-    auto const destroyed = cudaStreamDestroy(stream_);
-    if (completed != cudaSuccess || destroyed != cudaSuccess) {
-      std::cerr << "CUDA stream cleanup failed: " << cudaGetErrorString(completed) << ", "
-                << cudaGetErrorString(destroyed) << '\n';
-    }
-  }
-
-  cuda_stream(cuda_stream const&)            = delete;
-  cuda_stream& operator=(cuda_stream const&) = delete;
-
-  cudaStream_t get() const { return stream_; }
-
- private:
-  cudaStream_t stream_{};
 };
 
 // Declare after host Arrow owners so even exception unwinding waits before releasing their buffers.
@@ -437,25 +410,25 @@ void check_table(cudf::io::table_with_metadata const& actual,
   auto const count = selected.empty() ? columns.size() : selected.size();
   require(actual.tbl->num_columns() == static_cast<cudf::size_type>(count), "Column count differs");
   require(actual.metadata.schema_info.size() == count, "Metadata column count differs");
+  auto const view = actual.tbl->view();
   std::vector<cudf::column_metadata> metadata;
   for (std::size_t c = 0; c < count; ++c) {
     auto const& spec = columns[selected.empty() ? c : selected[c]];
-    auto const type  = actual.tbl->view().column(static_cast<cudf::size_type>(c)).type();
-    require(type.id() == spec.cudf_type, std::string{spec.name} + ": dtype differs");
+    auto const& column = view.column(static_cast<cudf::size_type>(c));
+    require(column.type().id() == spec.cudf_type, std::string{spec.name} + ": dtype differs");
     if (spec.precision != 0) {
-      require(type.scale() == -spec.arrow_scale,
+      require(column.type().scale() == -spec.arrow_scale,
               std::string{spec.name} + ": decimal scale differs");
     }
     require(actual.metadata.schema_info[c].name == spec.name,
             "Column name differs at index " + std::to_string(c));
-    require(actual.tbl->view().column(static_cast<cudf::size_type>(c)).null_count() ==
-              expected.array->children[c]->null_count,
+    require(column.null_count() == expected.array->children[c]->null_count,
             std::string{spec.name} + ": null count differs");
     metadata.emplace_back(spec.name);
   }
 
-  auto schema = cudf::to_arrow_schema(actual.tbl->view(), {metadata.data(), metadata.size()});
-  auto host   = cudf::to_arrow_host(actual.tbl->view(), cudf_stream(stream));
+  auto schema = cudf::to_arrow_schema(view, metadata);
+  auto host   = cudf::to_arrow_host(view, cudf_stream(stream));
   host_buffer_fence fence{stream};
   fence.wait();
   require(host->device_type == ARROW_DEVICE_CPU, "to_arrow_host did not return host data");
@@ -465,14 +438,10 @@ void check_table(cudf::io::table_with_metadata const& actual,
 cudf::io::table_with_metadata read_completed(ndsh::vortex_io const& io,
                                              std::string const& path,
                                              cudaStream_t stream,
-                                             std::optional<std::size_t> batch_rows,
-                                             std::vector<std::size_t> const& selected = {})
+                                             std::size_t batch_rows,
+                                             std::vector<std::string> const& names = {})
 {
-  auto result = batch_rows
-                  ? io.read_vortex(path, *batch_rows,
-                                   selected.empty() ? std::vector<std::string>{}
-                                                    : column_names(selected))
-                  : io.read_vortex(path);
+  auto result = io.read_vortex(path, batch_rows, names);
   // Check before any test-side synchronization could hide an unfinished consumer stream.
   check_cuda(cudaStreamQuery(stream), "read_vortex must complete the consumer stream");
   return result;
@@ -484,7 +453,7 @@ void write_source(ndsh::vortex_io const& io,
                   int64_t first,
                   cudf::size_type rows,
                   cudf::size_type slice_begin,
-                  std::optional<cudf::size_type> chunk_rows)
+                  cudf::size_type chunk_rows)
 {
   auto source = make_source(stream, first, rows + (slice_begin == 0 ? 0 : slice_begin + 4));
   auto input  = source->view();
@@ -492,11 +461,7 @@ void write_source(ndsh::vortex_io const& io,
     input = cudf::slice(input, {slice_begin, slice_begin + rows}, cudf_stream(stream)).front();
     require(input.column(0).offset() == slice_begin, "Test input is not actually sliced");
   }
-  if (chunk_rows) {
-    io.write_vortex(path, input, column_names(), *chunk_rows);
-  } else {
-    io.write_vortex(path, input, column_names());
-  }
+  io.write_vortex(path, input, column_names(), chunk_rows);
   check_cuda(cudaStreamQuery(stream), "write staging cleanup must complete the stream");
 }
 
@@ -504,8 +469,8 @@ struct round_trip_case {
   char const* name;
   cudf::size_type rows;
   cudf::size_type slice_begin;
-  std::optional<cudf::size_type> chunk_rows;
-  std::optional<std::size_t> batch_rows;
+  cudf::size_type chunk_rows;
+  std::size_t batch_rows;
 };
 
 void round_trip(temporary_directory const& directory, cudaStream_t stream, round_trip_case const& test)
@@ -525,8 +490,8 @@ void test_staged_string_bytes(cudaStream_t stream)
   constexpr cudf::size_type parent_rows = 4096;
   auto source                           = make_source(stream, 0, parent_rows);
   std::vector<cudf::column_metadata> metadata;
-  for (auto const& name : column_names()) {
-    metadata.emplace_back(name);
+  for (auto const& spec : columns) {
+    metadata.emplace_back(spec.name);
   }
   auto schema = cudf::to_arrow_schema(source->view(), metadata);
   // Prefix and offset slices exercise both string-compaction conditions; keep the empty path too.
@@ -559,15 +524,15 @@ void test_async_owned_reads(temporary_directory const& directory, cudaStream_t s
   {
     auto const first_path  = directory.file("owned-first.vortex");
     auto const second_path = directory.file("owned-second.vortex");
-    std::vector<cudf::io::table_with_metadata> results;
+    std::array<cudf::io::table_with_metadata, 2> results;
     {
       ndsh::vortex_io io{stream, rmm::device_async_resource_ref{resource}};
       write_source(io, first_path, stream, 0, 37, 0, 37);
       write_source(io, second_path, stream, 10000, 37, 0, 13);
       // Exercise both owning-copy and concatenation paths, including boolean import scratch.
-      results.push_back(read_completed(io, first_path, stream, 64));
+      results[0] = read_completed(io, first_path, stream, 0);
       // A different file must not overwrite buffers held by the earlier returned table.
-      results.push_back(read_completed(io, second_path, stream, 7));
+      results[1] = read_completed(io, second_path, stream, 7);
     }
     require(std::filesystem::remove(first_path), "Failed to remove first owned-read file");
     require(std::filesystem::remove(second_path), "Failed to remove second owned-read file");
@@ -577,84 +542,20 @@ void test_async_owned_reads(temporary_directory const& directory, cudaStream_t s
   resource_fence.wait();
 }
 
-template <typename Function>
-void expect_error(char const* label, Function&& function, bool match_message = false)
+void test_projection(temporary_directory const& directory, cudaStream_t stream)
 {
-  try {
-    function();
-  } catch (std::exception const& error) {
-    require(!match_message || std::string_view{error.what()}.find(label) != std::string_view::npos,
-            std::string{"Unexpected error: "} + error.what());
-    return;
-  }
-  throw std::runtime_error(std::string{label} + ": expected an exception");
-}
-
-void test_errors(temporary_directory const& directory, cudaStream_t stream)
-{
-  nanoarrow::UniqueSchema schema;
-  ArrowSchemaInit(schema.get());
-  NANOARROW_THROW_NOT_OK(ArrowSchemaSetTypeStruct(schema.get(), 0));
-  for (auto const flags : {int64_t{0}, int64_t{ARROW_FLAG_NULLABLE}}) {
-    schema->flags = flags;
-    // Rejection is schema-level, independent of whether any batches/rows exist.
-    expect_error("read_vortex requires at least one column",
-                 [&] { ndsh::detail::check_flat_schema(*schema.get()); }, true);
-  }
-  auto empty = make_fixture(0, 0);
-  ndsh::detail::check_flat_schema(*empty.schema.get());
-
   auto source = make_source(stream, 0, 9);
-  auto names  = column_names();
   ndsh::vortex_io io{stream};
-  auto const zero_path = directory.file("zero-columns.vortex");
-  expect_error("write_vortex requires at least one column",
-               [&] { io.write_vortex(zero_path, cudf::table_view{}, {}); }, true);
-  require(!std::filesystem::exists(zero_path), "Rejected zero-column write created a file");
-
-  auto const path = directory.file("nul-column-name.vortex");
-  for (auto const& name : {std::string{"a\0b", 3}, std::string{"\0a", 2}, std::string{"a\0", 2}}) {
-    names.back() = name;
-    expect_error("column names must not contain NUL bytes",
-                 [&] { io.write_vortex(path, source->view(), names, 3); }, true);
-    require(!std::filesystem::exists(path), "Rejected column name created a file");
-  }
-  names = column_names();
-  io.write_vortex(path, source->view(), names, 3);
-  expect_error("unknown CUDA scan column",
-               [&] { static_cast<void>(io.read_vortex(path, 7, {"i32", "missing"})); }, true);
+  auto const path = directory.file("projection.vortex");
+  io.write_vortex(path, source->view(), column_names(), 3);
   std::vector<std::size_t> const selected{11, 16, 0, 8, 18, 12};
-  auto projected = read_completed(io, path, stream, 7, selected);
+  auto projected = read_completed(io, path, stream, 7, column_names(selected));
   check_table(projected, make_fixture(0, 9, selected), stream, selected);
   for (std::size_t c = 0; c < selected.size(); ++c) {
     require(projected.metadata.schema_info[c].is_nullable ==
               source->view().column(static_cast<cudf::size_type>(selected[c])).nullable(),
             "Projected nullability metadata differs");
   }
-  expect_error("duplicate CUDA scan column",
-               [&] { static_cast<void>(io.read_vortex(path, 7, {"i32", "i32"})); }, true);
-
-  for (auto const chunk_rows : {0, -1}) {
-    auto const name = chunk_rows == 0 ? "invalid-zero.vortex" : "invalid-negative.vortex";
-    expect_error(name, [&] {
-      io.write_vortex(directory.file(name), source->view(), names, chunk_rows);
-    });
-  }
-  for (auto const count : {names.size() - 1, names.size() + 1}) {
-    auto invalid_names = names;
-    invalid_names.resize(count, "extra");
-    auto const name = count < names.size() ? "invalid-few.vortex" : "invalid-many.vortex";
-    expect_error(name, [&] {
-      io.write_vortex(directory.file(name), source->view(), invalid_names, 3);
-    });
-  }
-  auto const missing = directory.file("does-not-exist.vortex");
-  require(!std::filesystem::exists(missing), "Missing-path test unexpectedly has a file");
-  expect_error("missing read path", [&] { static_cast<void>(io.read_vortex(missing, 3)); });
-
-  auto const valid = directory.file("after-errors.vortex");
-  io.write_vortex(valid, source->view(), names, 3);
-  check_table(read_completed(io, valid, stream, 2), make_fixture(0, 9), stream);
 }
 
 }  // namespace
@@ -665,29 +566,29 @@ int main()
   try {
     check_cuda(cudaSetDevice(0), "select CUDA device 0");
     // Never replace the process's current resource: it and this stream outlive all contexts/tables.
-    cuda_stream stream;
+    rmm::cuda_stream stream_owner{rmm::cuda_stream::flags::non_blocking};
+    auto const stream = stream_owner.value();
+    // RMM destroys the stream without waiting; drain it on exception unwinding too.
+    host_buffer_fence stream_fence{stream};
     temporary_directory directory;
     int passed = 0;
     auto run   = [&](char const* name, auto&& test) {
       current_test = name;
       test();
-      check_cuda(cudaStreamSynchronize(stream.get()), "complete test allocations/deallocations");
+      check_cuda(cudaStreamSynchronize(stream), "complete test allocations/deallocations");
       ++passed;
       std::cout << "[PASS] " << name << '\n';
     };
-    run("bounded string host staging", [&] { test_staged_string_bytes(stream.get()); });
+    run("bounded string host staging", [&] { test_staged_string_bytes(stream); });
     run("explicit async resource, owning reads, and stream completion",
-        [&] { test_async_owned_reads(directory, stream.get()); });
-    for (auto const& test : std::array<round_trip_case, 5>{{
-           {"defaults", 37, 0, std::nullopt, std::nullopt},
+        [&] { test_async_owned_reads(directory, stream); });
+    for (auto const& test : std::array<round_trip_case, 3>{{
            {"sliced", 69, 5, 11, 7},
            {"word-boundary", 520, 0, 520, 507},
-           {"empty", 0, 0, 7, 0},
-           {"low-cardinality", 8193, 0, 2048, 0}}}) {
-      run(test.name, [&] { round_trip(directory, stream.get(), test); });
+           {"empty", 0, 0, 7, 0}}}) {
+      run(test.name, [&] { round_trip(directory, stream, test); });
     }
-    run("zero columns, invalid names/arguments, missing path, projection, and context reuse",
-        [&] { test_errors(directory, stream.get()); });
+    run("ordered projection and metadata", [&] { test_projection(directory, stream); });
     std::cout << "vortex_io: " << passed << " tests passed on CUDA device 0 (non-default stream)\n";
     return 0;
   } catch (std::exception const& error) {

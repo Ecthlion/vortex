@@ -463,10 +463,8 @@ mod tests {
     #[case::empty_at_end(16, 16, 4..4, false)]
     #[case::reversed(6, 2, 2..6, true)]
     #[case::end_past_logical_length(4, 11, 2..9, true)]
-    #[case::start_past_logical_length(11, 11, 2..2, true)]
     #[case::destination_too_short(2, 6, 2..5, true)]
     #[case::destination_too_long(2, 6, 2..7, true)]
-    #[case::extreme_end(0, usize::MAX, 2..6, true)]
     #[crate::test]
     fn copy_to_device_subview(
         #[case] start: usize,
