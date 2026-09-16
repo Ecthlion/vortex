@@ -42,7 +42,12 @@ inline uint64_t q9_partsupp_key(int32_t supplier, int32_t part)
 }
 }  // namespace detail
 
-// One callback per projected table in generator order; all computation is on bounded host copies.
+/**
+ * Setup-only CPU oracle: add_table borrows one complete, non-null projected table per call
+ * in generator order, computing on bounded host copies without retaining device views.
+ * finish requires all six tables, including empty ones. Duplicate partsupp pairs retain
+ * join multiplicity.
+ */
 class q9_reference_builder {
  public:
   void add_table(std::string const& name, cudf::table_view projected, cuda::stream_ref stream)
@@ -141,6 +146,7 @@ class q9_reference_builder {
   q9_reference_result result_;
 };
 
+/** Check complete Q9 output ordered by nation ascending, then year descending. */
 inline void check_q9_result(q9_reference_result const& expected,
                             table_with_names const& actual,
                             cuda::stream_ref stream)

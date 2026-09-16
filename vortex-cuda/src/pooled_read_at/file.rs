@@ -183,6 +183,8 @@ impl PooledFileReadAt {
         })
     }
 
+    /// Read into pinned memory under the file's shared concurrency limit.
+    /// The returned `requested_range` excludes any backend alignment padding.
     async fn read_host(&self, offset: u64, length: usize) -> VortexResult<PooledHostRead> {
         let backend = Arc::clone(&self.backend);
         let pool = Arc::clone(&self.pool);

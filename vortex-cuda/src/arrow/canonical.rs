@@ -1821,6 +1821,8 @@ mod tests {
         ))))
     }
 
+    /// Assert cuDF word alignment and zeroed tail padding, returning the logical bytes on the host.
+    /// With `exact_allocation`, also require the backing allocation to match the padded size.
     fn assert_bitmap_padding(
         buffer: &BufferHandle,
         logical_bytes: usize,

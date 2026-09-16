@@ -31,7 +31,10 @@ QUERIES = (1, 5, 6, 9, 10)
 
 
 def patch_postimages():
-    # Inspect exported hunk postimages, never the ignored development checkout.
+    """Read added/context lines from the exported patch, not the development checkout.
+
+    Values concatenate hunk fragments; they are not reconstructed complete files.
+    """
     sources = {}
     for section in PATCH.read_text(encoding="utf-8").split("diff --git ")[1:]:
         _, separator, post_image = section.partition("\n+++ b/")

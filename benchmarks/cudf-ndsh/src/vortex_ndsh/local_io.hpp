@@ -72,6 +72,7 @@ class local_table_files {
   std::map<std::string, std::pair<std::string, std::string>> files_;
 };
 
+/** Read projected columns into an owning table; direct_io affects only Vortex reads. */
 inline std::unique_ptr<table_with_names> read_local_file(std::string const& path,
                                                          bool use_vortex,
                                                          vortex_io const& io,

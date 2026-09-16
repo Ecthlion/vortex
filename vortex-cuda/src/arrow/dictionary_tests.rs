@@ -25,8 +25,8 @@ use super::tests::last_error;
 use super::*;
 use crate::CudaSession;
 
-// Preserve encodings while moving all buffers, including validity, to CUDA so unsupported
-// decoding errors instead of falling back to the CPU.
+/// Preserve encodings while moving all buffers, including validity, to CUDA so unsupported
+/// decoding errors instead of falling back to the CPU.
 pub(super) fn upload(
     array: ArrayRef,
     ctx: &mut CudaExecutionCtx,
@@ -52,6 +52,7 @@ pub(super) fn upload(
     })
 }
 
+/// Copy a device buffer from a live, unreleased array produced by this exporter to the host.
 fn buffer(array: &ArrowArray, index: usize) -> VortexResult<ByteBuffer> {
     // SAFETY: Only called on live arrays produced by our exporter, before their release.
     let private = unsafe { &*array.private_data.cast::<PrivateData>() };
@@ -62,6 +63,8 @@ fn buffer(array: &ArrowArray, index: usize) -> VortexResult<ByteBuffer> {
     buffer.try_to_host_sync()
 }
 
+/// Rebuild supported zero-offset, dictionary-free exports as host arrays for comparison.
+/// Requires live arrays from this exporter and their matching logical dtype.
 fn read_plain(array: &ArrowArray, dtype: &DType) -> VortexResult<ArrayRef> {
     assert!(array.dictionary.is_null());
     assert_eq!(array.offset, 0);
@@ -167,6 +170,7 @@ fn get_next(stream: &mut ArrowDeviceArrayStream) -> (i32, ArrowDeviceArray) {
     (status, array)
 }
 
+/// Upload chunks and synchronize before handing them to a separate export context.
 async fn upload_chunks(
     chunks: Vec<ArrayRef>,
     ctx: &mut CudaExecutionCtx,

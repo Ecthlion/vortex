@@ -25,7 +25,11 @@ struct q5_reference_result {
   int64_t matched = 0;
 };
 
-// One callback per table in dependency order; only filtered CPU dimensions survive callbacks.
+/**
+ * Setup-only CPU oracle: add_table borrows one complete, non-null projected table per call
+ * in dependency order, retaining only CPU state. part and partsupp are ignored.
+ * finish requires all six query tables, including empty ones.
+ */
 class q5_reference_builder {
  public:
   void add_table(std::string const& name, cudf::table_view projected, cuda::stream_ref stream)
@@ -114,6 +118,7 @@ class q5_reference_builder {
   q5_reference_result result_;
 };
 
+/** Check complete Q5 output in descending revenue order; ties may appear in any order. */
 inline void check_q5_result(q5_reference_result const& expected,
                             table_with_names const& actual,
                             cuda::stream_ref stream)

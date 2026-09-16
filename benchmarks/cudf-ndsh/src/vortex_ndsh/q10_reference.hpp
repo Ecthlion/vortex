@@ -35,7 +35,11 @@ struct q10_reference_result {
   int64_t matched = 0;
 };
 
-// One callback per projected table in generator order; all computation is on bounded host copies.
+/**
+ * Setup-only CPU oracle: add_table borrows one complete, non-null projected table per call
+ * in generator order, computing on bounded host copies without retaining device views.
+ * finish requires all four tables, including empty ones.
+ */
 class q10_reference_builder {
  public:
   void add_table(std::string const& name, cudf::table_view projected, cuda::stream_ref stream)
@@ -118,6 +122,10 @@ class q10_reference_builder {
   q10_reference_result result_;
 };
 
+/**
+ * Check complete Q10 output with exact customer attributes and descending revenue;
+ * revenue uses the shared float tolerance, and ties may appear in any order.
+ */
 inline void check_q10_result(q10_reference_result const& expected,
                              table_with_names const& actual,
                              cuda::stream_ref stream)

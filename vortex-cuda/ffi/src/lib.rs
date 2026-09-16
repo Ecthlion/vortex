@@ -87,6 +87,7 @@ fn session_with_cuda(session: &VortexSession) -> &VortexSession {
     session
 }
 
+/// Build a CUDA-flat writer using only session-enabled encodings.
 fn cuda_write_strategy(session: &VortexSession, block_rows: usize) -> Arc<dyn LayoutStrategy> {
     let allowed_encodings = session
         .enabled_component_ids(ComponentKind::Array)
@@ -330,6 +331,12 @@ pub unsafe extern "C-unwind" fn vx_cuda_scan_path_arrow_device_stream_projected(
     })
 }
 
+/// Copy ordered, literal field names, rejecting invalid views and duplicates. Zero selects all.
+///
+/// # Safety
+///
+/// Inputs passing null/alignment/size checks must reference `ncolumns` live views at `columns`,
+/// with `len` readable bytes at each non-null name pointer.
 unsafe fn scan_columns(columns: *const vx_view, ncolumns: usize) -> VortexResult<FieldNames> {
     if ncolumns == 0 {
         return Ok(FieldNames::default());
@@ -363,6 +370,7 @@ unsafe fn scan_columns(columns: *const vx_view, ncolumns: usize) -> VortexResult
     Ok(names.into())
 }
 
+/// Apply projection before column reads; row limits subdivide, never merge, layout splits.
 fn projected_scan(
     file: &VortexFile,
     columns: FieldNames,
@@ -395,6 +403,7 @@ struct CudaScanOptions {
     batch_rows: usize,
 }
 
+/// Select plain Arrow export for one scan without mutating the shared session.
 fn scan_export_ctx(session: &VortexSession) -> VortexResult<CudaExecutionCtx> {
     Ok(
         CudaSession::create_execution_ctx(session)?
@@ -402,6 +411,11 @@ fn scan_export_ctx(session: &VortexSession) -> VortexResult<CudaExecutionCtx> {
     )
 }
 
+/// Parse scan settings; null selects defaults and unknown flags are ignored.
+///
+/// # Safety
+///
+/// Non-null `options` must point to an initialized, aligned [`vx_cuda_scan_options`].
 unsafe fn scan_options(options: *const vx_cuda_scan_options) -> VortexResult<CudaScanOptions> {
     let defaults = vx_cuda_scan_options::default();
     // SAFETY: The caller guarantees that a non-null options pointer is valid for this call.

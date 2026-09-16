@@ -23,9 +23,11 @@ namespace ndsh {
  * Retains up to 8 GiB in CUDA's default memory pool between synchronized reads.
  * Caller stream/resource must outlive this context and returned tables.
  * Requires at least one flat, typed column; zero-row tables are supported.
+ * Device 0 must be current for construction and I/O. Paths must be nonempty and NUL-free.
  */
 class vortex_io {
  public:
+  /** Create a Vortex CUDA session; the borrowed stream and resource control cuDF work only. */
   explicit vortex_io(cudaStream_t stream,
                      rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
   ~vortex_io();
@@ -34,7 +36,7 @@ class vortex_io {
 
   /**
    * Write a CUDA-readable local file on CPU via host Arrow chunks. Requires positive
-   * chunk_rows, non-dictionary input, and NUL-free column names. chunk_rows also sets
+   * chunk_rows, non-dictionary input, and one NUL-free name per column. chunk_rows also sets
    * the physical CUDA-flat row-block size and disables byte coalescing/layout dictionaries. Partial
    * string slices are compacted on device. Finalizes before return; failed writes may
    * leave an invalid file.
@@ -53,7 +55,7 @@ class vortex_io {
    * Nonzero batch_rows sets a maximum; physical layout boundaries may produce shorter
    * batches. Zero uses layout-derived splitting. direct_io bypasses the OS page cache for
    * data-plane reads; metadata remains buffered. Peak memory includes retained Vortex batches
-   * plus the owning result.
+   * plus the owning result. batch_rows and total result rows must fit cudf::size_type.
    */
   [[nodiscard]] cudf::io::table_with_metadata read_vortex(
     std::string const& path,

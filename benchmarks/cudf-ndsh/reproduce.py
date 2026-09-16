@@ -111,6 +111,10 @@ class Runner:
         save(self.logs / "environment.json", env)
 
     def run(self, label: str, argv: list[str | Path | int], cwd: Path | None = None) -> str:
+        """Return combined output on success, retaining logs on failure.
+
+        Timeout or interruption kills the entire subprocess group, not just its leader.
+        """
         argv = list(map(str, argv))
         cwd = Path(cwd or self.work)
         log = self.logs / f"{len(self.commands):03}-{label}.log"
@@ -147,6 +151,7 @@ class Runner:
         return output
 
     def download(self, name: str, source: dict) -> Path:
+        """Verify fresh and cached downloads against SHA-256; reject corrupt cached files."""
         path = self.work / name
         if not path.exists():
             temporary = path.with_suffix(path.suffix + ".part")
@@ -159,6 +164,10 @@ class Runner:
         return path
 
     def checkout(self, name: str, source: dict, *, patched: bool = False) -> Path:
+        """Require the pinned HEAD, leaving existing checkouts untouched.
+
+        ``patched=True`` permits local changes; the caller must validate their contents.
+        """
         path = self.work / name
         if not path.exists():
             self.run(f"{name}-init", ["git", "init", "--quiet", path])
@@ -179,6 +188,7 @@ def identity() -> dict:
 
 
 def source_state(path: Path) -> dict[str, str]:
+    """Capture tracked changes against HEAD and status; untracked contents are not recorded."""
     return {
         "diff": git_output(path, "diff", "--binary", "HEAD"),
         "status": git_output(path, "status", "--porcelain", "--untracked-files=all"),
@@ -186,6 +196,7 @@ def source_state(path: Path) -> dict[str, str]:
 
 
 def initialize_work(work: Path, recipe: dict):
+    """Claim an empty directory, or reuse one only if its recorded recipe matches exactly."""
     marker = work / "recipe.json"
     if marker.exists():
         if json.loads(marker.read_text()) != recipe:
@@ -198,6 +209,7 @@ def initialize_work(work: Path, recipe: dict):
 
 
 def configure_command(args: argparse.Namespace, lock: dict) -> list[str | Path]:
+    """Keep caller toolchain settings, but give recipe-owned definitions final precedence."""
     work = args.work_dir
     flags = {
         "CMAKE_BUILD_TYPE": "Release",
@@ -243,6 +255,7 @@ def compiler_arguments(arguments: list[str]) -> list[str]:
 
 
 def record_toolchain(runner: Runner) -> dict:
+    """Record configured compiler identities before enforcing the CUDA >= 12.8 requirement."""
     cache = {}
     for line in (runner.work / "cudf-build/CMakeCache.txt").read_text().splitlines():
         if line and not line.startswith(("#", "//")) and "=" in line:
@@ -386,6 +399,11 @@ def benchmark_command(binary: Path, query: int, args: argparse.Namespace, output
 
 
 def validate_results(data: dict, query: int, scale_factor: float):
+    """Require each read/query × format × cache state exactly once, including Q9 engines.
+
+    Every state must run on device 0 at the requested scale and have one finite,
+    positive NVBench cold CPU mean; skipped states are rejected.
+    """
     if [bench["name"] for bench in data["benchmarks"]] != [f"ndsh_q{query}_local"]:
         raise RuntimeError(f"Expected only ndsh_q{query}_local results")
     states = data["benchmarks"][0]["states"]
@@ -418,6 +436,7 @@ def validate_results(data: dict, query: int, scale_factor: float):
 
 
 def benchmark(args: argparse.Namespace, recipe: dict):
+    """Verify recorded build hashes before GPU calls, then reuse the build's environment."""
     work = args.work_dir
     record = json.loads((work / "build.json").read_text())
     binaries = work / "cudf-build/benchmarks"
