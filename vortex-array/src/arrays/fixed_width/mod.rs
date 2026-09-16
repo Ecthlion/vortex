@@ -5,11 +5,14 @@
 
 mod array;
 pub(crate) mod filter;
+pub(crate) mod mask;
+pub(crate) mod slice;
 pub(crate) mod take;
 pub(crate) mod vtable;
 
 pub(crate) use self::array::FixedWidthArray;
 pub(crate) use self::array::with_values;
+pub(crate) use self::array::with_values_handle;
 
 /// Dispatches a runtime byte width to a compile-time `const $W: usize` for every record width
 /// with a dedicated fixed-width kernel, falling back to `$fallback` for any other width.

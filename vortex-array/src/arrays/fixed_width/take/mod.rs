@@ -32,7 +32,6 @@ use crate::array::ArrayView;
 use crate::arrays::ConstantArray;
 use crate::arrays::PiecewiseSequence;
 use crate::arrays::PrimitiveArray;
-use crate::arrays::dict::TakeExecute;
 use crate::arrays::piecewise_sequence::constant_unsigned_usize;
 use crate::arrays::piecewise_sequence::maybe_contiguous_slices;
 use crate::builtins::ArrayBuiltins;
@@ -44,16 +43,6 @@ use crate::scalar::Scalar;
 
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
 static HAS_AVX2: LazyLock<bool> = LazyLock::new(|| is_x86_feature_detected!("avx2"));
-
-impl<V: FixedWidthArray> TakeExecute for V {
-    fn take(
-        array: ArrayView<'_, Self>,
-        indices: &ArrayRef,
-        ctx: &mut ExecutionCtx,
-    ) -> VortexResult<Option<ArrayRef>> {
-        take(array, indices, ctx)
-    }
-}
 
 /// A fixed-width value whose initialized bytes may be moved through integer SIMD lanes.
 ///

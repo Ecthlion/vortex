@@ -11,6 +11,7 @@ use crate::array::ArrayView;
 use crate::arrays::Decimal;
 use crate::arrays::DecimalArray;
 use crate::arrays::Masked;
+use crate::arrays::fixed_width;
 use crate::arrays::slice::SliceReduce;
 use crate::arrays::slice::SliceReduceAdaptor;
 use crate::match_each_decimal_value_type;
@@ -63,13 +64,6 @@ impl ArrayParentReduceRule<Decimal> for DecimalMaskedValidityRule {
 
 impl SliceReduce for Decimal {
     fn slice(array: ArrayView<'_, Self>, range: Range<usize>) -> VortexResult<Option<ArrayRef>> {
-        let result = match_each_decimal_value_type!(array.values_type(), |D| {
-            let sliced = array.buffer::<D>().slice(range.clone());
-            let validity = array.validity()?.slice(range)?;
-            // SAFETY: Slicing preserves all DecimalArray invariants
-            unsafe { DecimalArray::new_unchecked(sliced, array.decimal_dtype(), validity) }
-                .into_array()
-        });
-        Ok(Some(result))
+        fixed_width::slice::slice(array, range)
     }
 }

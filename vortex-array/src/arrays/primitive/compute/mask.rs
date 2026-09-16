@@ -4,24 +4,14 @@
 use vortex_error::VortexResult;
 
 use crate::ArrayRef;
-use crate::IntoArray;
 use crate::array::ArrayView;
 use crate::arrays::Primitive;
-use crate::arrays::PrimitiveArray;
+use crate::arrays::fixed_width;
 use crate::scalar_fn::fns::mask::MaskReduce;
-use crate::validity::Validity;
 
 impl MaskReduce for Primitive {
     fn mask(array: ArrayView<'_, Primitive>, mask: &ArrayRef) -> VortexResult<Option<ArrayRef>> {
-        // SAFETY: validity and data buffer still have same length
-        Ok(Some(unsafe {
-            PrimitiveArray::new_unchecked_from_handle(
-                array.buffer_handle().clone(),
-                array.ptype(),
-                array.validity()?.and(Validity::Array(mask.clone()))?,
-            )
-            .into_array()
-        }))
+        fixed_width::mask::mask(array, mask)
     }
 }
 

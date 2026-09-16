@@ -1,32 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-use std::sync::Arc;
-
 use vortex_error::VortexResult;
 
 use crate::ArrayRef;
-use crate::IntoArray;
 use crate::array::ArrayView;
 use crate::arrays::VarBinView;
-use crate::arrays::VarBinViewArray;
+use crate::arrays::fixed_width;
 use crate::scalar_fn::fns::mask::MaskReduce;
-use crate::validity::Validity;
 
 impl MaskReduce for VarBinView {
     fn mask(array: ArrayView<'_, VarBinView>, mask: &ArrayRef) -> VortexResult<Option<ArrayRef>> {
-        // SAFETY: masking the validity does not affect the invariants
-        unsafe {
-            Ok(Some(
-                VarBinViewArray::new_handle_unchecked(
-                    array.views_handle().clone(),
-                    Arc::clone(array.data_buffers()),
-                    array.dtype().as_nullable(),
-                    array.validity()?.and(Validity::Array(mask.clone()))?,
-                )
-                .into_array(),
-            ))
-        }
+        fixed_width::mask::mask(array, mask)
     }
 }
 
