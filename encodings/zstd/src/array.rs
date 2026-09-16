@@ -25,6 +25,7 @@ use vortex_array::EqMode;
 use vortex_array::ExecutionCtx;
 use vortex_array::ExecutionResult;
 use vortex_array::IntoArray;
+use vortex_array::ProbeState;
 use vortex_array::array_slots;
 use vortex_array::arrays::ConstantArray;
 use vortex_array::arrays::PrimitiveArray;
@@ -66,11 +67,12 @@ use zstd::zstd_safe::WriteBuf;
 
 use crate::ZstdFrameMetadata;
 use crate::ZstdMetadata;
+use crate::probe::ZstdProbeState;
 use crate::validate_frame_content_size;
 
 // Zstd doesn't support training dictionaries on very few samples.
 const MIN_SAMPLES_FOR_DICTIONARY: usize = 8;
-type ViewLen = u32;
+pub(crate) type ViewLen = u32;
 
 // Overall approach here:
 // Zstd can be used on the whole array (values_per_frame = 0), resulting in a single Zstd
@@ -309,7 +311,7 @@ impl VTable for Zstd {
     }
 }
 
-fn unsliced_validity(array: ArrayView<'_, Zstd>) -> Validity {
+pub(crate) fn unsliced_validity(array: ArrayView<'_, Zstd>) -> Validity {
     child_to_validity(
         array.slots()[ZstdSlots::VALIDITY].as_ref(),
         array.dtype().nullability(),
@@ -875,7 +877,7 @@ fn zstd_value_offset(buffer: &[u8], mut offset: usize, count: usize) -> VortexRe
 
 /// Reads the length prefix of the value starting at `offset`.
 #[inline]
-fn zstd_value_len(buffer: &[u8], offset: usize) -> VortexResult<usize> {
+pub(crate) fn zstd_value_len(buffer: &[u8], offset: usize) -> VortexResult<usize> {
     let prefix = buffer
         .get(offset..)
         .and_then(|rest| rest.first_chunk::<{ size_of::<ViewLen>() }>())
@@ -1302,7 +1304,7 @@ impl ZstdData {
             .ok_or_else(|| vortex_err!("Zstd can only encode Primitive and VarBinView arrays"))
     }
 
-    fn byte_width(dtype: &DType) -> usize {
+    pub(crate) fn byte_width(dtype: &DType) -> usize {
         if dtype.is_primitive() {
             dtype.as_ptype().byte_width()
         } else {
@@ -1456,7 +1458,55 @@ impl ZstdData {
         })
     }
 
-    fn decompress(
+    /// Decompress frame `index` on its own.
+    ///
+    /// [`Self::decompress_slice`] decompresses a whole run of frames into one buffer, which a
+    /// repeated probe cannot reuse across rows that land in different frames. This decompresses
+    /// one frame so a probe can retain it and decompress each frame at most once.
+    pub(crate) fn decompress_frame(
+        &self,
+        index: usize,
+        byte_width: usize,
+    ) -> VortexResult<ByteBuffer> {
+        let frame = self
+            .frames
+            .get(index)
+            .ok_or_else(|| vortex_err!("Zstd frame {index} is missing"))?;
+        let uncompressed_size = self
+            .metadata
+            .frames
+            .get(index)
+            .ok_or_else(|| vortex_err!("Zstd frame {index} metadata is missing"))?
+            .uncompressed_size;
+        let uncompressed_size = usize::try_from(uncompressed_size).map_err(|_| {
+            vortex_err!("Zstd frame uncompressed size {uncompressed_size} does not fit in a usize")
+        })?;
+
+        let mut decompressor = if let Some(dictionary) = &self.dictionary {
+            zstd::bulk::Decompressor::with_dictionary(dictionary)?
+        } else {
+            zstd::bulk::Decompressor::new()?
+        };
+        let mut decompressed =
+            ByteBufferMut::with_capacity_aligned(uncompressed_size, Alignment::new(byte_width));
+        // Decompress straight into the spare capacity, bounded by the size the metadata declared,
+        // so a frame that expands further than advertised is refused by zstd rather than
+        // overrunning.
+        let mut destination =
+            UninitDestination::new(&mut decompressed.spare_capacity_mut()[..uncompressed_size]);
+        let n_bytes = decompressor.decompress_to_buffer(frame.as_slice(), &mut destination)?;
+        vortex_ensure!(
+            n_bytes == uncompressed_size,
+            "Zstd metadata or frames were corrupt; expected {uncompressed_size} bytes but \
+             decompressed {n_bytes}"
+        );
+        // SAFETY: the decompression above wrote exactly `n_bytes` into the front of the spare
+        // capacity, and the check above pins that to the requested length.
+        unsafe { decompressed.set_len(n_bytes) };
+        Ok(decompressed.freeze())
+    }
+
+    pub(crate) fn decompress(
         &self,
         dtype: &DType,
         unsliced_validity: &Validity,
@@ -1589,21 +1639,23 @@ impl ValidityVTable<Zstd> for Zstd {
 }
 
 impl OperationsVTable<Zstd> for Zstd {
-    type ProbeState = ();
+    type ProbeState = ZstdProbeState;
+
+    fn probe_scalar(
+        state: &mut ProbeState<'_, Zstd>,
+        index: usize,
+        ctx: &mut ExecutionCtx,
+    ) -> VortexResult<Scalar> {
+        let array = state.array();
+        crate::probe::scalar_at(array, index, state.retained(), ctx)
+    }
 
     fn scalar_at(
         array: ArrayView<'_, Zstd>,
         index: usize,
         ctx: &mut ExecutionCtx,
     ) -> VortexResult<Scalar> {
-        let unsliced_validity = child_to_validity(
-            array.slots()[ZstdSlots::VALIDITY].as_ref(),
-            array.dtype().nullability(),
-        );
-        let sliced = array.data().with_slice(index, index + 1);
-        sliced
-            .decompress(array.dtype(), &unsliced_validity, ctx)?
-            .execute_scalar(0, ctx)
+        crate::probe::scalar_at(array, index, None, ctx)
     }
 }
 

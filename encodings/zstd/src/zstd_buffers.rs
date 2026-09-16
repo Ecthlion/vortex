@@ -21,6 +21,7 @@ use vortex_array::ArrayView;
 use vortex_array::EqMode;
 use vortex_array::ExecutionCtx;
 use vortex_array::ExecutionResult;
+use vortex_array::ProbeState;
 use vortex_array::buffer::BufferHandle;
 use vortex_array::dtype::DType;
 use vortex_array::scalar::Scalar;
@@ -40,6 +41,7 @@ use vortex_session::VortexSession;
 use vortex_session::registry::CachedId;
 
 use crate::ZstdBuffersMetadata;
+use crate::probe::ZstdBuffersProbeState;
 use crate::validate_frame_content_size;
 
 /// A [`ZstdBuffers`]-encoded Vortex array.
@@ -129,7 +131,7 @@ impl ZstdBuffers {
         )
     }
 
-    fn decompress_and_build_inner(
+    pub(crate) fn decompress_and_build_inner(
         array: &ZstdBuffersArray,
         session: &VortexSession,
     ) -> VortexResult<ArrayRef> {
@@ -520,19 +522,25 @@ impl VTable for ZstdBuffers {
 }
 
 impl OperationsVTable<ZstdBuffers> for ZstdBuffers {
-    type ProbeState = ();
+    type ProbeState = ZstdBuffersProbeState;
 
+    fn probe_scalar(
+        state: &mut ProbeState<'_, ZstdBuffers>,
+        index: usize,
+        ctx: &mut ExecutionCtx,
+    ) -> VortexResult<Scalar> {
+        crate::probe::buffers_scalar_at(state, index, ctx)
+    }
+
+    /// A one-off read decompresses every buffer of the wrapped array, so it is really slow. Read
+    /// through a [`RepeatedArrayProbe`](vortex_array::RepeatedArrayProbe), which keeps the
+    /// decompressed array, or execute the array into its canonical form instead.
     fn scalar_at(
         array: ArrayView<'_, ZstdBuffers>,
         index: usize,
         ctx: &mut ExecutionCtx,
     ) -> VortexResult<Scalar> {
-        // TODO(os): maybe we should not support scalar_at, it is really slow, and adding a cache
-        // layer here is weird. Valid use of zstd buffers array would be by executing it first into
-        // canonical
-        let inner_array =
-            ZstdBuffers::decompress_and_build_inner(&array.into_owned(), ctx.session())?;
-        inner_array.execute_scalar(index, ctx)
+        crate::probe::buffers_scalar_at(&mut ProbeState::once(array), index, ctx)
     }
 }
 
