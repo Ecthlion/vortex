@@ -150,6 +150,8 @@ mod tests {
         }
     }
 
+    // Cover every storage width, validity mode, and host/device handle with full, prefix,
+    // interior, and suffix slices of an already-sliced array to check composed offsets.
     #[rstest]
     fn test_slice_buffer_handle(
         #[values(
@@ -169,6 +171,7 @@ mod tests {
         )]
         validity: Validity,
         #[values(false, true)] on_device: bool,
+        #[values(0..4, 0..2, 1..3, 3..4)] range: Range<usize>,
     ) -> VortexResult<()> {
         let mut ctx = array_session().create_execution_ctx();
         let bytes = match_each_decimal_value_type!(values_type, |D| {
@@ -189,40 +192,38 @@ mod tests {
         .into_array();
         let sliced = array.slice(1..5)?;
 
-        for range in [0..4, 0..2, 1..3, 3..4] {
-            let nested = sliced.slice(range.clone())?;
-            let decimal = nested.as_::<Decimal>();
-            let byte_width = values_type.byte_width();
-            let original_range = range.start + 1..range.end + 1;
-            let expected_bytes =
-                bytes.slice(original_range.start * byte_width..original_range.end * byte_width);
-            let handle = decimal.buffer_handle();
+        let nested = sliced.slice(range.clone())?;
+        let decimal = nested.as_::<Decimal>();
+        let byte_width = values_type.byte_width();
+        let original_range = range.start + 1..range.end + 1;
+        let expected_bytes =
+            bytes.slice(original_range.start * byte_width..original_range.end * byte_width);
+        let handle = decimal.buffer_handle();
 
-            assert_eq!(nested.len(), range.len());
-            assert_eq!(nested.dtype(), array.dtype());
-            assert_eq!(decimal.values_type(), values_type);
-            assert_eq!(handle.len(), range.len() * byte_width);
-            assert_eq!(handle.is_on_device(), on_device);
-            assert!(handle.is_aligned_to(bytes.alignment()));
+        assert_eq!(nested.len(), range.len());
+        assert_eq!(nested.dtype(), array.dtype());
+        assert_eq!(decimal.values_type(), values_type);
+        assert_eq!(handle.len(), range.len() * byte_width);
+        assert_eq!(handle.is_on_device(), on_device);
+        assert!(handle.is_aligned_to(bytes.alignment()));
 
-            let actual_bytes = if on_device {
-                &handle
-                    .as_device()
-                    .as_any()
-                    .downcast_ref::<TestDeviceBuffer>()
-                    .ok_or_else(|| vortex_err!("expected TestDeviceBuffer"))?
-                    .0
-            } else {
-                handle.as_host()
-            };
-            assert_eq!(actual_bytes, &expected_bytes);
-            assert_eq!(actual_bytes.as_ptr(), expected_bytes.as_ptr());
-            assert_arrays_eq!(
-                decimal.validity()?.to_array(nested.len()),
-                validity.to_array(array.len()).slice(original_range)?,
-                &mut ctx
-            );
-        }
+        let actual_bytes = if on_device {
+            &handle
+                .as_device()
+                .as_any()
+                .downcast_ref::<TestDeviceBuffer>()
+                .ok_or_else(|| vortex_err!("expected TestDeviceBuffer"))?
+                .0
+        } else {
+            handle.as_host()
+        };
+        assert_eq!(actual_bytes, &expected_bytes);
+        assert_eq!(actual_bytes.as_ptr(), expected_bytes.as_ptr());
+        assert_arrays_eq!(
+            decimal.validity()?.to_array(nested.len()),
+            validity.to_array(array.len()).slice(original_range)?,
+            &mut ctx
+        );
 
         Ok(())
     }
