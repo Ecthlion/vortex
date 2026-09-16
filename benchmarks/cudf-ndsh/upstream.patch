@@ -795,7 +795,7 @@ index c152871..b4b2d7d 100644
 +  .add_string_axis("cache", {"warm", "cold"});
 +#endif
 diff --git a/cpp/benchmarks/ndsh/q09.cpp b/cpp/benchmarks/ndsh/q09.cpp
-index 3fd1aa6..e05ed97 100644
+index 3fd1aa6..d8d76a2 100644
 --- a/cpp/benchmarks/ndsh/q09.cpp
 +++ b/cpp/benchmarks/ndsh/q09.cpp
 @@ -1,4 +1,5 @@
@@ -939,7 +939,7 @@ index 3fd1aa6..e05ed97 100644
  
    q9_data const data      = load_data(sources);
    auto const joined_table = join_data(data);
-@@ -404,3 +420,159 @@ NVBENCH_BENCH(ndsh_q9_amount)
+@@ -404,3 +420,182 @@ NVBENCH_BENCH(ndsh_q9_amount)
    .set_name("ndsh_q9_amount")
    .add_float64_axis("scale_factor", {0.01, 0.1, 1})
    .add_string_axis("engine", {"binaryop", "ast", "transform"});
@@ -1069,17 +1069,40 @@ index 3fd1aa6..e05ed97 100644
 +  state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.get()));
 +  auto const memory = cudf::memory_stats_logger();
 +  ndsh::vortex_io io{stream.get()};
-+  auto read = [&](std::string const& name, std::vector<std::string> const& columns) {
++  auto read = [&](std::string const& name, std::vector<std::string> const& columns, auto const&...) {
 +    return ndsh::read_local_file(
 +      files.tables.path(name, use_vortex), use_vortex, io, columns, cold);
 +  };
-+  ndsh::warm_local_inputs(cold, [&] { return load_data(read); });
++  auto load_inputs = [&](bool verify = false) {
++    if (!use_vortex) { return load_data(read); }
++    auto inputs = ndsh::read_local_tables(q9_tables, q9_projections, read, true);
++    return load_data([&](std::string const& name, std::vector<std::string> const& columns) {
++      auto const index = std::distance(q9_tables.begin(),
++                                       std::find(q9_tables.begin(), q9_tables.end(), name));
++      if (verify) {
++        auto expected = read(name, columns);
++        ndsh::check_projection(expected->table(), *inputs.at(index), columns);
++      }
++      return std::move(inputs.at(index));
++    });
++  };
++  auto query = [&] {
++    auto inputs = load_inputs();
++    return compute_profit(engine, inputs, stream, cudf::get_current_device_resource_ref());
++  };
++  if (use_vortex) {
++    auto inputs = load_inputs(true);
++    auto result = compute_profit(engine, inputs, stream, cudf::get_current_device_resource_ref());
++    ndsh::check_q9_result(files.reference, *result, stream);
++    CUDF_CUDA_TRY(cudaDeviceSynchronize());
++  }
++  ndsh::warm_local_inputs(cold, [&] { return load_inputs(); });
 +  ndsh::exec_local_benchmark(state, files.tables, use_vortex, cold, [&] {
 +    if (read_only) {
-+      auto inputs = load_data(read);
++      auto inputs = load_inputs();
 +      CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));
 +    } else {
-+      auto result = execute_q9(engine, read, stream, cudf::get_current_device_resource_ref());
++      auto result = query();
 +      CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));
 +    }
 +  });
@@ -1100,7 +1123,7 @@ index 3fd1aa6..e05ed97 100644
 +  .add_string_axis("cache", {"warm", "cold"});
 +#endif
 diff --git a/cpp/benchmarks/ndsh/q10.cpp b/cpp/benchmarks/ndsh/q10.cpp
-index 16f63ce..d18cca0 100644
+index 16f63ce..40222cc 100644
 --- a/cpp/benchmarks/ndsh/q10.cpp
 +++ b/cpp/benchmarks/ndsh/q10.cpp
 @@ -1,4 +1,5 @@
@@ -1229,7 +1252,7 @@ index 16f63ce..d18cca0 100644
  
    auto stream = cudf::get_default_stream();
    state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.get()));
-@@ -169,3 +207,175 @@ void ndsh_q10(nvbench::state& state)
+@@ -169,3 +207,202 @@ void ndsh_q10(nvbench::state& state)
  }
  
  NVBENCH_BENCH(ndsh_q10).set_name("ndsh_q10").add_float64_axis("scale_factor", {0.01, 0.1, 1});
@@ -1377,16 +1400,43 @@ index 16f63ce..d18cca0 100644
 +    return ndsh::read_local_file(
 +      files.tables.path(name, use_vortex), use_vortex, io, columns, cold);
 +  };
-+  ndsh::warm_local_inputs(cold, [&] {
-+    return ndsh::read_local_tables(q10_tables, q10_projections, read);
-+  });
++  auto read_inputs = [&] {
++    return ndsh::read_local_tables(q10_tables, q10_projections, read, use_vortex);
++  };
++  auto query = [&] {
++    if (!use_vortex) { return execute_q10(read, true, ndsh::take_result); }
++    auto inputs = read_inputs();
++    return execute_q10(
++      [&](std::string const& name, auto const&...) {
++        auto const index = std::distance(q10_tables.begin(),
++                                         std::find(q10_tables.begin(), q10_tables.end(), name));
++        return std::move(inputs.at(index));
++      },
++      true, ndsh::take_result);
++  };
++  if (use_vortex) {
++    {
++      auto inputs = read_inputs();
++      for (std::size_t i = 0; i < q10_tables.size(); ++i) {
++        auto const& name = q10_tables[i];
++        auto expected = ndsh::read_local_file(
++          files.tables.path(name, true), true, io, q10_projections.at(name), cold);
++        ndsh::check_projection(expected->table(), *inputs[i], q10_projections.at(name));
++      }
++      CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));
++    }
++    auto result = query();
++    ndsh::check_q10_result(files.reference, *result, stream);
++    CUDF_CUDA_TRY(cudaDeviceSynchronize());
++  }
++  ndsh::warm_local_inputs(cold, read_inputs);
 +  ndsh::exec_local_benchmark(state, files.tables, use_vortex, cold, [&] {
 +    cudf::benchmark::scoped_range timed_range{"ndsh_q10_local_timed"};
 +    if (read_only) {
-+      auto inputs = ndsh::read_local_tables(q10_tables, q10_projections, read);
++      auto inputs = read_inputs();
 +      CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));
 +    } else {
-+      auto result = execute_q10(read, true, ndsh::take_result);
++      auto result = query();
 +      CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));
 +    }
 +  });
