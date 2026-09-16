@@ -133,7 +133,25 @@ pub trait Scheme: Debug + Send + Sync {
     ///
     /// For most encodings this is the in-memory encoding ID. An encoding with several wire
     /// formats declares the wire IDs the scheme writes, which may differ from its in-memory ID.
+    /// A newer scheme version that writes additional IDs declares all of them and names the
+    /// version it [`replaces`](Scheme::replaces).
     fn produced_encodings(&self) -> Vec<ArrayId>;
+
+    /// Schemes this one supersedes.
+    ///
+    /// Register a newer version of a scheme alongside the version it replaces, and the two never
+    /// compete: the compressor drops every listed scheme it was given together with this one.
+    /// The writer restricts the scheme list to permitted serialized IDs first, so a newer version
+    /// whose [`produced_encodings`](Scheme::produced_encodings) are not all permitted is gone
+    /// before replacement and the listed schemes stay and compress as before.
+    ///
+    /// Listing a scheme that is not registered has no effect. Exclusion rules and [`has_scheme`]
+    /// name one version, so a replacement declares its own rules rather than inheriting them.
+    ///
+    /// [`has_scheme`]: crate::compressor::CascadingCompressor::has_scheme
+    fn replaces(&self) -> Vec<SchemeId> {
+        vec![]
+    }
 
     /// Returns the stats generation options this scheme requires. The compressor merges all
     /// eligible schemes' options before generating stats so that a single stats pass satisfies

@@ -113,7 +113,8 @@ impl BtrBlocksCompressorBuilder {
     /// Adds an external compression scheme not in [`ALL_SCHEMES`].
     ///
     /// This allows encoding crates outside of `vortex-btrblocks` to register their own schemes
-    /// with the compressor.
+    /// with the compressor. Register a newer version of a scheme alongside the version it
+    /// [replaces](Scheme::replaces).
     ///
     /// # Panics
     ///
@@ -203,7 +204,8 @@ impl BtrBlocksCompressorBuilder {
     /// Retains only schemes whose produced serialized IDs all belong to `allowed`.
     ///
     /// `allowed` holds serialized IDs. The file writer passes the array IDs its enabled editions
-    /// permit.
+    /// permit. When a newer scheme version is dropped here, the version it
+    /// [replaces](Scheme::replaces) is no longer replaced and compresses as before.
     pub fn retain_allowed_encodings(mut self, allowed: &HashSet<ArrayId>) -> Self {
         self.schemes
             .retain(|s| s.produced_encodings().iter().all(|id| allowed.contains(id)));
