@@ -103,7 +103,7 @@ fn cuda_write_strategy(session: &VortexSession) -> Arc<dyn vortex::layout::Layou
         .with_btrblocks_builder(
             BtrBlocksCompressorBuilder::default()
                 .only_cuda_compatible()
-                .retain_allowed_encodings(&allowed_encodings),
+                .allow_serialized_ids(&allowed_encodings),
         )
         .with_flat_strategy(Arc::new(CudaFlatLayoutStrategy::default()))
         .build()

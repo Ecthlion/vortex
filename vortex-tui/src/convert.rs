@@ -107,7 +107,7 @@ pub async fn exec_convert(session: &VortexSession, flags: ConvertArgs) -> anyhow
         compressor = compressor.with_compact();
     }
     let strategy = WriteStrategyBuilder::default()
-        .with_btrblocks_builder(compressor.retain_allowed_encodings(&allowed_encodings));
+        .with_btrblocks_builder(compressor.allow_serialized_ids(&allowed_encodings));
 
     let mut file = File::create(output_path).await?;
     session

@@ -294,7 +294,7 @@ mod tests {
         // survives.
         let compressor = BtrBlocksCompressorBuilder::default()
             .only_cuda_compatible()
-            .retain_allowed_encodings(&HashSet::from([allowed]))
+            .allow_serialized_ids(&HashSet::from([allowed]))
             .build();
         let mut ctx = SESSION.create_execution_ctx();
         let compressed = compressor.compress(&array.clone().into_array(), &mut ctx)?;

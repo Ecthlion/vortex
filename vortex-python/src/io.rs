@@ -389,7 +389,7 @@ impl PyVortexWriteOptions {
                 compressor = compressor.with_compact();
             }
             let strategy = WriteStrategyBuilder::default()
-                .with_btrblocks_builder(compressor.retain_allowed_encodings(&allowed_encodings));
+                .with_btrblocks_builder(compressor.allow_serialized_ids(&allowed_encodings));
             let strategy = strategy.build();
             current_runtime().block_on(async move {
                 match resolve_store(path, store.map(|x| x.into_inner()))? {

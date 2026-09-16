@@ -154,7 +154,7 @@ pub unsafe extern "C-unwind" fn vx_cuda_array_sink_open_file_block_rows(
             .with_btrblocks_builder(
                 BtrBlocksCompressorBuilder::default()
                     .only_cuda_compatible()
-                    .retain_allowed_encodings(&allowed_encodings),
+                    .allow_serialized_ids(&allowed_encodings),
             )
             .with_flat_strategy(Arc::new(CudaFlatLayoutStrategy::default()));
         if block_rows > 0 {

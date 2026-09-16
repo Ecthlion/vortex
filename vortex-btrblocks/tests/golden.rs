@@ -423,7 +423,7 @@ fn compressor_for_session(
         .into_iter()
         .collect();
     without_onpair(builder)
-        .retain_allowed_encodings(&allowed)
+        .allow_serialized_ids(&allowed)
         .build()
 }
 
@@ -436,7 +436,7 @@ fn compressor_with_onpair(
         .enabled_component_ids(ComponentKind::Array)
         .into_iter()
         .collect();
-    builder.retain_allowed_encodings(&allowed).build()
+    builder.allow_serialized_ids(&allowed).build()
 }
 
 #[test]

@@ -161,7 +161,7 @@ impl BtrBlocksCompressorBuilder {
     /// Both the array-level and the buffer-level Zstd schemes are added. Buffer-level
     /// compression preserves binary arrays' buffer layout for zero-conversion GPU decompression,
     /// but belongs to the opt-in `zstd` edition, so callers filter the two through
-    /// [`retain_allowed_encodings`](Self::retain_allowed_encodings).
+    /// [`allow_serialized_ids`](Self::allow_serialized_ids).
     ///
     /// This preset is intended for files that will be decoded by CUDA kernels. It may choose a
     /// larger encoded representation than the default compressor.
