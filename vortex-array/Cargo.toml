@@ -134,6 +134,10 @@ name = "search_sorted"
 harness = false
 
 [[bench]]
+name = "search_sorted_array"
+harness = false
+
+[[bench]]
 name = "scalar_subtract"
 harness = false
 
