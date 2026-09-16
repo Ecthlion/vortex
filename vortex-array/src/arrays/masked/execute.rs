@@ -3,29 +3,25 @@
 
 //! Execution logic for MaskedArray - applies a validity mask to canonical arrays.
 
-use std::sync::Arc;
-
 use vortex_error::VortexResult;
 
 use crate::Canonical;
 use crate::IntoArray;
 use crate::arrays::BoolArray;
-use crate::arrays::DecimalArray;
 use crate::arrays::ExtensionArray;
 use crate::arrays::FixedSizeListArray;
 use crate::arrays::ListView;
 use crate::arrays::ListViewArray;
 use crate::arrays::MapArray;
 use crate::arrays::MaskedArray;
-use crate::arrays::PrimitiveArray;
 use crate::arrays::StructArray;
 use crate::arrays::UnionArray;
-use crate::arrays::VarBinViewArray;
 use crate::arrays::VariantArray;
 use crate::arrays::bool::BoolArrayExt;
 use crate::arrays::extension::ExtensionArrayExt;
 use crate::arrays::fixed_size_list::FixedSizeListArrayExt;
 use crate::arrays::fixed_size_list::FixedSizeListArraySlotsExt;
+use crate::arrays::fixed_width;
 use crate::arrays::listview::ListViewArraySlotsExt;
 use crate::arrays::map::MapArrayExt;
 use crate::arrays::map::MapArraySlotsExt;
@@ -50,9 +46,15 @@ pub fn mask_validity_canonical(
     Ok(match canonical {
         n @ Canonical::Null(_) => n,
         Canonical::Bool(a) => Canonical::Bool(mask_validity_bool(a, validity)?),
-        Canonical::Primitive(a) => Canonical::Primitive(mask_validity_primitive(a, validity)?),
-        Canonical::Decimal(a) => Canonical::Decimal(mask_validity_decimal(a, validity)?),
-        Canonical::VarBinView(a) => Canonical::VarBinView(mask_validity_varbinview(a, validity)?),
+        Canonical::Primitive(a) => {
+            Canonical::Primitive(fixed_width::mask::mask_validity(a.as_view(), validity)?)
+        }
+        Canonical::Decimal(a) => {
+            Canonical::Decimal(fixed_width::mask::mask_validity(a.as_view(), validity)?)
+        }
+        Canonical::VarBinView(a) => {
+            Canonical::VarBinView(fixed_width::mask::mask_validity(a.as_view(), validity)?)
+        }
         Canonical::List(a) => Canonical::List(mask_validity_listview(a, validity)?),
         Canonical::Map(a) => Canonical::Map(mask_validity_map(a, validity)?),
         Canonical::FixedSizeList(a) => {
@@ -68,53 +70,6 @@ pub fn mask_validity_canonical(
 fn mask_validity_bool(array: BoolArray, mask: Validity) -> VortexResult<BoolArray> {
     let new_validity = Validity::and(array.validity()?, mask)?;
     Ok(BoolArray::new(array.to_bit_buffer(), new_validity))
-}
-
-fn mask_validity_primitive(
-    array: PrimitiveArray,
-    validity: Validity,
-) -> VortexResult<PrimitiveArray> {
-    let ptype = array.ptype();
-    let new_validity = Validity::and(array.validity()?, validity)?;
-    // SAFETY: We're only changing validity, not the data structure.
-    Ok(unsafe {
-        PrimitiveArray::new_unchecked_from_handle(
-            array.buffer_handle().clone(),
-            ptype,
-            new_validity,
-        )
-    })
-}
-
-fn mask_validity_decimal(array: DecimalArray, validity: Validity) -> VortexResult<DecimalArray> {
-    let new_validity = Validity::and(array.validity()?, validity)?;
-    // SAFETY: We're only changing validity, not the data structure.
-    Ok(unsafe {
-        DecimalArray::new_unchecked_handle(
-            array.buffer_handle().clone(),
-            array.values_type(),
-            array.decimal_dtype(),
-            new_validity,
-        )
-    })
-}
-
-/// Mask validity for VarBinViewArray.
-fn mask_validity_varbinview(
-    array: VarBinViewArray,
-    validity: Validity,
-) -> VortexResult<VarBinViewArray> {
-    let dtype = array.dtype().as_nullable();
-    let new_validity = Validity::and(array.validity()?, validity)?;
-    // SAFETY: We're only changing validity, not the data structure.
-    Ok(unsafe {
-        VarBinViewArray::new_handle_unchecked(
-            array.views_handle().clone(),
-            Arc::clone(array.data_buffers()),
-            dtype,
-            new_validity,
-        )
-    })
 }
 
 fn mask_validity_listview(array: ListViewArray, validity: Validity) -> VortexResult<ListViewArray> {
