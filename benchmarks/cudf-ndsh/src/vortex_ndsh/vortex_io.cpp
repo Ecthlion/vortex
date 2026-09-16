@@ -308,8 +308,7 @@ cudf::io::table_with_metadata vortex_io::read_vortex(std::string const& path,
   device_stream input;
   vx_error* error = nullptr;
   vx_cuda_scan_options options{};
-  options.flags =
-    VX_CUDA_SCAN_FLAG_DECODE_DICTIONARIES | (direct_io ? VX_CUDA_SCAN_FLAG_DIRECT_IO : 0);
+  options.flags = direct_io ? VX_CUDA_SCAN_FLAG_DIRECT_IO : 0;
   options.batch_rows = batch_rows;
   std::vector<vx_view> column_views;
   column_views.reserve(columns.size());

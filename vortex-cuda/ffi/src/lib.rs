@@ -65,14 +65,10 @@ const VX_CUDA_ERR: c_int = 1;
 
 /// Enable direct I/O for pooled CUDA file reads.
 pub const VX_CUDA_SCAN_FLAG_DIRECT_IO: u32 = 1 << 0;
-/// Decode dictionaries on CUDA and export plain Arrow values, including nested children.
-/// Keeps batch schemas stable; applies only to this scan. See [`DictionaryExport::Decode`].
-pub const VX_CUDA_SCAN_FLAG_DECODE_DICTIONARIES: u32 = 1 << 1;
 
 /// Options for scanning a CUDA-compatible Vortex file.
 ///
-/// Zero-initialize this struct to use buffered file I/O, layout-derived batch splitting, and
-/// the caller's dictionary export policy (dictionary-preserving by default).
+/// Zero-initialize this struct to use buffered file I/O and layout-derived batch splitting.
 #[repr(C)]
 #[derive(Default)]
 pub struct vx_cuda_scan_options {
@@ -200,6 +196,10 @@ pub unsafe extern "C-unwind" fn vx_cuda_array_sink_open_file_block_rows(
 /// written by [`vx_cuda_array_sink_open_file`]. Pinned staging buffers are reused across scans made
 /// with the same CUDA session.
 ///
+/// Dictionaries, including nested children, are always decoded on CUDA to export plain Arrow
+/// values with a stable batch schema. This may increase device memory use; device-resident
+/// dictionaries require CUDA decoding support. The caller's session policy is unchanged.
+///
 /// On success returns `0` and writes an owned [`ArrowDeviceArrayStream`] to `out_stream`. The
 /// caller must release the stream and each array produced by it through their embedded Arrow
 /// release callbacks.
@@ -270,11 +270,8 @@ pub unsafe extern "C-unwind" fn vx_cuda_scan_path_arrow_device_stream_batch_rows
 ///
 /// This has the same ownership and file compatibility requirements as
 /// [`vx_cuda_scan_path_arrow_device_stream`]. Pass a null `options` pointer or a zero-initialized
-/// [`vx_cuda_scan_options`] to use buffered file I/O, layout-derived batch splitting, and
-/// the caller's dictionary export policy (dictionary-preserving by default). Set
-/// [`VX_CUDA_SCAN_FLAG_DECODE_DICTIONARIES`] to export logical plain types even when batches vary
-/// between dictionary/plain encodings or dictionary index widths.
-/// The export policy applies only to this scan, not to the caller's session.
+/// [`vx_cuda_scan_options`] to use buffered file I/O and layout-derived batch splitting.
+/// Dictionaries are always decoded as described in [`vx_cuda_scan_path_arrow_device_stream`].
 ///
 /// # Safety
 ///
@@ -348,7 +345,7 @@ pub unsafe extern "C-unwind" fn vx_cuda_scan_path_arrow_device_stream_projected(
         )?;
         let scan = projected_scan(&file, columns, options.batch_rows)?;
         let array_stream = scan.into_array_stream()?.boxed();
-        let ctx = scan_export_ctx(session, &options)?;
+        let ctx = scan_export_ctx(session)?;
         let device_stream = ArrowDeviceArrayStream::new(array_stream, ctx, ffi_runtime());
 
         unsafe { ptr::write(out_stream, device_stream) };
@@ -419,19 +416,13 @@ fn projected_scan(
 struct CudaScanOptions {
     read_at_options: PooledFileReadAtOptions,
     batch_rows: usize,
-    decode_dictionaries: bool,
 }
 
-fn scan_export_ctx(
-    session: &VortexSession,
-    options: &CudaScanOptions,
-) -> VortexResult<CudaExecutionCtx> {
-    let ctx = CudaSession::create_execution_ctx(session)?;
-    Ok(if options.decode_dictionaries {
-        ctx.with_dictionary_export(DictionaryExport::Decode)
-    } else {
-        ctx
-    })
+fn scan_export_ctx(session: &VortexSession) -> VortexResult<CudaExecutionCtx> {
+    Ok(
+        CudaSession::create_execution_ctx(session)?
+            .with_dictionary_export(DictionaryExport::Decode),
+    )
 }
 
 unsafe fn scan_options(options: *const vx_cuda_scan_options) -> VortexResult<CudaScanOptions> {
@@ -457,7 +448,6 @@ unsafe fn scan_options(options: *const vx_cuda_scan_options) -> VortexResult<Cud
     Ok(CudaScanOptions {
         read_at_options,
         batch_rows: options.batch_rows,
-        decode_dictionaries: options.flags & VX_CUDA_SCAN_FLAG_DECODE_DICTIONARIES != 0,
     })
 }
 
@@ -581,7 +571,6 @@ mod tests {
             let parsed = unsafe { scan_options(pointer) }?;
             assert_eq!(parsed.read_at_options, PooledFileReadAtOptions::default());
             assert_eq!(parsed.batch_rows, 0);
-            assert!(!parsed.decode_dictionaries);
         }
         Ok(())
     }
@@ -589,38 +578,21 @@ mod tests {
     #[test]
     fn maps_scan_options_and_ignores_unknown_flags() -> VortexResult<()> {
         let buffered = PooledFileReadAtOptions::default();
-        for (flags, batch_rows, read_at_options, decode_dictionaries) in [
-            (0, 8192, buffered, false),
-            (VX_CUDA_SCAN_FLAG_DECODE_DICTIONARIES, 8192, buffered, true),
-            (1 << 2, 0, buffered, false),
-            (
-                VX_CUDA_SCAN_FLAG_DECODE_DICTIONARIES | (1 << 2),
-                0,
-                buffered,
-                true,
-            ),
+        for (flags, batch_rows, read_at_options) in [
+            (0, 8192, buffered),
+            (1 << 1, 0, buffered),
+            #[cfg(target_os = "linux")]
+            (VX_CUDA_SCAN_FLAG_DIRECT_IO, 0, buffered.with_direct_io()),
             #[cfg(target_os = "linux")]
             (
-                VX_CUDA_SCAN_FLAG_DIRECT_IO,
-                0,
-                buffered.with_direct_io(),
-                false,
-            ),
-            #[cfg(target_os = "linux")]
-            (
-                VX_CUDA_SCAN_FLAG_DIRECT_IO | VX_CUDA_SCAN_FLAG_DECODE_DICTIONARIES,
+                VX_CUDA_SCAN_FLAG_DIRECT_IO | (1 << 1),
                 8192,
                 buffered.with_direct_io(),
-                true,
             ),
         ] {
             let options = vx_cuda_scan_options { flags, batch_rows };
             // SAFETY: options lives for the duration of parsing.
             let parsed = unsafe { scan_options(&raw const options) }?;
-            assert_eq!(
-                parsed.decode_dictionaries, decode_dictionaries,
-                "flags={flags}"
-            );
             assert_eq!(parsed.read_at_options, read_at_options, "flags={flags}");
             assert_eq!(parsed.batch_rows, batch_rows, "flags={flags}");
         }
@@ -628,21 +600,15 @@ mod tests {
     }
 
     #[cuda_test]
-    fn scan_dictionary_policy_is_isolated_and_reuses_cuda_resources() -> VortexResult<()> {
+    fn scan_decodes_dictionaries_and_reuses_session_resources() -> VortexResult<()> {
         // A distinct allocator identity detects accidental reconstruction of a default session.
         let allocator = BufferAllocatorRef::new(StaticBufferAllocator);
         let session = VortexSession::default()
             .with_some(CudaSession::try_default()?)
             .with_allocator(allocator.clone());
-        let options = vx_cuda_scan_options {
-            flags: VX_CUDA_SCAN_FLAG_DECODE_DICTIONARIES,
-            ..Default::default()
-        };
-        // SAFETY: options lives for the duration of parsing.
-        let options = unsafe { scan_options(&raw const options) }?;
         let initialized_session = session_with_cuda(&session);
         assert!(ptr::eq(initialized_session, &session));
-        let mut export_ctx = scan_export_ctx(initialized_session, &options)?;
+        let mut export_ctx = scan_export_ctx(initialized_session)?;
         assert!(export_ctx.execution_ctx().allocator().ptr_eq(&allocator));
         assert_eq!(
             session.get::<CudaSession>().dictionary_export(),
@@ -662,24 +628,12 @@ mod tests {
             PrimitiveArray::from_iter([10i32, 20]).into_array(),
         )?
         .into_array();
-        // SAFETY: A null options pointer selects the defaults.
-        let default_options = unsafe { scan_options(ptr::null()) }?;
-        let decode_session = VortexSession::default().with_some(
-            (*session.get::<CudaSession>())
-                .clone()
-                .with_dictionary_export(DictionaryExport::Decode),
-        );
         for (ctx, expected_type, preserved) in [
             (export_ctx, DataType::Int32, false),
             (
-                scan_export_ctx(&session, &default_options)?,
+                CudaSession::create_execution_ctx(&session)?,
                 DataType::Dictionary(Box::new(DataType::Int16), Box::new(DataType::Int32)),
                 true,
-            ),
-            (
-                scan_export_ctx(&decode_session, &default_options)?,
-                DataType::Int32,
-                false,
             ),
         ] {
             let mut stream = ArrowDeviceArrayStream::new(
@@ -710,10 +664,7 @@ mod tests {
             DictionaryExport::Preserve
         );
         assert!(session.allocator().ptr_eq(&allocator));
-        assert_eq!(
-            decode_session.get::<CudaSession>().dictionary_export(),
-            DictionaryExport::Decode
-        );
+
         Ok(())
     }
 

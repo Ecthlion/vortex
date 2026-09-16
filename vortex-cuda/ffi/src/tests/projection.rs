@@ -437,8 +437,8 @@ fn test_projection_gpu_local_file_schema_batches_empty_defaults_and_boundaries()
             .to_str()
             .ok_or_else(|| vortex_err!("non-UTF-8 test path"))?;
         let options = batch_rows.map(|batch_rows| vx_cuda_scan_options {
-            flags: VX_CUDA_SCAN_FLAG_DECODE_DICTIONARIES,
             batch_rows,
+            ..Default::default()
         });
         let mut stream = open_stream(&session, path, options.as_ref());
         // The stream must retain its session state after the caller releases its session.
