@@ -20,6 +20,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <future>
 #include <map>
 #include <memory>
 #include <string>
@@ -88,17 +89,36 @@ inline std::unique_ptr<table_with_names> read_local_file(std::string const& path
   return std::make_unique<table_with_names>(std::move(result.tbl), std::move(names));
 }
 
+// Parallel reads launch one worker per table in this small input set. read must be thread-safe
+// and complete materialization before returning; future destruction joins workers on errors too.
 template <typename Read>
 std::vector<std::unique_ptr<table_with_names>> read_local_tables(
   std::vector<std::string> const& names,
   std::map<std::string, std::vector<std::string>> const& projections,
-  Read&& read)
+  Read&& read,
+  bool parallel = false)
 {
   std::vector<std::unique_ptr<table_with_names>> tables;
   tables.reserve(names.size());
   std::unique_ptr<cudf::ast::operation> const no_predicate;
-  for (auto const& name : names) {
-    tables.push_back(read(name, projections.at(name), no_predicate));
+  if (parallel) {
+    int device;
+    CUDF_CUDA_TRY(cudaGetDevice(&device));
+    std::vector<std::future<std::unique_ptr<table_with_names>>> pending;
+    pending.reserve(names.size());
+    for (auto const& name : names) {
+      pending.push_back(std::async(std::launch::async, [&, name, device] {
+        CUDF_CUDA_TRY(cudaSetDevice(device));
+        return read(name, projections.at(name), no_predicate);
+      }));
+    }
+    for (auto& future : pending) {
+      tables.push_back(future.get());
+    }
+  } else {
+    for (auto const& name : names) {
+      tables.push_back(read(name, projections.at(name), no_predicate));
+    }
   }
   return tables;
 }
