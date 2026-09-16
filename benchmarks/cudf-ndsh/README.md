@@ -7,10 +7,9 @@ not an installed client-facing Vortex/cuDF API.
 
 The [upstream POC goal](https://github.com/NVIDIA/cudf/issues/23877#issuecomment-5457730105)
 is ≥2× for end-to-end projected reads and full queries at SF1/SF10, warm and cold.
-The full goal is not established: the recorded SF1 run has empty Q6/Q10 results,
-and current-source SF10 validation is pending. [Recorded results](VALIDATION.md)
-predate the recent simplification and build-option changes; they do not validate
-the current branch.
+The full goal is not established: SF1 Q6/Q10 results were empty, and current-source
+SF10 validation is pending. [Recorded results](VALIDATION.md) predate the recent
+simplification and build-option changes and do not validate the current branch.
 
 ## Build from a clean checkout
 
@@ -52,9 +51,9 @@ switch is `-DCUDF_WITH_VORTEX=ON`, replacing `CUDF_NDSH_WITH_VORTEX`. Without a 
 override, CPM downloads Vortex at configure time, pinned to
 `90723345eeed838405341da9d44e02c94f10e6be`. Unset/`OFF` does not fetch or configure Vortex.
 
-Optional `-DFETCHCONTENT_SOURCE_DIR_VORTEX=/absolute/path` selects a local checkout
-instead. The runner supplies this override automatically so the harness and Vortex
-library come from the checkout being recorded.
+`-DFETCHCONTENT_SOURCE_DIR_VORTEX=/absolute/path` optionally selects a local checkout.
+The runner sets it automatically to keep the harness and Vortex library in the
+recorded checkout.
 
 **The default download requires publishing that pin first.** At the last remote
 inspection, the branch still lacked the current harness. Use the local override
@@ -89,7 +88,7 @@ source revision or reuse mixed-era build directories in place of a fresh build.
 ## I/O and timing contract
 
 - Both formats use matched full-table fixtures, the same projected columns, and
-  cuDF post-read filters. Fixture generation and correctness checks are untimed.
+  cuDF post-read filters.
 - Writes use 16,777,216-row cuDF chunks → compact host Arrow → CPU-compressed
   CUDA-flat blocks. Explicit row blocks disable byte coalescing and outer layout
   dictionaries; file blocks and output batches are row-based.
@@ -107,7 +106,8 @@ source revision or reuse mixed-era build directories in place of a fresh build.
   **OS-page-cache coldness**, not coldness of all caches.
 - Compare CPU wall means, including complete reads/import/materialization, query
   work where selected, owner destruction, and device-wide synchronization covering
-  producer cleanup. Writing, correctness checks, and eviction are outside timing.
+  producer cleanup. Fixture generation, writing, correctness checks, and eviction
+  are outside timing.
 
 ## Dataset and correctness
 
@@ -135,12 +135,11 @@ and separately labeled baselines.
 ## Maintaining the integration
 
 - [`src/vortex_ndsh/`](src/vortex_ndsh/) owns the adapter, CPU references, and shared
-  fixture/cache helpers. The cuDF patch defines the local comparison benchmarks directly
-  in `cpp/benchmarks/ndsh/qNN.cpp`, alongside the original Parquet benchmarks, guarded
-  by `CUDF_WITH_VORTEX`. Both reuse the same query implementation.
-- [`vortex.cmake`](vortex.cmake) owns build/benchmark wiring;
-  [`tests/`](tests/) contains the adapter and smoke executables. The cuDF patch also owns
-  query reader/consumer callbacks, named-table generation, and the opt-in CPM loader.
+  fixture/cache helpers; [`tests/`](tests/) contains adapter and smoke executables.
+- The cuDF patch adds `CUDF_WITH_VORTEX`-guarded comparisons alongside the original
+  Parquet benchmarks in `cpp/benchmarks/ndsh/qNN.cpp`, sharing their query implementation.
+  It also owns query reader/consumer callbacks, named-table generation, and the opt-in
+  CPM loader. [`vortex.cmake`](vortex.cmake) owns build/benchmark wiring.
 - Edit cuDF integration in ignored `build/cudf-ndsh-src`, based on
   `5339497a1a17d799687cbf189fb113411fb015ca`; do not modify `/home/ubuntu/cudf`.
   From the Vortex root, re-export the patch from that checkout, including added files:
@@ -161,11 +160,11 @@ uvx ruff format --check benchmarks/cudf-ndsh/*.py
 ```
 
 Offline Python tests cover opt-in/build isolation, reproduction safeguards, and
-focused timing/ownership guards—not snapshots of query implementations. Standalone
-adapter tests use representative batch/slice cases, checking types and values against
-independent host Arrow fixtures plus stream completion and result ownership. FFI tests
-cover the C boundary, projection pruning, and physical batch boundaries. These are not
-exhaustive cross-products, and offline tests do not replace real cuDF builds or GPU validation.
+focused timing/ownership guards—not query implementation snapshots. Standalone
+adapter tests check representative batch/slice types and values against independent
+host Arrow fixtures, plus stream completion and result ownership. FFI tests cover
+the C boundary, projection pruning, and physical batch boundaries. Coverage is not
+exhaustive; offline tests do not replace real cuDF builds or GPU validation.
 
 ### Profiling safety
 

@@ -25,8 +25,8 @@ use super::tests::last_error;
 use super::*;
 use crate::CudaSession;
 
-// Keep the compressed encoding tree intact while moving every buffer, including validity, to
-// CUDA. Any unsupported decode must now error, rather than silently using the CPU executor.
+// Preserve encodings while moving all buffers, including validity, to CUDA so unsupported
+// decoding errors instead of falling back to the CPU.
 pub(super) fn upload(
     array: ArrayRef,
     ctx: &mut CudaExecutionCtx,

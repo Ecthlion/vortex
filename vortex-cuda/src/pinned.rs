@@ -363,9 +363,9 @@ impl PooledPinnedBuffer {
 
     /// Submits a non-blocking H2D copy of `range` into an equally sized destination view.
     ///
-    /// The range must be within the source's logical length. Both bounds and destination length
-    /// are validated before enqueuing work. The pool retains the entire pinned allocation until
-    /// the copy completes, even if the caller drops the destination or stops waiting for it.
+    /// Validates the range against the source's logical length and the destination length before
+    /// enqueuing. The pool retains the entire pinned allocation until completion, even if the
+    /// caller drops the destination or stops waiting.
     pub(crate) fn copy_to_device(
         mut self,
         stream: &VortexCudaStream,

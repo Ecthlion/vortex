@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright the Vortex contributors
 """Offline build wiring and timing/ownership guards.
 
-Full cuDF builds and GPU cases cover C++ includes, projections, and query results;
-source checks here focus on contracts those cannot establish, such as timing boundaries.
+Source checks guard timing/ownership contracts; cuDF builds and GPU cases cover
+C++ includes, projections, and query results.
 Run with python3 -B benchmarks/cudf-ndsh/test_build_integration.py.
 """
 

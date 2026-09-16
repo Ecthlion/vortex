@@ -35,8 +35,8 @@ use crate::stream::VortexCudaStream;
 /// Default number of concurrent requests to allow for local file I/O.
 pub const DEFAULT_FILE_CONCURRENCY: usize = 32;
 
-// Large physical segments can exceed the coalescing limit. Split their I/O, not their encoding,
-// so a single blocking read cannot hold up the scan and transfers can start before its tail.
+// Physical segments can exceed the coalescing limit. Split their I/O, not their encoding,
+// to limit blocking read sizes and start transfers before the whole segment is read.
 const FILE_READ_CHUNK_BYTES: usize = 4 << 20;
 
 /// Options controlling how [`PooledFileReadAt`] opens and reads a local file.
@@ -129,9 +129,9 @@ fn open_backend(
 /// File reader that uses CUDA pinned host memory for I/O buffers and transfers
 /// directly to the GPU.
 ///
-/// Reads into pooled pinned (page-locked) buffers, then submits non-blocking H2D transfers.
-/// Large reads are partitioned across the existing blocking I/O runtime and copied directly into
-/// one device allocation as chunks finish. Concurrent host reads are bounded per open file.
+/// Stages reads in pooled pinned buffers for non-blocking H2D transfer. Large reads use the
+/// blocking I/O runtime, copying chunks into one device allocation as they finish. Concurrent
+/// host reads are bounded per open file.
 ///
 /// This is a data-plane reader. To open a complete local Vortex file, prefer
 /// [`crate::CudaOpenOptionsExt::with_cuda`], which keeps the footer and zone maps on the host.

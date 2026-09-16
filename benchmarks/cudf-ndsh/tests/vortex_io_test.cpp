@@ -40,8 +40,7 @@
 #include <utility>
 #include <vector>
 
-// Production helpers deliberately absent from the public header. Test the staging
-// boundary and schema validation without exposing test-only API or depending on FFI headers.
+// Test internal staging and schema helpers without public test-only API or FFI headers.
 namespace ndsh::detail {
 cudf::unique_device_array_t stage_host_chunk(cudf::table_view chunk,
                                              cudaStream_t stream,
@@ -328,9 +327,9 @@ nanoarrow::UniqueArrayView array_view(ArrowSchema const* schema, ArrowArray cons
   return view;
 }
 
-// nanoarrow 0.7/0.8 only provide IDENTICAL comparison. Rebuild logical values to normalize offsets,
-// ignored null payloads, optional all-valid masks, and bitmap padding before comparing entire
-// arrays. No data values are compared element by element.
+// nanoarrow 0.7/0.8 only support IDENTICAL comparison. Normalize offsets, ignored null payloads,
+// optional all-valid masks, and bitmap padding by rebuilding logical values, then compare whole
+// arrays rather than individual values.
 nanoarrow::UniqueArray canonical_array(ArrowSchema const* schema, ArrowArray const* array)
 {
   auto view = array_view(schema, array);

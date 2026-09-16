@@ -553,9 +553,8 @@ static CUDA_EDITION_DECLARATION: EditionDeclaration = EditionDeclaration {
 
 /// Register the [`CudaFlatLayoutEncoding`] and enable its draft `cuda` edition for writing.
 ///
-/// This opts into only the CUDA-flat layout; the session's other edition selections and checks
-/// remain unchanged. The draft has no cross-version compatibility guarantee, and readers must
-/// register the CUDA layout to read these files.
+/// Other edition selections and checks are unchanged. The draft has no cross-version
+/// compatibility guarantee; readers must register the CUDA layout.
 ///
 /// Call this alongside [`crate::initialize_cuda`] when setting up a CUDA-enabled session.
 /// Registration itself does not require a GPU.
@@ -564,8 +563,8 @@ pub fn register_cuda_layout(session: &VortexSession) {
         .layouts()
         .register(LayoutEncodingRef::new_ref(&CudaFlat));
 
-    // CUDA FFI entry points register repeatedly, including through concurrent session clones.
-    // Edition declaration rejects duplicates, so serialize the check and registration.
+    // Concurrent CUDA FFI calls may register session clones; serialize the check and registration
+    // because edition declarations reject duplicates.
     static REGISTRATION_LOCK: Mutex<()> = Mutex::new(());
     let _guard = REGISTRATION_LOCK.lock();
     if session.editions().find(&CUDA_EDITION).is_none() {

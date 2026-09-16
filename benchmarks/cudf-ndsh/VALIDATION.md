@@ -16,11 +16,11 @@ NVIDIA GH200, driver **595.71.05**, NVCC **13.0.88**, GCC **14.3.0**, and Releas
 the original pinned Release `libcudf.so` hash was unchanged. Prepared cuDF/dependency
 revisions and the selected toolchain were checked.
 
-After that build, `build.json` recorded the actual source identity, toolchain, and
-binary hashes, with `build_method=incremental` and `incremental_from` retaining the
-prior record. `recipe.json` still described the initial configure. This was not a
-fresh configure at that checkpoint. Provenance updates alone never substitute for
-rebuilding; use a fresh work directory after source/configuration changes.
+Afterward, `build.json` recorded the actual source identity, toolchain, and binary
+hashes, with `build_method=incremental` and `incremental_from` retaining the prior
+record. There was no fresh configure: `recipe.json` still described the initial one.
+Provenance updates cannot substitute for rebuilding; use a fresh work directory
+after source/configuration changes.
 
 Included fixes were `1ab26426d8` (NVCC realpath before Cargo tool lookup),
 `a9d705465e` (explicit NVTX/KvikIO links), and `91142e2c18` (`cudaSetDevice` before
@@ -106,9 +106,9 @@ OS-page-cache eviction, with `O_DIRECT` Vortex data reads versus native Parquet.
 Q9 reads repeat under three engine labels, not three distinct read implementations.
 All 28 labeled format pairs reached ≥2× (**2.24–5.06×**, using unrounded means).
 CPU relative standard deviation was median **1.25%**, maximum **3.01%**, with no
-states above 5%. There were **35 sampling-limit warnings** at the 5-second limit
-and 0.5% GPU-noise target. All warned states reported PASS; these were not runner
-failures or the 1,200-second command timeout.
+states above 5%. There were **35 sampling-limit warnings** (5-second limit,
+0.5% GPU-noise target); all affected states reported PASS. These were neither
+runner failures nor 1,200-second command timeouts.
 
 ## Profile evidence
 
@@ -134,11 +134,11 @@ profile observations, and artifact paths are retained in the committed record:
 git --no-pager show 90723345ee:benchmarks/cudf-ndsh/VALIDATION.md
 ```
 
-Those results used older source/dataset configurations and are not current
-baselines. In particular, `build/cudf-ndsh-build` has mixed-era objects and
-`build/cudf-ndsh-sf1-rebased` used an existing cuDF library rather than a fully pinned
-clean build. Neither is an input to the current recipe. New measurements need a
-fresh build, paired fixtures, generator labels, and match counts.
+These are not current baselines: they used older source/dataset configurations.
+`build/cudf-ndsh-build` has mixed-era objects; `build/cudf-ndsh-sf1-rebased` reused a
+cuDF library rather than a fully pinned clean build. Neither is an input to the
+current recipe. New measurements need a fresh build, paired fixtures, generator
+labels, and match counts.
 
 ## Remaining validation
 

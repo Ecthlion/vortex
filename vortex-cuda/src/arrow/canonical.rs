@@ -119,8 +119,8 @@ impl ExportDeviceArray for CanonicalDeviceArrayExport {
             DictionaryExport::Preserve => {
                 rebuild_array_for_export_schema(array, ctx.execution_ctx())?
             }
-            // Concrete dictionary layouts no longer affect the schema. Leave other encodings
-            // intact so structural recursion and direct FSST/OnPair exports remain available.
+            // Dictionary layouts no longer affect the schema. Preserve other encodings for
+            // structural recursion and direct FSST/OnPair export.
             DictionaryExport::Decode => array,
         };
         let schema = arrow_schema_for_array(&array, ctx)?;
@@ -1807,7 +1807,7 @@ mod tests {
     }
 
     // Unlike ensure_on_device, exact-sized uploads expose missing padding and partial-word
-    // overreads, including when the resulting device buffer is byte-sliced.
+    // overreads, even after byte slicing.
     fn upload_unpadded(
         bytes: &ByteBuffer,
         ctx: &mut CudaExecutionCtx,
@@ -2746,13 +2746,12 @@ mod tests {
     ) -> VortexResult<()> {
         let session =
             array_session().with_some(CudaSession::try_default()?.with_dictionary_export(policy));
-        // The direct FSST varbin path must remain available even when execute_cuda would reject
-        // standalone FSST dispatch. This guards against eagerly canonicalizing all exports.
+        // Direct FSST varbin export must work when execute_cuda rejects standalone FSST,
+        // ruling out eager canonicalization.
         let mut ctx = CudaSession::create_execution_ctx(&session)?
             .with_dispatch_mode(CudaDispatchMode::DynDispatchOnly);
         let fsst = fsst_array_from(&values, dtype.clone(), &mut ctx)?;
-        // Keep the symbol table on the host, as the CUDA FSST executor expects, while uploading
-        // the codes and lengths. An eager execute_cuda can no longer fall back to host decoding.
+        // CUDA FSST needs a host symbol table. Upload codes and lengths to prevent CPU fallback.
         let mut slots = Vec::new();
         for slot in fsst.slots().iter() {
             slots.push(match slot {

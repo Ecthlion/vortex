@@ -96,15 +96,13 @@ vx_session *vx_cuda_session_new(vx_error **error_out);
 /**
  * Open a Vortex file sink configured to produce CUDA-readable files.
  *
- * Push host-resident arrays and close or abort the returned sink with the standard
- * `vx_array_sink_*` functions. This function configures the on-disk encodings and layout; it does
- * not move arrays to the GPU during the write.
+ * Push host arrays and close/abort with `vx_array_sink_*`. Only on-disk encodings and layouts
+ * change; writing does not move arrays to the GPU.
  *
  * # Safety
  *
- * `session`, `path`, and `dtype` must satisfy the same requirements as
- * `vx_array_sink_open_file`. If `error_out` is non-null, it must be valid for writing one error
- * pointer.
+ * `session`, `path`, and `dtype` follow `vx_array_sink_open_file`'s requirements.
+ * Non-null `error_out` must be writable for one error pointer.
  */
 vx_array_sink *vx_cuda_array_sink_open_file(const vx_session *session,
                                             vx_view path,
@@ -123,9 +121,7 @@ vx_array_sink *vx_cuda_array_sink_open_file(const vx_session *session,
  *
  * # Safety
  *
- * `session`, `path`, and `dtype` must satisfy the same requirements as
- * `vx_array_sink_open_file`. If `error_out` is non-null, it must be valid for writing one error
- * pointer.
+ * Same requirements as [`vx_cuda_array_sink_open_file`].
  */
 vx_array_sink *vx_cuda_array_sink_open_file_block_rows(const vx_session *session,
                                                        vx_view path,
@@ -136,23 +132,16 @@ vx_array_sink *vx_cuda_array_sink_open_file_block_rows(const vx_session *session
 /**
  * Scan a local Vortex file with buffered I/O and export an Arrow C Device stream.
  *
- * Footer and zone-map reads remain on the host. Data segments are staged through pinned host
- * buffers and transferred directly to the GPU.
+ * Requires CUDA-supported encodings/layouts, such as files from [`vx_cuda_array_sink_open_file`].
+ * Footer/zone-map reads stay on the host; data reaches the GPU through pinned staging buffers
+ * reused across scans with the same CUDA session.
  *
- * The file must use encodings and layouts supported by the CUDA execution path, such as files
- * written by [`vx_cuda_array_sink_open_file`]. Pinned staging buffers are reused across scans made
- * with the same CUDA session.
+ * Dictionaries, including nested children, decode on CUDA for a stable plain Arrow schema,
+ * without changing session policy. Decoding can increase device memory use and requires CUDA
+ * support for device-resident dictionaries.
  *
- * Dictionaries, including nested children, are always decoded on CUDA to export plain Arrow
- * values with a stable batch schema. This may increase device memory use; device-resident
- * dictionaries require CUDA decoding support. The caller's session policy is unchanged.
- *
- * On success returns `0` and writes an owned [`ArrowDeviceArrayStream`] to `out_stream`. The
- * caller must release the stream and each array produced by it through their embedded Arrow
- * release callbacks.
- *
- * On error returns `1` and, when `error_out` is non-null, writes a `vx_error` (free with
- * `vx_error_free`).
+ * Returns `0` with an owned `out_stream`; release it and each batch via their Arrow callbacks.
+ * Returns `1` on error, writing a `vx_error` if `error_out` is non-null; free it with `vx_error_free`.
  *
  * # Safety
  *
@@ -166,19 +155,15 @@ int vx_cuda_scan_path_arrow_device_stream(const vx_session *session,
                                           vx_error **error_out);
 
 /**
- * Scan a local Vortex file and export an Arrow C Device stream with bounded row batches.
+ * Scan a local Vortex file with bounded row batches.
  *
- * `batch_rows` sets the maximum number of rows in each output batch. Physical layout boundaries
- * may produce shorter batches. Passing zero preserves the layout-derived splitting used by
- * [`vx_cuda_scan_path_arrow_device_stream`].
- *
- * Scan and write sizing are independent; scan batches preserve on-disk layout boundaries.
+ * Uses [`vx_cuda_scan_path_arrow_device_stream`]'s export and ownership rules.
+ * `batch_rows` caps output rows; zero uses layout splitting. Physical boundaries may shorten
+ * batches. Scan and write sizing are independent; scans preserve on-disk layout boundaries.
  *
  * # Safety
  *
- * `session` must be a valid borrowed handle created by `vortex-ffi`. `path` must be valid for the
- * duration of this call and contain UTF-8. `out_stream` must be a valid writable pointer. If
- * `error_out` is non-null, it must be valid for writing one error pointer.
+ * Same requirements as [`vx_cuda_scan_path_arrow_device_stream`].
  */
 int vx_cuda_scan_path_arrow_device_stream_batch_rows(const vx_session *session,
                                                      vx_view path,
@@ -187,19 +172,14 @@ int vx_cuda_scan_path_arrow_device_stream_batch_rows(const vx_session *session,
                                                      vx_error **error_out);
 
 /**
- * Scan a local Vortex file with explicit options and export an Arrow C Device stream.
+ * Like [`vx_cuda_scan_path_arrow_device_stream`], with explicit scan options.
  *
- * This has the same ownership and file compatibility requirements as
- * [`vx_cuda_scan_path_arrow_device_stream`]. Pass a null `options` pointer or a zero-initialized
- * [`vx_cuda_scan_options`] to use buffered file I/O and layout-derived batch splitting.
- * Dictionaries are always decoded as described in [`vx_cuda_scan_path_arrow_device_stream`].
+ * Null or zero-initialized `options` selects buffered I/O and layout-derived batch splitting.
  *
  * # Safety
  *
- * `session` must be a valid borrowed handle created by `vortex-ffi`. `path` must be valid for the
- * duration of this call and contain UTF-8. `options`, when non-null, must point to a valid
- * [`vx_cuda_scan_options`]. `out_stream` must be a valid writable pointer. If `error_out` is
- * non-null, it must be valid for writing one error pointer.
+ * Same requirements as [`vx_cuda_scan_path_arrow_device_stream`]; non-null `options` must
+ * point to a valid [`vx_cuda_scan_options`].
  */
 int vx_cuda_scan_path_arrow_device_stream_with_options(const vx_session *session,
                                                        vx_view path,
@@ -208,23 +188,19 @@ int vx_cuda_scan_path_arrow_device_stream_with_options(const vx_session *session
                                                        vx_error **error_out);
 
 /**
- * Scan selected top-level columns of a local Vortex file as an Arrow C Device stream.
+ * Scan a local Vortex file with ordered top-level column projection.
  *
- * This has the same options, ownership, and file compatibility requirements as
- * [`vx_cuda_scan_path_arrow_device_stream_with_options`]. Zero `ncolumns` selects all columns and
- * ignores `columns`. Otherwise, names are case-sensitive literal top-level field names (not field
- * paths), returned in the requested order. Unknown or duplicate names and non-struct file dtypes
- * are rejected. Projection is applied by the scan builder before reading or decoding column data.
- *
- * Names are copied during this call; the stream does not borrow them. The projected schema is
- * available even for a zero-row file. On error, `out_stream` is left unchanged.
+ * Same options, ownership, and file requirements as
+ * [`vx_cuda_scan_path_arrow_device_stream_with_options`]. Projection precedes column I/O/decoding.
+ * Names are literal and case-sensitive; unknown/duplicate names and non-struct files are rejected.
+ * `ncolumns == 0` ignores `columns` and selects all. Names are copied; empty files retain the
+ * projected schema. Errors leave `out_stream` unchanged.
  *
  * # Safety
  *
- * `session`, `path`, `options`, `out_stream`, and `error_out` must satisfy the requirements of
- * [`vx_cuda_scan_path_arrow_device_stream_with_options`]. For nonzero `ncolumns`, `columns` must
- * point to that many initialized, aligned [`vx_view`] values. Each name must point to `len`
- * readable bytes for this call, or be null with zero length. Names must contain UTF-8.
+ * In addition to [`vx_cuda_scan_path_arrow_device_stream_with_options`]'s requirements,
+ * nonzero `ncolumns` requires that many initialized, aligned [`vx_view`] values at `columns`.
+ * Each name borrows `len` readable UTF-8 bytes for this call; null is allowed only for zero length.
  */
 int vx_cuda_scan_path_arrow_device_stream_projected(const vx_session *session,
                                                     vx_view path,
@@ -237,10 +213,9 @@ int vx_cuda_scan_path_arrow_device_stream_projected(const vx_session *session,
 /**
  * Export a borrowed Vortex array for cuDF's Arrow Device import path.
  *
- * On success returns `0` and writes independently releasable `out_schema` and `out_array`; the
- * caller passes them to cuDF and releases both via their embedded Arrow callbacks after import. On
- * error returns `1` and, when `error_out` is non-null, writes a `vx_error` (free with
- * `vx_error_free`).
+ * Returns `0` with independently owned `out_schema` and `out_array`. Pass them to cuDF, then
+ * release both via their Arrow callbacks after import. Returns `1` on error, writing a `vx_error`
+ * if `error_out` is non-null; free it with `vx_error_free`.
  *
  * `out_array` is exported on `ARROW_DEVICE_CUDA`; struct arrays become table-shaped schemas,
  * non-struct arrays a single column field.
@@ -262,16 +237,10 @@ int vx_cuda_array_export_arrow_device(const vx_session *session,
 /**
  * Consume a Vortex partition and scan it as an Arrow C Device stream.
  *
- * This function takes ownership of `partition`. Callers must not free or reuse it after calling
- * this function, regardless of success or failure.
- *
- * On success returns `0` and writes an owned `ArrowDeviceArrayStream` to `out_stream`. The stream
- * owns the resulting scan iterator. The caller must release the stream through its embedded Arrow
- * `release` callback, and must release each produced `ArrowDeviceArray` through its embedded
- * `ArrowArray.release` callback.
- *
- * On error returns `1` and, when `error_out` is non-null, writes a `vx_error` (free with
- * `vx_error_free`).
+ * Consumes `partition` on success or failure; never free or reuse it afterward.
+ * Returns `0` with an owned `out_stream` retaining the scan iterator. Release the stream and
+ * each produced batch via their Arrow release callbacks.
+ * Returns `1` on error, writing a `vx_error` if `error_out` is non-null; free it with `vx_error_free`.
  *
  * # Safety
  *
