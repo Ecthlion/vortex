@@ -9,5 +9,13 @@ root: vortex.alp(f64, len=16384) nbytes=6208
     metadata: all_values_referenced: true
     codes: fastlanes.bitpacked(u8, len=16384) nbytes=6144
       metadata: bit_width: 3, offset: 0
+      patch_indices: <empty>
+      patch_values: <empty>
+      patch_chunk_offsets: <empty>
+      validity_child: <empty>
     values: vortex.primitive(i64, len=8) nbytes=64
       metadata: ptype: i64
+      validity: <empty>
+  patch_indices: <empty>
+  patch_values: <empty>
+  patch_chunk_offsets: <empty>

@@ -7,7 +7,13 @@ root: vortex.dict(binary, len=16384) nbytes=6196
   metadata: all_values_referenced: true
   codes: fastlanes.bitpacked(u8, len=16384) nbytes=6144
     metadata: bit_width: 3, offset: 0
+    patch_indices: <empty>
+    patch_values: <empty>
+    patch_chunk_offsets: <empty>
+    validity_child: <empty>
   values: vortex.varbin(binary, len=5) nbytes=52
     metadata: 
     offsets: vortex.primitive(u8, len=6) nbytes=6
       metadata: ptype: u8
+      validity: <empty>
+    validity: <empty>

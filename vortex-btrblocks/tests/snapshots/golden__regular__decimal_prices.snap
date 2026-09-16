@@ -7,3 +7,7 @@ root: vortex.decimal_byte_parts(decimal(12,2), len=16384) nbytes=49152
   metadata: 
   msp: fastlanes.bitpacked(i32, len=16384) nbytes=49152
     metadata: bit_width: 24, offset: 0
+    patch_indices: <empty>
+    patch_values: <empty>
+    patch_chunk_offsets: <empty>
+    validity_child: <empty>

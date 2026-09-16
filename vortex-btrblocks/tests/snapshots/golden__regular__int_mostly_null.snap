@@ -7,7 +7,13 @@ root: vortex.sparse(i32?, len=16384) nbytes=3031
   metadata: fill_value: null
   patch_indices: vortex.primitive(u16, len=823) nbytes=1646
     metadata: ptype: u16
+    validity: <empty>
   patch_values: fastlanes.bitpacked(i32?, len=823) nbytes=1383
     metadata: bit_width: 10, offset: 0
+    patch_indices: <empty>
+    patch_values: <empty>
+    patch_chunk_offsets: <empty>
     validity_child: vortex.bool(bool, len=823) nbytes=103
       metadata: offset: 0
+      validity: <empty>
+  patch_chunk_offsets: <empty>

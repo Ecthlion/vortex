@@ -7,3 +7,10 @@ root: vortex.alp(f64, len=16384) nbytes=49152
   metadata: exponents: e: 14, f: 12
   encoded: fastlanes.bitpacked(i64, len=16384) nbytes=49152
     metadata: bit_width: 24, offset: 0
+    patch_indices: <empty>
+    patch_values: <empty>
+    patch_chunk_offsets: <empty>
+    validity_child: <empty>
+  patch_indices: <empty>
+  patch_values: <empty>
+  patch_chunk_offsets: <empty>

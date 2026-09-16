@@ -5,6 +5,7 @@ use std::fmt;
 use std::fmt::Display;
 use std::fmt::Formatter;
 
+use vortex_utils::tree::ChildVisitor;
 use vortex_utils::tree::TreeDisplayAdapter;
 use vortex_utils::tree::write_branch_tree;
 
@@ -118,12 +119,16 @@ impl<T: DisplayTreeNode> TreeDisplayAdapter for DisplayTreeExpr<'_, T> {
     fn visit_children(
         &self,
         node: &Self::Node,
-        visit: &mut dyn FnMut(&str, &Self::Node, bool) -> fmt::Result,
+        visit: &mut ChildVisitor<'_, Self::Node>,
     ) -> fmt::Result {
         let children = node.tree_children();
         for (index, child) in children.iter().enumerate() {
             let child_name = node.tree_child_name(index);
-            visit(child_name.as_ref(), child, index + 1 == children.len())?;
+            visit(
+                child_name.as_ref(),
+                Some(child),
+                index + 1 == children.len(),
+            )?;
         }
         Ok(())
     }

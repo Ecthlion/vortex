@@ -3,6 +3,7 @@
 
 use std::fmt;
 
+use vortex_utils::tree::ChildVisitor;
 pub use vortex_utils::tree::DepthContext as PlanTreeContext;
 pub use vortex_utils::tree::IndentedFormatter as PlanIndentedFormatter;
 use vortex_utils::tree::TreeDisplayAdapter;
@@ -103,16 +104,16 @@ impl TreeDisplayAdapter for PlanTreeDisplay<'_> {
         Ok(())
     }
 
-    fn visit_children(
-        &self,
-        plan: &PlanRef,
-        visit: &mut dyn FnMut(&str, &PlanRef, bool) -> fmt::Result,
-    ) -> fmt::Result {
+    fn visit_children(&self, plan: &PlanRef, visit: &mut ChildVisitor<'_, PlanRef>) -> fmt::Result {
         let children = plan.children();
         for index in 0..children.len() {
             let child = plan.child_required(index).map_err(|_| fmt::Error)?;
             let child_name = plan.child_name(index);
-            visit(child_name.as_ref(), &child, index + 1 == children.len())?;
+            visit(
+                child_name.as_ref(),
+                Some(&child),
+                index + 1 == children.len(),
+            )?;
         }
         Ok(())
     }

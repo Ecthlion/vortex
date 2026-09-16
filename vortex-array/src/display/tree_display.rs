@@ -3,6 +3,7 @@
 
 use std::fmt;
 
+use vortex_utils::tree::ChildVisitor;
 use vortex_utils::tree::TreeDisplayAdapter;
 use vortex_utils::tree::write_indented_tree;
 
@@ -109,16 +110,11 @@ impl TreeDisplayAdapter for TreeDisplay {
     fn visit_children(
         &self,
         array: &ArrayRef,
-        visit: &mut dyn FnMut(&str, &ArrayRef, bool) -> fmt::Result,
+        visit: &mut ChildVisitor<'_, ArrayRef>,
     ) -> fmt::Result {
-        let mut children = array
-            .children_names()
-            .into_iter()
-            .zip(array.children())
-            .peekable();
-        while let Some((child_name, child)) = children.next() {
-            let is_last = children.peek().is_none();
-            visit(&child_name, &child, is_last)?;
+        let slots = array.slots();
+        for (idx, slot) in slots.iter().enumerate() {
+            visit(&array.slot_name(idx), slot.as_ref(), idx + 1 == slots.len())?;
         }
         Ok(())
     }

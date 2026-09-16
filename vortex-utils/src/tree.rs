@@ -5,6 +5,15 @@
 
 use std::fmt;
 
+/// Rendered in place of a named child position that holds no node.
+pub const EMPTY_NODE: &str = "<empty>";
+
+/// Receives each named child position as a tree is rendered.
+///
+/// The node is `None` for a named position that holds no node, and the final argument is `true`
+/// only for the last position.
+pub type ChildVisitor<'a, N> = dyn FnMut(&str, Option<&N>, bool) -> fmt::Result + 'a;
+
 /// Traversal state updated as a tree renderer enters and leaves a node's children.
 ///
 /// The context visible while a node is rendered describes its ancestors. The renderer calls
@@ -131,12 +140,15 @@ pub trait TreeDisplayAdapter {
 
     /// Visit each named child in display order.
     ///
+    /// A `None` child is a named position that holds no node, such as an empty array slot.
+    /// Renderers write its name followed by [`EMPTY_NODE`] and do not descend into it.
+    ///
     /// The final argument to `visit` must be `true` only for the last child. Renderers call the
     /// visitor synchronously, so adapters may pass either stored or temporarily owned nodes.
     fn visit_children(
         &self,
         node: &Self::Node,
-        visit: &mut dyn FnMut(&str, &Self::Node, bool) -> fmt::Result,
+        visit: &mut ChildVisitor<'_, Self::Node>,
     ) -> fmt::Result;
 }
 
@@ -173,15 +185,16 @@ fn write_indented_node<A: TreeDisplayAdapter>(
     }
 
     context.push_parent(node);
-    let result = adapter.visit_children(node, &mut |child_name, child, _is_last| {
-        write_indented_node(
+    let result = adapter.visit_children(node, &mut |child_name, child, _is_last| match child {
+        Some(child) => write_indented_node(
             adapter,
             child_name,
             child,
             context,
             &child_indent,
             formatter,
-        )
+        ),
+        None => writeln!(formatter, "{child_indent}{child_name}: {EMPTY_NODE}"),
     });
     context.pop_parent(node);
     result
@@ -214,6 +227,9 @@ fn write_branch_node<A: TreeDisplayAdapter>(
         writeln!(formatter)?;
         let connector = if is_last { "└── " } else { "├── " };
         write!(formatter, "{prefix}{connector}{child_name}: ")?;
+        let Some(child) = child else {
+            return write!(formatter, "{EMPTY_NODE}");
+        };
         let child_prefix = format!("{prefix}{}", if is_last { "    " } else { "│   " });
         write_branch_node(adapter, child, context, &child_prefix, formatter)
     });
@@ -225,6 +241,7 @@ fn write_branch_node<A: TreeDisplayAdapter>(
 mod tests {
     use std::fmt;
 
+    use super::ChildVisitor;
     use super::DepthContext;
     use super::TreeDisplayAdapter;
     use super::write_branch_tree;
@@ -232,7 +249,7 @@ mod tests {
 
     struct TestNode {
         label: &'static str,
-        children: Vec<(&'static str, TestNode)>,
+        children: Vec<(&'static str, Option<TestNode>)>,
     }
 
     struct TestAdapter;
@@ -253,10 +270,10 @@ mod tests {
         fn visit_children(
             &self,
             node: &Self::Node,
-            visit: &mut dyn FnMut(&str, &Self::Node, bool) -> fmt::Result,
+            visit: &mut ChildVisitor<'_, Self::Node>,
         ) -> fmt::Result {
             for (index, (name, child)) in node.children.iter().enumerate() {
-                visit(name, child, index + 1 == node.children.len())?;
+                visit(name, child.as_ref(), index + 1 == node.children.len())?;
             }
             Ok(())
         }
@@ -295,23 +312,24 @@ mod tests {
             children: vec![
                 (
                     "left",
-                    TestNode {
+                    Some(TestNode {
                         label: "branch",
                         children: vec![(
                             "leaf",
-                            TestNode {
+                            Some(TestNode {
                                 label: "first",
                                 children: Vec::new(),
-                            },
+                            }),
                         )],
-                    },
+                    }),
                 ),
+                ("middle", None),
                 (
                     "right",
-                    TestNode {
+                    Some(TestNode {
                         label: "second",
                         children: Vec::new(),
-                    },
+                    }),
                 ),
             ],
         }
@@ -321,7 +339,7 @@ mod tests {
     fn renders_indented_tree() {
         assert_eq!(
             IndentedDisplay(&tree()).to_string(),
-            "root:parent@0\n  left:branch@1\n    leaf:first@2\n  right:second@1\n"
+            "root:parent@0\n  left:branch@1\n    leaf:first@2\n  middle: <empty>\n  right:second@1\n"
         );
     }
 
@@ -329,7 +347,7 @@ mod tests {
     fn renders_branch_tree() {
         assert_eq!(
             BranchDisplay(&tree()).to_string(),
-            "parent@0\n├── left: branch@1\n│   └── leaf: first@2\n└── right: second@1"
+            "parent@0\n├── left: branch@1\n│   └── leaf: first@2\n├── middle: <empty>\n└── right: second@1"
         );
     }
 }

@@ -88,13 +88,17 @@ mod tests {
 
         insta::assert_snapshot!(
             sliced.display_tree_encodings_only(),
-            @r#"
-            root: vortex.patched(u16, len=9)
-              inner: vortex.primitive(u16, len=9)
-              lane_offsets: vortex.primitive(u32, len=33)
-              patch_indices: vortex.primitive(u16, len=3)
-              patch_values: vortex.primitive(u16, len=3)
-            "#);
+            @"
+        root: vortex.patched(u16, len=9)
+          inner: vortex.primitive(u16, len=9)
+            validity: <empty>
+          lane_offsets: vortex.primitive(u32, len=33)
+            validity: <empty>
+          patch_indices: vortex.primitive(u16, len=3)
+            validity: <empty>
+          patch_values: vortex.primitive(u16, len=3)
+            validity: <empty>
+        ");
 
         let executed = sliced.execute::<Canonical>(&mut ctx)?.into_primitive();
 
