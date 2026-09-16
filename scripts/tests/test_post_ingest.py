@@ -13,10 +13,11 @@ import os
 import subprocess
 import sys
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import psycopg
 import pytest
@@ -28,15 +29,17 @@ TABLES = ("query_measurements", "compression_times", "compression_sizes", "rando
 
 
 @pytest.fixture
-def writer():
+def writer() -> ModuleType:
     spec = importlib.util.spec_from_file_location("post_ingest", REPO_ROOT / "scripts/post-ingest.py")
+    assert spec is not None
     module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
 
 
 @pytest.fixture
-def commit():
+def commit() -> dict[str, str]:
     return {
         "sha": "a" * 40,
         "timestamp": "2026-09-08T12:00:00Z",
@@ -51,7 +54,7 @@ def commit():
 
 
 @pytest.fixture
-def records(commit):
+def records(commit) -> list[dict[str, object]]:
     common = {"commit_sha": commit["sha"], "dataset": "test", "format": "vortex"}
     timing = {"value_ns": 100, "all_runtimes_ns": [99, 101]}
     return [
@@ -76,7 +79,7 @@ def records(commit):
 
 
 @pytest.fixture
-def clock(monkeypatch, writer):
+def clock(monkeypatch, writer) -> SimpleNamespace:
     state = SimpleNamespace(now=0.0, sleeps=[])
 
     def sleep(delay):
@@ -141,7 +144,7 @@ def test_elapsed_budget_prevents_another_attempt(writer, clock, elapsed, sleeps)
 
 
 def test_budget_does_not_cancel_successful_transaction(writer, clock):
-    def succeed():
+    def succeed() -> tuple[int, int]:
         clock.now += 121
         return (5, 0)
 
@@ -166,7 +169,7 @@ def test_connection_timeouts_override_dsn_options(writer, monkeypatch):
     captured = {}
     connection = SimpleNamespace(pgconn=SimpleNamespace(ssl_in_use=True))
 
-    def connect(**kwargs):
+    def connect(**kwargs: object) -> SimpleNamespace:
         captured.update(kwargs)
         return connection
 
@@ -216,7 +219,7 @@ def conn(database):
         yield connection
 
 
-def stored_rows(conn):
+def stored_rows(conn) -> list[list[tuple[object, ...]]]:
     return [
         conn.execute(sql.SQL("SELECT * FROM {} ORDER BY measurement_id").format(sql.Identifier(table))).fetchall()
         for table in TABLES
@@ -269,7 +272,7 @@ def test_real_transaction_conflict_retries_the_entire_file(
     writer.ingest_postgres(conn, other_commit, [])
     writer.ingest_postgres(conn, commit, [])
     reached = Event()
-    original = writer._APPLY_RECORD["query_measurement"]
+    original: Callable[..., bool] = writer._APPLY_RECORD["query_measurement"]
     attempts = 0
     with psycopg.connect(database, autocommit=True) as other:
         if conflict == "serialization":
@@ -283,7 +286,7 @@ def test_real_transaction_conflict_retries_the_entire_file(
             other.execute("BEGIN")
             other.execute("SELECT 1 FROM commits WHERE commit_sha = %s FOR UPDATE", (other_commit["sha"],))
 
-        def insert_and_conflict(connection, mid_mod, record):
+        def insert_and_conflict(connection, mid_mod, record) -> bool:
             nonlocal attempts
             attempts += 1
             result = original(connection, mid_mod, record)
@@ -326,7 +329,7 @@ def test_refresh_failure_keeps_successful_ingest(writer, database, conn, commit,
     monkeypatch.setenv("BENCH_SITE_BASE_URL", "https://bench.example.com")
     monkeypatch.setenv("BENCH_REVALIDATE_TOKEN", "secret")
 
-    def fail_refresh(*args):
+    def fail_refresh(*args: object) -> None:
         raise TimeoutError("refresh timed out")
 
     monkeypatch.setattr(writer, "_http", fail_refresh)
