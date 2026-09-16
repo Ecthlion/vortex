@@ -5,14 +5,13 @@
 
 use std::fmt;
 
-/// Rendered in place of a named child position that holds no node.
+/// Names the row that collects a node's empty child positions.
 pub const EMPTY_NODE: &str = "<empty>";
 
 /// Receives each named child position as a tree is rendered.
 ///
-/// The node is `None` for a named position that holds no node, and the final argument is `true`
-/// only for the last position.
-pub type ChildVisitor<'a, N> = dyn FnMut(&str, Option<&N>, bool) -> fmt::Result + 'a;
+/// The node is `None` for a named position that holds no node.
+pub type ChildVisitor<'a, N> = dyn FnMut(&str, Option<&N>) -> fmt::Result + 'a;
 
 /// Traversal state updated as a tree renderer enters and leaves a node's children.
 ///
@@ -141,15 +140,34 @@ pub trait TreeDisplayAdapter {
     /// Visit each named child in display order.
     ///
     /// A `None` child is a named position that holds no node, such as an empty array slot.
-    /// Renderers write its name followed by [`EMPTY_NODE`] and do not descend into it.
+    /// Renderers gather those names into a single trailing [`EMPTY_NODE`] row rather than
+    /// descending into them, so adapters report positions in their natural order and leave
+    /// placement to the renderer.
     ///
-    /// The final argument to `visit` must be `true` only for the last child. Renderers call the
-    /// visitor synchronously, so adapters may pass either stored or temporarily owned nodes.
+    /// Renderers call the visitor synchronously, and may call it more than once per rendered
+    /// node, so adapters may pass either stored or temporarily owned nodes.
     fn visit_children(
         &self,
         node: &Self::Node,
         visit: &mut ChildVisitor<'_, Self::Node>,
     ) -> fmt::Result;
+}
+
+/// Count a node's occupied child positions and collect the names of its empty ones.
+fn scan_children<A: TreeDisplayAdapter>(
+    adapter: &A,
+    node: &A::Node,
+) -> Result<(usize, Vec<String>), fmt::Error> {
+    let mut occupied = 0;
+    let mut empty = Vec::new();
+    adapter.visit_children(node, &mut |name, child| {
+        match child {
+            Some(_) => occupied += 1,
+            None => empty.push(name.to_string()),
+        }
+        Ok(())
+    })?;
+    Ok((occupied, empty))
 }
 
 /// Render a named tree using two-space indentation.
@@ -184,8 +202,10 @@ fn write_indented_node<A: TreeDisplayAdapter>(
         adapter.write_details(node, context, &mut indented)?;
     }
 
+    let (_, empty_names) = scan_children(adapter, node)?;
+
     context.push_parent(node);
-    let result = adapter.visit_children(node, &mut |child_name, child, _is_last| match child {
+    let result = adapter.visit_children(node, &mut |child_name, child| match child {
         Some(child) => write_indented_node(
             adapter,
             child_name,
@@ -194,10 +214,19 @@ fn write_indented_node<A: TreeDisplayAdapter>(
             &child_indent,
             formatter,
         ),
-        None => writeln!(formatter, "{child_indent}{child_name}: {EMPTY_NODE}"),
+        None => Ok(()),
     });
     context.pop_parent(node);
-    result
+    result?;
+
+    if !empty_names.is_empty() {
+        writeln!(
+            formatter,
+            "{child_indent}{EMPTY_NODE}: {}",
+            empty_names.join(", ")
+        )?;
+    }
+    Ok(())
 }
 
 /// Render a tree using Unicode branch connectors.
@@ -222,19 +251,32 @@ fn write_branch_node<A: TreeDisplayAdapter>(
 ) -> fmt::Result {
     adapter.write_node(node, context, formatter)?;
 
+    let (occupied, empty_names) = scan_children(adapter, node)?;
+    let mut visited = 0;
+
     context.push_parent(node);
-    let result = adapter.visit_children(node, &mut |child_name, child, is_last| {
+    let result = adapter.visit_children(node, &mut |child_name, child| {
+        let Some(child) = child else { return Ok(()) };
+        visited += 1;
+        let is_last = visited == occupied && empty_names.is_empty();
         writeln!(formatter)?;
         let connector = if is_last { "└── " } else { "├── " };
         write!(formatter, "{prefix}{connector}{child_name}: ")?;
-        let Some(child) = child else {
-            return write!(formatter, "{EMPTY_NODE}");
-        };
         let child_prefix = format!("{prefix}{}", if is_last { "    " } else { "│   " });
         write_branch_node(adapter, child, context, &child_prefix, formatter)
     });
     context.pop_parent(node);
-    result
+    result?;
+
+    if !empty_names.is_empty() {
+        writeln!(formatter)?;
+        write!(
+            formatter,
+            "{prefix}└── {EMPTY_NODE}: {}",
+            empty_names.join(", ")
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -272,8 +314,8 @@ mod tests {
             node: &Self::Node,
             visit: &mut ChildVisitor<'_, Self::Node>,
         ) -> fmt::Result {
-            for (index, (name, child)) in node.children.iter().enumerate() {
-                visit(name, child.as_ref(), index + 1 == node.children.len())?;
+            for (name, child) in &node.children {
+                visit(name, child.as_ref())?;
             }
             Ok(())
         }
@@ -324,6 +366,7 @@ mod tests {
                     }),
                 ),
                 ("middle", None),
+                ("spare", None),
                 (
                     "right",
                     Some(TestNode {
@@ -339,7 +382,7 @@ mod tests {
     fn renders_indented_tree() {
         assert_eq!(
             IndentedDisplay(&tree()).to_string(),
-            "root:parent@0\n  left:branch@1\n    leaf:first@2\n  middle: <empty>\n  right:second@1\n"
+            "root:parent@0\n  left:branch@1\n    leaf:first@2\n  right:second@1\n  <empty>: middle, spare\n"
         );
     }
 
@@ -347,7 +390,7 @@ mod tests {
     fn renders_branch_tree() {
         assert_eq!(
             BranchDisplay(&tree()).to_string(),
-            "parent@0\n├── left: branch@1\n│   └── leaf: first@2\n├── middle: <empty>\n└── right: second@1"
+            "parent@0\n├── left: branch@1\n│   └── leaf: first@2\n├── right: second@1\n└── <empty>: middle, spare"
         );
     }
 }

@@ -7,7 +7,4 @@ root: fastlanes.for(i64, len=16384) nbytes=16384
   metadata: reference: -128i64
   encoded: fastlanes.bitpacked(i64, len=16384) nbytes=16384
     metadata: bit_width: 8, offset: 0
-    patch_indices: <empty>
-    patch_values: <empty>
-    patch_chunk_offsets: <empty>
-    validity_child: <empty>
+    <empty>: patch_indices, patch_values, patch_chunk_offsets, validity_child

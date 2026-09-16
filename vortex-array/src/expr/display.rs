@@ -123,12 +123,7 @@ impl<T: DisplayTreeNode> TreeDisplayAdapter for DisplayTreeExpr<'_, T> {
     ) -> fmt::Result {
         let children = node.tree_children();
         for (index, child) in children.iter().enumerate() {
-            let child_name = node.tree_child_name(index);
-            visit(
-                child_name.as_ref(),
-                Some(child),
-                index + 1 == children.len(),
-            )?;
+            visit(node.tree_child_name(index).as_ref(), Some(child))?;
         }
         Ok(())
     }

@@ -71,7 +71,7 @@ pub enum DisplayOptions {
     /// let expected = "root: vortex.primitive(i16, len=5) nbytes=10 B (100.00%)
     ///   metadata: ptype: i16
     ///   buffer: values host 10 B (align=2) (100.00%)
-    ///   validity: <empty>
+    ///   <empty>: validity
     /// ";
     /// assert_eq!(format!("{}", array.display_as(DisplayOptions::TreeDisplay { buffers: true, metadata: true, stats: true })), expected);
     ///
@@ -82,15 +82,15 @@ pub enum DisplayOptions {
     /// ]).unwrap().into_array();
     /// let expected = "root: vortex.struct({x=i32, y=i32}, len=2) nbytes=16 B (100.00%)
     ///   metadata:\x20
-    ///   validity: <empty>
     ///   x: vortex.primitive(i32, len=2) nbytes=8 B (50.00%)
     ///     metadata: ptype: i32
     ///     buffer: values host 8 B (align=4) (100.00%)
-    ///     validity: <empty>
+    ///     <empty>: validity
     ///   y: vortex.primitive(i32, len=2) nbytes=8 B (50.00%)
     ///     metadata: ptype: i32
     ///     buffer: values host 8 B (align=4) (100.00%)
-    ///     validity: <empty>
+    ///     <empty>: validity
+    ///   <empty>: validity
     /// ";
     /// assert_eq!(format!("{}", array.display_as(DisplayOptions::TreeDisplay { buffers: true, metadata: true, stats: true })), expected);
     /// ```
@@ -104,7 +104,7 @@ pub enum DisplayOptions {
     /// let array = buffer![0_i16, 1, 2, 3, 4].into_array();
     /// let expected = "root: vortex.primitive(i16, len=5) nbytes=10 B (100.00%)
     ///   metadata: ptype: i16
-    ///   validity: <empty>
+    ///   <empty>: validity
     /// ";
     /// assert_eq!(format!("{}", array.display_as(DisplayOptions::TreeDisplay { buffers: false, metadata: true, stats: true })), expected);
     ///
@@ -115,13 +115,13 @@ pub enum DisplayOptions {
     /// ]).unwrap().into_array();
     /// let expected = "root: vortex.struct({x=i32, y=i32}, len=2) nbytes=16 B (100.00%)
     ///   metadata:\x20
-    ///   validity: <empty>
     ///   x: vortex.primitive(i32, len=2) nbytes=8 B (50.00%)
     ///     metadata: ptype: i32
-    ///     validity: <empty>
+    ///     <empty>: validity
     ///   y: vortex.primitive(i32, len=2) nbytes=8 B (50.00%)
     ///     metadata: ptype: i32
-    ///     validity: <empty>
+    ///     <empty>: validity
+    ///   <empty>: validity
     /// ";
     /// assert_eq!(format!("{}", array.display_as(DisplayOptions::TreeDisplay { buffers: false, metadata: true, stats: true })), expected);
     /// ```
@@ -136,7 +136,7 @@ pub enum DisplayOptions {
     /// let expected = "root: vortex.primitive(i16, len=5)
     ///   metadata: ptype: i16
     ///   buffer: values host 10 B (align=2)
-    ///   validity: <empty>
+    ///   <empty>: validity
     /// ";
     /// assert_eq!(format!("{}", array.display_as(DisplayOptions::TreeDisplay { buffers: true, metadata: true, stats: false })), expected);
     ///
@@ -147,15 +147,15 @@ pub enum DisplayOptions {
     /// ]).unwrap().into_array();
     /// let expected = "root: vortex.struct({x=i32, y=i32}, len=2)
     ///   metadata:\x20
-    ///   validity: <empty>
     ///   x: vortex.primitive(i32, len=2)
     ///     metadata: ptype: i32
     ///     buffer: values host 8 B (align=4)
-    ///     validity: <empty>
+    ///     <empty>: validity
     ///   y: vortex.primitive(i32, len=2)
     ///     metadata: ptype: i32
     ///     buffer: values host 8 B (align=4)
-    ///     validity: <empty>
+    ///     <empty>: validity
+    ///   <empty>: validity
     /// ";
     /// assert_eq!(format!("{}", array.display_as(DisplayOptions::TreeDisplay { buffers: true, metadata: true, stats: false })), expected);
     /// ```
@@ -169,7 +169,7 @@ pub enum DisplayOptions {
     /// let array = buffer![0_i16, 1, 2, 3, 4].into_array();
     /// let expected = "root: vortex.primitive(i16, len=5) nbytes=10 B (100.00%)
     ///   buffer: values host 10 B (align=2) (100.00%)
-    ///   validity: <empty>
+    ///   <empty>: validity
     /// ";
     /// assert_eq!(format!("{}", array.display_as(DisplayOptions::TreeDisplay { buffers: true, metadata: false, stats: true })), expected);
     ///
@@ -179,13 +179,13 @@ pub enum DisplayOptions {
     ///     ("y", buffer![3, 4].into_array()),
     /// ]).unwrap().into_array();
     /// let expected = "root: vortex.struct({x=i32, y=i32}, len=2) nbytes=16 B (100.00%)
-    ///   validity: <empty>
     ///   x: vortex.primitive(i32, len=2) nbytes=8 B (50.00%)
     ///     buffer: values host 8 B (align=4) (100.00%)
-    ///     validity: <empty>
+    ///     <empty>: validity
     ///   y: vortex.primitive(i32, len=2) nbytes=8 B (50.00%)
     ///     buffer: values host 8 B (align=4) (100.00%)
-    ///     validity: <empty>
+    ///     <empty>: validity
+    ///   <empty>: validity
     /// ";
     /// assert_eq!(format!("{}", array.display_as(DisplayOptions::TreeDisplay { buffers: true, metadata: false, stats: true })), expected);
     /// ```
@@ -199,7 +199,7 @@ pub enum DisplayOptions {
     /// let array = buffer![0_i16, 1, 2, 3, 4].into_array();
     /// let expected = "root: vortex.primitive(i16, len=5)
     ///   buffer: values host 10 B (align=2)
-    ///   validity: <empty>
+    ///   <empty>: validity
     /// ";
     /// assert_eq!(format!("{}", array.display_as(DisplayOptions::TreeDisplay { buffers: true, metadata: false, stats: false })), expected);
     ///
@@ -209,13 +209,13 @@ pub enum DisplayOptions {
     ///     ("y", buffer![3, 4].into_array()),
     /// ]).unwrap().into_array();
     /// let expected = "root: vortex.struct({x=i32, y=i32}, len=2)
-    ///   validity: <empty>
     ///   x: vortex.primitive(i32, len=2)
     ///     buffer: values host 8 B (align=4)
-    ///     validity: <empty>
+    ///     <empty>: validity
     ///   y: vortex.primitive(i32, len=2)
     ///     buffer: values host 8 B (align=4)
-    ///     validity: <empty>
+    ///     <empty>: validity
+    ///   <empty>: validity
     /// ";
     /// assert_eq!(format!("{}", array.display_as(DisplayOptions::TreeDisplay { buffers: true, metadata: false, stats: false })), expected);
     /// ```
@@ -229,7 +229,7 @@ pub enum DisplayOptions {
     /// let array = buffer![0_i16, 1, 2, 3, 4].into_array();
     /// let expected = "root: vortex.primitive(i16, len=5)
     ///   metadata: ptype: i16
-    ///   validity: <empty>
+    ///   <empty>: validity
     /// ";
     /// assert_eq!(format!("{}", array.display_as(DisplayOptions::TreeDisplay { buffers: false, metadata: true, stats: false })), expected);
     ///
@@ -240,13 +240,13 @@ pub enum DisplayOptions {
     /// ]).unwrap().into_array();
     /// let expected = "root: vortex.struct({x=i32, y=i32}, len=2)
     ///   metadata:\x20
-    ///   validity: <empty>
     ///   x: vortex.primitive(i32, len=2)
     ///     metadata: ptype: i32
-    ///     validity: <empty>
+    ///     <empty>: validity
     ///   y: vortex.primitive(i32, len=2)
     ///     metadata: ptype: i32
-    ///     validity: <empty>
+    ///     <empty>: validity
+    ///   <empty>: validity
     /// ";
     /// assert_eq!(format!("{}", array.display_as(DisplayOptions::TreeDisplay { buffers: false, metadata: true, stats: false })), expected);
     /// ```
@@ -259,7 +259,7 @@ pub enum DisplayOptions {
     /// # use vortex_buffer::buffer;
     /// let array = buffer![0_i16, 1, 2, 3, 4].into_array();
     /// let expected = "root: vortex.primitive(i16, len=5) nbytes=10 B (100.00%)
-    ///   validity: <empty>
+    ///   <empty>: validity
     /// ";
     /// assert_eq!(format!("{}", array.display_as(DisplayOptions::TreeDisplay { buffers: false, metadata: false, stats: true })), expected);
     ///
@@ -269,11 +269,11 @@ pub enum DisplayOptions {
     ///     ("y", buffer![3, 4].into_array()),
     /// ]).unwrap().into_array();
     /// let expected = "root: vortex.struct({x=i32, y=i32}, len=2) nbytes=16 B (100.00%)
-    ///   validity: <empty>
     ///   x: vortex.primitive(i32, len=2) nbytes=8 B (50.00%)
-    ///     validity: <empty>
+    ///     <empty>: validity
     ///   y: vortex.primitive(i32, len=2) nbytes=8 B (50.00%)
-    ///     validity: <empty>
+    ///     <empty>: validity
+    ///   <empty>: validity
     /// ";
     /// assert_eq!(format!("{}", array.display_as(DisplayOptions::TreeDisplay { buffers: false, metadata: false, stats: true })), expected);
     /// ```
@@ -286,7 +286,7 @@ pub enum DisplayOptions {
     /// # use vortex_buffer::buffer;
     /// let array = buffer![0_i16, 1, 2, 3, 4].into_array();
     /// let expected = "root: vortex.primitive(i16, len=5)
-    ///   validity: <empty>
+    ///   <empty>: validity
     /// ";
     /// assert_eq!(format!("{}", array.display_as(DisplayOptions::TreeDisplay { buffers: false, metadata: false, stats: false })), expected);
     ///
@@ -296,11 +296,11 @@ pub enum DisplayOptions {
     ///     ("y", buffer![3, 4].into_array()),
     /// ]).unwrap().into_array();
     /// let expected = "root: vortex.struct({x=i32, y=i32}, len=2)
-    ///   validity: <empty>
     ///   x: vortex.primitive(i32, len=2)
-    ///     validity: <empty>
+    ///     <empty>: validity
     ///   y: vortex.primitive(i32, len=2)
-    ///     validity: <empty>
+    ///     <empty>: validity
+    ///   <empty>: validity
     /// ";
     /// assert_eq!(format!("{}", array.display_as(DisplayOptions::TreeDisplay { buffers: false, metadata: false, stats: false })), expected);
     /// ```
@@ -423,7 +423,7 @@ impl ArrayRef {
     /// # use vortex_buffer::buffer;
     /// let array = buffer![0_i16, 1, 2, 3, 4].into_array();
     /// let expected = "root: vortex.primitive(i16, len=5)
-    ///   validity: <empty>
+    ///   <empty>: validity
     /// ";
     /// assert_eq!(format!("{}", array.display_tree_encodings_only()), expected);
     ///
@@ -433,11 +433,11 @@ impl ArrayRef {
     ///     ("y", buffer![3, 4].into_array()),
     /// ]).unwrap().into_array();
     /// let expected = "root: vortex.struct({x=i32, y=i32}, len=2)
-    ///   validity: <empty>
     ///   x: vortex.primitive(i32, len=2)
-    ///     validity: <empty>
+    ///     <empty>: validity
     ///   y: vortex.primitive(i32, len=2)
-    ///     validity: <empty>
+    ///     <empty>: validity
+    ///   <empty>: validity
     /// ";
     /// assert_eq!(format!("{}", array.display_tree_encodings_only()), expected);
     /// ```
@@ -461,7 +461,7 @@ impl ArrayRef {
     /// let expected = "root: vortex.primitive(i16, len=5) nbytes=10 B (100.00%)
     ///   metadata: ptype: i16
     ///   buffer: values host 10 B (align=2) (100.00%)
-    ///   validity: <empty>
+    ///   <empty>: validity
     /// ";
     /// assert_eq!(format!("{}", array.display_tree()), expected);
     /// ```
@@ -482,7 +482,7 @@ impl ArrayRef {
     /// let expected = "root: vortex.primitive(i16, len=5) nbytes=10 B (100.00%)
     ///   metadata: ptype: i16
     ///   buffer: values host 10 B (align=2) (100.00%)
-    ///   validity: <empty>
+    ///   <empty>: validity
     /// ";
     /// assert_eq!(array.tree_display().to_string(), expected);
     /// ```
@@ -508,14 +508,14 @@ impl ArrayRef {
     /// let encodings = array.tree_display_builder()
     ///     .with(EncodingSummaryExtractor)
     ///     .to_string();
-    /// assert_eq!(encodings, "root: vortex.primitive(i16, len=5)\n  validity: <empty>\n");
+    /// assert_eq!(encodings, "root: vortex.primitive(i16, len=5)\n  <empty>: validity\n");
     ///
     /// // With encoding + nbytes
     /// let with_nbytes = array.tree_display_builder()
     ///     .with(EncodingSummaryExtractor)
     ///     .with(NbytesExtractor)
     ///     .to_string();
-    /// assert_eq!(with_nbytes, "root: vortex.primitive(i16, len=5) nbytes=10 B (100.00%)\n  validity: <empty>\n");
+    /// assert_eq!(with_nbytes, "root: vortex.primitive(i16, len=5) nbytes=10 B (100.00%)\n  <empty>: validity\n");
     ///
     /// // With encoding, metadata, and buffers
     /// let detailed = array.tree_display_builder()
@@ -526,7 +526,7 @@ impl ArrayRef {
     /// let expected = "root: vortex.primitive(i16, len=5)
     ///   metadata: ptype: i16
     ///   buffer: values host 10 B (align=2)
-    ///   validity: <empty>
+    ///   <empty>: validity
     /// ";
     /// assert_eq!(detailed, expected);
     /// ```
@@ -779,7 +779,7 @@ mod test {
     fn test_display_tree_nullable_primitive_validity_child() {
         let array =
             PrimitiveArray::from_option_iter([Some(1i64), Some(2), None, Some(3)]).into_array();
-        let expected = "root: vortex.primitive(i64?, len=4) nbytes=33 B (100.00%)\n  metadata: ptype: i64\n  buffer: values host 32 B (align=8) (96.97%)\n  validity: vortex.bool(bool, len=4) nbytes=1 B (3.03%)\n    metadata: offset: 0\n    buffer: bits host 1 B (align=1) (100.00%)\n    validity: <empty>\n";
+        let expected = "root: vortex.primitive(i64?, len=4) nbytes=33 B (100.00%)\n  metadata: ptype: i64\n  buffer: values host 32 B (align=8) (96.97%)\n  validity: vortex.bool(bool, len=4) nbytes=1 B (3.03%)\n    metadata: offset: 0\n    buffer: bits host 1 B (align=1) (100.00%)\n    <empty>: validity\n";
         assert_eq!(format!("{}", array.display_tree()), expected);
     }
 

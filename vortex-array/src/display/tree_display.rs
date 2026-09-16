@@ -112,9 +112,8 @@ impl TreeDisplayAdapter for TreeDisplay {
         array: &ArrayRef,
         visit: &mut ChildVisitor<'_, ArrayRef>,
     ) -> fmt::Result {
-        let slots = array.slots();
-        for (idx, slot) in slots.iter().enumerate() {
-            visit(&array.slot_name(idx), slot.as_ref(), idx + 1 == slots.len())?;
+        for (idx, slot) in array.slots().iter().enumerate() {
+            visit(&array.slot_name(idx), slot.as_ref())?;
         }
         Ok(())
     }

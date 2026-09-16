@@ -506,7 +506,7 @@ mod tests {
           buffer: buffer_0 host 29 B (align=1) (1.75%)
           buffer: buffer_1 host 28 B (align=1) (1.69%)
           buffer: views host 1.60 kB (align=16) (96.56%)
-          validity: <empty>
+          <empty>: validity
         ");
 
         let wrapped1 = StructArray::try_from_iter([("nested", const1)])?.into_array();

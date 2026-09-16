@@ -91,13 +91,13 @@ mod tests {
             @"
         root: vortex.patched(u16, len=9)
           inner: vortex.primitive(u16, len=9)
-            validity: <empty>
+            <empty>: validity
           lane_offsets: vortex.primitive(u32, len=33)
-            validity: <empty>
+            <empty>: validity
           patch_indices: vortex.primitive(u16, len=3)
-            validity: <empty>
+            <empty>: validity
           patch_values: vortex.primitive(u16, len=3)
-            validity: <empty>
+            <empty>: validity
         ");
 
         let executed = sliced.execute::<Canonical>(&mut ctx)?.into_primitive();

@@ -108,12 +108,7 @@ impl TreeDisplayAdapter for PlanTreeDisplay<'_> {
         let children = plan.children();
         for index in 0..children.len() {
             let child = plan.child_required(index).map_err(|_| fmt::Error)?;
-            let child_name = plan.child_name(index);
-            visit(
-                child_name.as_ref(),
-                Some(&child),
-                index + 1 == children.len(),
-            )?;
+            visit(plan.child_name(index).as_ref(), Some(&child))?;
         }
         Ok(())
     }

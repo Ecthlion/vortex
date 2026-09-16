@@ -7,20 +7,14 @@ root: vortex.alprd(f64, len=16384) nbytes=112880
   metadata: right_bit_width: 52, patch_offset: 0
   left_parts: fastlanes.bitpacked(u16, len=16384) nbytes=6144
     metadata: bit_width: 3, offset: 0
-    patch_indices: <empty>
-    patch_values: <empty>
-    patch_chunk_offsets: <empty>
-    validity_child: <empty>
+    <empty>: patch_indices, patch_values, patch_chunk_offsets, validity_child
   right_parts: fastlanes.bitpacked(u64, len=16384) nbytes=106496
     metadata: bit_width: 52, offset: 0
-    patch_indices: <empty>
-    patch_values: <empty>
-    patch_chunk_offsets: <empty>
-    validity_child: <empty>
+    <empty>: patch_indices, patch_values, patch_chunk_offsets, validity_child
   patch_indices: vortex.primitive(u16, len=60) nbytes=120
     metadata: ptype: u16
-    validity: <empty>
+    <empty>: validity
   patch_values: vortex.primitive(u16, len=60) nbytes=120
     metadata: ptype: u16
-    validity: <empty>
-  patch_chunk_offsets: <empty>
+    <empty>: validity
+  <empty>: patch_chunk_offsets
