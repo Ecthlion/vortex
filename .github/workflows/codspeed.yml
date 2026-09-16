@@ -272,7 +272,7 @@ jobs:
   bench-codspeed-cuda-build:
     needs: [changes]
     if: >-
-      always() && github.repository == 'vortex-data/vortex' &&
+      !cancelled() && github.repository == 'vortex-data/vortex' &&
       needs.changes.outputs.run-cuda-benchmarks == 'true'
     name: "Build Codspeed CUDA benchmarks"
     timeout-minutes: 30
@@ -292,6 +292,12 @@ jobs:
         with:
           tool: cargo-codspeed
       - name: Build benchmarks
+        # cargo-codspeed forces -Cdebuginfo=2 -Cstrip=none
+        # https://github.com/CodSpeedHQ/codspeed-rust/issues/190
+        # CARGO_ENCODED_RUSTFLAGS allows us to override it since we need
+        # only debug = limited
+        env:
+          CARGO_ENCODED_RUSTFLAGS: "-Cforce-frame-pointers=yes"
         run: |
           cargo codspeed build --locked \
             -m walltime \
