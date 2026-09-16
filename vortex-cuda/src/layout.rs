@@ -600,7 +600,6 @@ mod tests {
     use vortex::editions::CORE_2025_05_0;
     use vortex::editions::ComponentKind;
     use vortex::editions::DEFAULT_CORE_EDITION;
-    use vortex::error::vortex_err;
     use vortex::file::OpenOptionsSessionExt;
     use vortex::file::WriteOptionsSessionExt;
     use vortex::file::WriteStrategyBuilder;
@@ -674,9 +673,6 @@ mod tests {
             }
             ids
         });
-        let mut expected_editions = session.enabled_editions().editions();
-        expected_editions.push(CUDA_EDITION);
-        expected_editions.sort_unstable();
 
         std::thread::scope(|scope| {
             for _ in 0..4 {
@@ -691,7 +687,7 @@ mod tests {
         }
         let mut enabled_editions = session.enabled_editions().editions();
         enabled_editions.sort_unstable();
-        assert_eq!(enabled_editions, expected_editions);
+        assert_eq!(enabled_editions, [core, CUDA_EDITION]);
         session.editions().validate()?;
         assert!(
             !VortexSession::default()
@@ -709,17 +705,15 @@ mod tests {
             .layouts()
             .register(LayoutEncodingRef::new_ref(&CudaFlat));
         runtime.block_on(async {
+            let array = buffer![1i32, 4, 9, 16].into_array();
             let mut buffer = ByteBufferMut::empty();
             let error = session
                 .write_options()
                 .with_strategy(Arc::new(CudaFlatLayoutStrategy::default()))
-                .write(
-                    &mut buffer,
-                    buffer![1i32, 4, 9, 16].into_array().to_array_stream(),
-                )
+                .write(&mut buffer, array.to_array_stream())
                 .await
                 .err()
-                .ok_or_else(|| vortex_err!("write permitted an uneditioned CUDA layout"))?;
+                .expect("write permitted an uneditioned CUDA layout");
             assert!(
                 error
                     .to_string()

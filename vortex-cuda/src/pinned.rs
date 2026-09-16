@@ -475,11 +475,8 @@ mod tests {
         #[case] reject: bool,
     ) -> VortexResult<()> {
         let (pool, stream) = setup()?;
-        let data: Vec<u8> = if reject {
-            vec![0xAB; 10]
-        } else {
-            (0..16).collect()
-        };
+        let source_len = if reject { 10 } else { 16 };
+        let data: Vec<u8> = (0..source_len).collect();
         let mut pinned = pool.get(data.len())?;
         pinned.as_mut_slice().copy_from_slice(&data);
         let mut expected = vec![0xA5u8; if reject { 16 } else { 12 }];
@@ -545,9 +542,6 @@ mod tests {
 
         // Dropping the last pool owner must not free the source while DMA still reads it.
         drop(pool);
-        stream
-            .synchronize()
-            .map_err(|e| vortex_err!("Failed to sync stream: {e}"))?;
         let host = CudaDeviceBuffer::new(destination).copy_to_host_sync(Alignment::of::<u8>())?;
         assert_eq!(host.as_ref(), vec![0xEF; len - 16].as_slice());
         Ok(())
@@ -631,8 +625,7 @@ mod tests {
 
         // A shorter request in the same size class reuses storage and updates the logical length.
         let mut reused = if try_get {
-            pool.try_get(300)?
-                .ok_or_else(|| vortex_err!("expected cached pinned buffer"))?
+            pool.try_get(300)?.expect("expected cached pinned buffer")
         } else {
             pool.get(300)?
         };

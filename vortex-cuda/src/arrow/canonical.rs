@@ -2414,12 +2414,8 @@ mod tests {
         let values = upload_unpadded(&source_bytes, &mut ctx)?;
         let valid_bits = BitBuffer::from_iter((0..source_len).map(|idx| idx % 3 != 0));
         let validity = if nullable {
-            let bits = ctx
-                .ensure_on_device(BufferHandle::new_host(valid_bits.clone().into_inner().2))
-                .await?;
             Validity::Array(
-                BoolArray::try_new_from_handle(bits, 0, source_len, Validity::NonNullable)?
-                    .into_array(),
+                upload(BoolArray::from(valid_bits.clone()).into_array(), &mut ctx).await?,
             )
         } else {
             Validity::NonNullable
@@ -3640,29 +3636,17 @@ mod tests {
         let len = 100;
         let range = 13..78;
         let valid_bits = BitBuffer::from_iter((0..len).map(|idx| idx % 3 != 0));
-        let validity_buffer = ctx
-            .ensure_on_device(BufferHandle::new_host(valid_bits.clone().into_inner().2))
-            .await?;
-        let validity = Validity::Array(
-            BoolArray::try_new_from_handle(validity_buffer, 0, len, Validity::NonNullable)?
-                .into_array(),
-        );
+        let validity = Validity::from(valid_bits.clone());
         let array = if boolean_values {
             // Values and validity have different bit offsets, requiring validity repacking
             // even when the exported values retain their own Arrow offset.
             let values = BitBuffer::from_iter((0..len + 3).map(|idx| idx % 2 == 0));
-            let values = ctx
-                .ensure_on_device(BufferHandle::new_host(values.into_inner().2))
-                .await?;
-            BoolArray::try_new_from_handle(values, 3, len, validity)?.into_array()
+            BoolArray::try_new(values.slice(3..len + 3), validity)?.into_array()
         } else {
-            let values = ctx
-                .ensure_on_device(BufferHandle::new_host(
-                    Buffer::from_iter(0..i32::try_from(len)?).into_byte_buffer(),
-                ))
-                .await?;
-            PrimitiveArray::from_buffer_handle(values, PType::I32, validity).into_array()
+            PrimitiveArray::try_new(Buffer::from_iter(0..i32::try_from(len)?), validity)?
+                .into_array()
         };
+        let array = upload(array, &mut ctx).await?;
         let mut exported = array
             .slice(range.clone())?
             .export_device_array(&mut ctx)
