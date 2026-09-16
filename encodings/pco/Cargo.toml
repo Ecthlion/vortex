@@ -27,7 +27,6 @@ vortex-session = { workspace = true }
 
 [dev-dependencies]
 divan = { workspace = true }
-vortex-fastlanes = { workspace = true }
 vortex-runend = { workspace = true }
 rstest = { workspace = true }
 vortex-array = { workspace = true, features = ["_test-harness"] }

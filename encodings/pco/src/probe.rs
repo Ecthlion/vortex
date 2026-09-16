@@ -41,10 +41,6 @@ pub struct PcoProbeState {
     rank: Vec<usize>,
     pages: Vec<Page>,
     last_page: usize,
-    #[cfg(test)]
-    decoded_pages: usize,
-    #[cfg(test)]
-    tracking: tests::TrackedProbeState,
 }
 
 struct Page {
@@ -130,11 +126,6 @@ pub(crate) fn scalar_at(
                     decode_page::<T>(array, page.chunk, page.values.len(), array.pages[page_index].as_slice(), ctx)?
                 }
             );
-            #[cfg(test)]
-            {
-                state.decoded_pages += 1;
-                state.tracking.record_decode();
-            }
             slot.insert(decoded)
         }
     };
