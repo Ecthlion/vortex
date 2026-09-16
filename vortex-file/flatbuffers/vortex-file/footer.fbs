@@ -49,7 +49,8 @@ table PostscriptMetadata {
 
 /// A `WasmKernelSpec` locates a WebAssembly decoder kernel embedded in the file.
 table WasmKernelSpec {
-    /// The array encoding id this kernel decodes, e.g. "fastlanes.bitpacked".
+    /// The serialized array id this kernel decodes, e.g. "fastlanes.bitpacked". This is the id
+    /// found on the wire: an encoding with several wire representations embeds one kernel per id.
     id: string (required);
     /// The host/guest ABI version the kernel was built against.
     abi_version: uint32;

@@ -534,12 +534,74 @@ over strings, decimals, structs, or any type added later, with no code.
 The direction is asymmetric on purpose: the host only ever writes literals, because it holds the
 real type and has nothing to derive from.
 
+## Editions and kernels: a new encoding, shipped with its decoder
+
+Editions (`docs/specs/editions.md`) and embedded kernels answer different questions and compose.
+An edition says which serialized ids a **writer** may emit, and which readers are guaranteed to
+know them natively. A kernel says how a **reader** decodes an id it does not know. Nothing about
+attaching a kernel changes what the writer is allowed to write, and nothing about an edition changes
+whether a reader runs a kernel.
+
+The editions spec uses `vortex.decimal_byte_parts_v2` as its motivating example — a wide-decimal
+revision staged in a draft edition, which an older reader "reports as unknown instead of trying to
+decode a wire format it does not support". Take that exact case and ask what it takes to ship it
+with a kernel, layer by layer.
+
+**The file and edition plumbing already work.** The writer enables the draft edition, so the
+serialization context permits the `_v2` id; it attaches
+`embed_kernel("vortex.decimal_byte_parts_v2", module)`. The kernel is keyed by the **wire id**,
+which is exactly the id editions introduced, and the reader's `wanted_kernels` filter looks that id
+up in the deserializer registry — the one keyed by wire ids. So the granularity is right by
+construction: a reader whose native `DecimalByteParts` plugin predates `_v2` has `vortex.decimal_byte_parts`
+registered and `_v2` not, and fetches only the `_v2` kernel; a reader with the new native plugin
+fetches nothing. Kernels load before the layout is parsed, so they take precedence over the
+`allow_unknown` placeholder path, and a kernel-decoded array is canonical, so nothing downstream
+ever sees the `_v2` id. The one thing this changes about the editions guarantee is deliberate and
+opt-in: a reader that installs the loader *does* decode a draft component it never shipped. A reader
+without the loader behaves exactly as the spec says.
+
+This also names a compatibility floor editions do not currently record. For a component shipped
+with a kernel, the earliest reader is not the edition's `min_library_version` but **the release that
+shipped the kernel loader and this ABI** — the same floor for every such component, forever, which
+is the point of the exercise.
+
+**Reading the inputs already works.** `vortex.decimal_byte_parts` has one child, `msp`, a signed
+primitive whose ptype is in the metadata; `_v2` adds `lower_part_count` unsigned 64-bit children.
+Every input is a primitive, so `ChildSpec::values(DTypeExpr::primitive(..))` covers all of them,
+and `node.dtype()?.kind()` hands the kernel `Decimal(precision, scale)` so it knows the target width.
+
+**Producing the output does not.** `Decoded` is `Primitive | Bool | VarBinView`; there is no
+decimal shape, so a decimal array cannot cross the boundary out. This is the "decimal output" gap
+below, and `decimal_byte_parts_v2` is the encoding that turns it from a footnote into the blocker.
+Closing it is bounded:
+
+- **`shape::DECIMAL` on the data channel** — one buffer plus a `DecimalType` tag (`I8`..`I256`,
+  which reuses the ptype byte), built on the host with `DecimalArray::try_new_handle` over a
+  `ByteBuffer::copy_from_aligned` of the guest bytes. The guest writes plain bytes; the 16/32-byte
+  alignment is a host concern, satisfied by the copy every result already takes.
+- **An `AsDecimal(child)` plan opcode**, for the v1 form specifically. `to_canonical_decimal` is
+  `DecimalArray::new_unchecked(msp.to_buffer::<P>(), decimal_dtype, validity)` — it *reinterprets*
+  the signed primitive's buffer as decimal storage of the same width, computing nothing. That is a
+  re-arranging encoding in disguise, and it maps 1:1 to a `vortex-array` constructor, so it belongs
+  in the vocabulary. With it the v1 kernel is one `Reference` child and one node, generic over every
+  storage width, and never copies the values into the sandbox.
+- **`Materialized` with the decimal shape**, for `_v2`. Combining parts is arithmetic —
+  `(msp as i128) << 64 | lower` — so it must be computed. `i128` is native on wasm32; `i256` is
+  two-limb arithmetic the guest writes itself, since it cannot link the host's type.
+
+So: the kernel model handles the new encoding, the editions model handles who may write it, and the
+two meet at the wire id. What stands between the example and a passing round-trip is one result
+shape and one opcode, not a design change.
+
 ## Remaining ABI gaps
 
 - **A kernel cannot *read* a string child.** Only primitive and boolean children are deliverable
   into the sandbox. `ChildMode::Reference` covers every re-arranging encoding (the child never
   enters the guest), so this only binds a hypothetical kernel that must inspect string bytes.
-- **Decimal output** (i128/i256) and its 16/32-byte buffer alignment are still unsupported.
+- **Decimal output** is unsupported: `Decoded` has no decimal shape, so no kernel can produce a
+  decimal array. `decimal_byte_parts` — and any `_v2` of it — is blocked on exactly this; the
+  section above sizes the fix (a `DECIMAL` shape plus an `AsDecimal` opcode for the reinterpreting
+  v1 form).
 - **Arithmetic ops are still missing natively.** `for`/`bytebool`/`datetimeparts` would want
   `WrappingAdd`, `Shl`, `Or` as plan nodes; `vortex-array`'s nearest equivalents are
   checked/saturating, which would be a correctness regression. They must land natively before the

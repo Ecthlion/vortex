@@ -47,7 +47,12 @@ impl EmbeddedKernel {
         }
     }
 
-    /// The array encoding id this kernel decodes, e.g. `fastlanes.bitpacked`.
+    /// The **serialized** array id this kernel decodes, e.g. `fastlanes.bitpacked`.
+    ///
+    /// This is the id found on the wire, not necessarily an in-memory encoding's id: an encoding
+    /// with several wire representations (`vortex.foo`, `vortex.foo_v2`) embeds one kernel per id
+    /// it wants a reader to be able to decode, and a reader that has a native decoder for one id
+    /// but not another fetches only the kernel it lacks.
     pub fn id(&self) -> &str {
         &self.id
     }
