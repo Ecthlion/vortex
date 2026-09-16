@@ -75,7 +75,6 @@ use vortex_buffer::buffer;
 use vortex_edition::EditionSession;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
-use vortex_flatbuffers::footer as fb;
 use vortex_io::session::RuntimeSession;
 use vortex_layout::DynLayout;
 use vortex_layout::LayoutStrategy;
@@ -100,6 +99,7 @@ use crate::V1_FOOTER_FBS_SIZE;
 use crate::VERSION;
 use crate::VortexFile;
 use crate::WriteOptionsSessionExt;
+use crate::flatbuffers::footer as fb;
 use crate::footer::SegmentSpec;
 static SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
     let session = array_session()
@@ -1933,8 +1933,12 @@ fn map_array_from_rows(rows: &[MapRowFixture<'_>], keys_sorted: bool) -> VortexR
         keys_sorted,
     )?;
     let dtype = DType::Map(map_dtype.clone(), Nullability::Nullable);
-    let mut builder =
-        MapBuilder::<u64, u64>::with_capacity(map_dtype, Nullability::Nullable, rows.len());
+    let mut builder = MapBuilder::<u64, u64>::with_capacity_in(
+        map_dtype,
+        Nullability::Nullable,
+        rows.len(),
+        vortex_buffer::BufferAllocatorRef::static_ref(),
+    );
 
     for row in rows {
         let scalar = match row {
