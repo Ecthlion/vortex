@@ -22,12 +22,6 @@
 
 namespace {
 
-template <typename Read>
-std::unique_ptr<table_with_names> execute_q1(Read&& read, bool filter_shipdate)
-{
-  return ::execute_q1(read, filter_shipdate, [](auto& result) { return std::move(result); });
-}
-
 void check_q1_boundaries()
 {
   cudf::test::strings_column_wrapper returnflag{"R", "A", "R", "A", "R", "X", "Z"};
@@ -62,7 +56,7 @@ void check_q1_boundaries()
             std::make_unique<table_with_names>(std::make_unique<cudf::table>(slice), columns);
           return filter_shipdate ? std::move(table) : apply_filter(table, *predicate);
         },
-        filter_shipdate);
+        filter_shipdate, ndsh::take_result);
       ndsh::check_q1_result(slice.num_rows() == 7   ? expected
                             : slice.num_rows() == 6 ? sliced_expected
                                                     : ndsh::q1_reference_result{},
@@ -94,7 +88,8 @@ struct q1_files {
       auto input =
         ndsh::read_local_file(tables.path("lineitem", use_vortex), use_vortex, io, q1_columns);
       ndsh::check_projection(generated->select(q1_columns), *input, q1_columns);
-      auto result = execute_q1([&](auto const&, auto const&) { return std::move(input); }, true);
+      auto result = execute_q1(
+        [&](auto const&, auto const&) { return std::move(input); }, true, ndsh::take_result);
       ndsh::check_q1_result(reference, *result, stream);
     }
     generated.reset();
@@ -104,43 +99,32 @@ struct q1_files {
 
 void ndsh_q1_local(nvbench::state& state)
 {
-  auto const format   = state.get_string("format");
-  auto const workload = state.get_string("workload");
-  auto const cold     = ndsh::use_cold_cache(state.get_string("cache"));
-  CUDF_EXPECTS(format == "parquet" || format == "vortex", "Unknown Q1 format");
-  CUDF_EXPECTS(workload == "read" || workload == "q1", "Unknown Q1 workload");
-  auto const use_vortex         = format == "vortex";
+  auto const [use_vortex, read_only, cold] = ndsh::local_options{state, 1};
   auto const& files             = ndsh::local_fixture<q1_files>(state.get_float64("scale_factor"));
   cuda::stream_ref const stream = cudf::get_default_stream();
   state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.get()));
   auto const memory = cudf::memory_stats_logger();
   ndsh::vortex_io io{stream.get()};
-  auto read = [&] {
+  auto read = [&](auto const&...) {
     return ndsh::read_local_file(
       files.tables.path("lineitem", use_vortex), use_vortex, io, q1_columns, cold);
   };
 
   ndsh::warm_local_inputs(cold, read);
-  if (workload == "q1") {
-    auto result = execute_q1([&](auto const&, auto const&) { return read(); }, true);
+  if (!read_only) {
+    auto result = execute_q1(read, true, ndsh::take_result);
     ndsh::check_q1_result(files.reference, *result, stream);
     CUDF_CUDA_TRY(cudaDeviceSynchronize());
   }
   ndsh::exec_local_benchmark(state, files.tables, use_vortex, cold, [&] {
     cudf::benchmark::scoped_range timed_range{"ndsh_q1_local_timed"};
-    auto result = workload == "read"
-                    ? read()
-                    : execute_q1([&](auto const&, auto const&) { return read(); }, true);
+    auto result = read_only ? read() : execute_q1(read, true, ndsh::take_result);
     CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));
   });
   state.add_buffer_size(files.tables.bytes(use_vortex), "file_size", "File size");
   state.add_buffer_size(memory.peak_memory_usage(), "rmm_peak", "RMM peak (excludes Vortex)");
-  auto& matched = state.add_summary("ndsh/q1/matched_rows");
-  matched.set_string("name", "Q1 matched rows");
-  matched.set_int64("value", files.reference.matched);
-  auto& groups = state.add_summary("ndsh/q1/groups");
-  groups.set_string("name", "Q1 groups");
-  groups.set_int64("value", files.reference.groups.size());
+  ndsh::add_count(state, "ndsh/q1/matched_rows", "Q1 matched rows", files.reference.matched);
+  ndsh::add_count(state, "ndsh/q1/groups", "Q1 groups", files.reference.groups.size());
 }
 
 }  // namespace

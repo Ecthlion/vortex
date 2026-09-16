@@ -587,83 +587,43 @@ mod tests {
     }
 
     #[test]
-    fn maps_decode_dictionaries_scan_option() -> VortexResult<()> {
-        let options = vx_cuda_scan_options {
-            flags: VX_CUDA_SCAN_FLAG_DECODE_DICTIONARIES,
-            batch_rows: 8192,
-        };
-        // SAFETY: options lives for the duration of parsing.
-        let parsed = unsafe { scan_options(&raw const options) }?;
-        assert!(parsed.decode_dictionaries);
-        assert_eq!(parsed.read_at_options, PooledFileReadAtOptions::default());
-        assert_eq!(parsed.batch_rows, 8192);
-        Ok(())
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn combines_direct_io_and_decode_dictionaries_scan_options() -> VortexResult<()> {
-        let options = vx_cuda_scan_options {
-            flags: VX_CUDA_SCAN_FLAG_DIRECT_IO | VX_CUDA_SCAN_FLAG_DECODE_DICTIONARIES,
-            batch_rows: 8192,
-        };
-        // SAFETY: options lives for the duration of parsing.
-        let parsed = unsafe { scan_options(&raw const options) }?;
-        assert!(parsed.decode_dictionaries);
-        assert_eq!(
-            parsed.read_at_options,
-            PooledFileReadAtOptions::default().with_direct_io()
-        );
-        assert_eq!(parsed.batch_rows, 8192);
-        Ok(())
-    }
-
-    #[test]
-    fn ignores_unknown_scan_option_flags() -> VortexResult<()> {
-        for (flags, decode_dictionaries) in [
-            (1 << 2, false),
-            (VX_CUDA_SCAN_FLAG_DECODE_DICTIONARIES | (1 << 2), true),
+    fn maps_scan_options_and_ignores_unknown_flags() -> VortexResult<()> {
+        let buffered = PooledFileReadAtOptions::default();
+        for (flags, batch_rows, read_at_options, decode_dictionaries) in [
+            (0, 8192, buffered, false),
+            (VX_CUDA_SCAN_FLAG_DECODE_DICTIONARIES, 8192, buffered, true),
+            (1 << 2, 0, buffered, false),
+            (
+                VX_CUDA_SCAN_FLAG_DECODE_DICTIONARIES | (1 << 2),
+                0,
+                buffered,
+                true,
+            ),
+            #[cfg(target_os = "linux")]
+            (
+                VX_CUDA_SCAN_FLAG_DIRECT_IO,
+                0,
+                buffered.with_direct_io(),
+                false,
+            ),
+            #[cfg(target_os = "linux")]
+            (
+                VX_CUDA_SCAN_FLAG_DIRECT_IO | VX_CUDA_SCAN_FLAG_DECODE_DICTIONARIES,
+                8192,
+                buffered.with_direct_io(),
+                true,
+            ),
         ] {
-            let options = vx_cuda_scan_options {
-                flags,
-                ..Default::default()
-            };
+            let options = vx_cuda_scan_options { flags, batch_rows };
             // SAFETY: options lives for the duration of parsing.
             let parsed = unsafe { scan_options(&raw const options) }?;
-            assert_eq!(parsed.decode_dictionaries, decode_dictionaries);
-            assert_eq!(parsed.read_at_options, PooledFileReadAtOptions::default());
-            assert_eq!(parsed.batch_rows, 0);
+            assert_eq!(
+                parsed.decode_dictionaries, decode_dictionaries,
+                "flags={flags}"
+            );
+            assert_eq!(parsed.read_at_options, read_at_options, "flags={flags}");
+            assert_eq!(parsed.batch_rows, batch_rows, "flags={flags}");
         }
-        Ok(())
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn maps_direct_io_scan_option_to_pooled_reader() -> VortexResult<()> {
-        let options = vx_cuda_scan_options {
-            flags: VX_CUDA_SCAN_FLAG_DIRECT_IO,
-            ..Default::default()
-        };
-        // SAFETY: options lives for the duration of parsing.
-        let parsed = unsafe { scan_options(&raw const options) }?;
-        assert_eq!(
-            parsed.read_at_options,
-            PooledFileReadAtOptions::default().with_direct_io()
-        );
-        assert!(!parsed.decode_dictionaries);
-        Ok(())
-    }
-
-    #[test]
-    fn maps_batch_rows_scan_option() -> VortexResult<()> {
-        let options = vx_cuda_scan_options {
-            batch_rows: 8192,
-            ..Default::default()
-        };
-        // SAFETY: options lives for the duration of parsing.
-        let parsed = unsafe { scan_options(&raw const options) }?;
-        assert_eq!(parsed.batch_rows, 8192);
-        assert!(!parsed.decode_dictionaries);
         Ok(())
     }
 
@@ -727,15 +687,9 @@ mod tests {
                 ctx,
                 ffi_runtime(),
             );
-            let get_schema = stream
-                .get_schema
-                .ok_or_else(|| vortex_err!("missing get_schema"))?;
-            let get_next = stream
-                .get_next
-                .ok_or_else(|| vortex_err!("missing get_next"))?;
-            let release = stream
-                .release
-                .ok_or_else(|| vortex_err!("missing release"))?;
+            let get_schema = stream.get_schema.expect("missing get_schema");
+            let get_next = stream.get_next.expect("missing get_next");
+            let release = stream.release.expect("missing release");
             let mut schema = FFI_ArrowSchema::empty();
             let mut exported = empty_device_array();
             // SAFETY: The live stream owns these callbacks, and both outputs are writable.

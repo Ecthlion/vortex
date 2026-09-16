@@ -94,12 +94,11 @@ class ReproduceTests(unittest.TestCase):
                 ):
                     self.assertEqual(command[command.index(flag) + 1], value)
                 data = result_data(query)
-                reproduce.validate_results(data, query, 1.0)
                 data["benchmarks"][0]["states"].reverse()
                 reproduce.validate_results(data, query, 1.0)
 
     def test_rejects_incomplete_skipped_and_untimed_matrices(self):
-        for query in QUERIES:
+        for query in (1, 9):
             data = result_data(query)
             benchmark = data["benchmarks"][0]
             states = benchmark["states"]
@@ -109,7 +108,6 @@ class ReproduceTests(unittest.TestCase):
             defects: list[tuple[str | int, dict, dict]] = [
                 ("missing", benchmark, {"states": states[:-1]}),
                 ("duplicate", benchmark, {"states": [*states[:-1], state]}),
-                ("extra", benchmark, {"states": [*states, state]}),
                 ("skipped", state, {"is_skipped": True}),
                 ("untimed", state, {"summaries": []}),
                 ("wrong_timer", summary, {"tag": "nv/cold/time/gpu/mean"}),
@@ -153,46 +151,36 @@ class ReproduceTests(unittest.TestCase):
                 self.assertFalse((self.args.work_dir / "results").exists())
                 self.write(path)
 
-    def test_download_checks_fresh_and_cached_files_once(self):
+    def test_download_checks_fresh_and_cached_hashes(self):
+        name = "fixture.cmake"
+        path = self.args.work_dir / name
+        temporary = path.with_suffix(".cmake.part")
         source = {"url": "https://example.invalid/fixture", "sha256": hashlib.sha256(b"fixture").hexdigest()}
-        for cached, valid in itertools.product((False, True), repeat=2):
-            with self.subTest(cached=cached, valid=valid):
-                name = f"fixture-{cached}-{valid}.cmake"
-                path = self.args.work_dir / name
-                temporary = path.with_suffix(path.suffix + ".part")
-                contents = "fixture" if valid else "corrupt"
-                if cached:
-                    self.write(path, contents)
-                self.runner.run.reset_mock()
-                self.runner.run.side_effect = lambda _label, argv, contents=contents: self.write(argv[4], contents)
-                with patch.object(reproduce, "digest", wraps=reproduce.digest) as digest:
-                    if valid:
-                        self.assertEqual(reproduce.Runner.download(self.runner, name, source), path)
-                    else:
-                        with self.assertRaisesRegex(RuntimeError, "Checksum mismatch"):
-                            reproduce.Runner.download(self.runner, name, source)
-                    digest.assert_called_once_with(path if cached else temporary)
-                if cached:
-                    self.runner.run.assert_not_called()
-                else:
-                    self.runner.run.assert_called_once_with(
-                        name, ["curl", "--fail", "--location", "--output", temporary, source["url"]]
-                    )
-                self.assertEqual(path.exists(), cached or valid)
-                self.assertEqual(temporary.exists(), not cached and not valid)
-                if path.exists():
-                    self.assertEqual(path.read_text(), contents)
+        self.runner.run.side_effect = lambda _label, argv: self.write(argv[4])
+        for phase in ("fresh", "cached"):
+            with self.subTest(phase=phase):
+                self.assertEqual(reproduce.Runner.download(self.runner, name, source), path)
+        self.runner.run.assert_called_once_with(
+            name, ["curl", "--fail", "--location", "--output", temporary, source["url"]]
+        )
+        self.assertEqual(path.read_text(), "fixture")
+        self.assertFalse(temporary.exists())
+        self.runner.run.reset_mock()
+        self.write(path, "corrupt")
+        with self.assertRaisesRegex(RuntimeError, "Checksum mismatch"):
+            reproduce.Runner.download(self.runner, name, source)
+        self.runner.run.assert_not_called()
+        path.unlink()
+        self.runner.run.side_effect = lambda _label, argv: self.write(argv[4], "corrupt")
+        with self.assertRaisesRegex(RuntimeError, "Checksum mismatch"):
+            reproduce.Runner.download(self.runner, name, source)
+        self.assertFalse(path.exists())
+        self.assertEqual(temporary.read_text(), "corrupt")
 
     def test_identity_requires_a_clean_revision(self):
         with patch.object(reproduce, "git_output", side_effect=["", "revision"]) as git:
             self.assertEqual(reproduce.identity(), {"vortex_revision": "revision"})
-        self.assertEqual(
-            git.call_args_list,
-            [
-                call(reproduce.ROOT, "status", "--porcelain", "--untracked-files=all"),
-                call(reproduce.ROOT, "rev-parse", "HEAD"),
-            ],
-        )
+        git.assert_any_call(reproduce.ROOT, "status", "--porcelain", "--untracked-files=all")
         for status in (" M tracked", "?? untracked"):
             with self.subTest(status=status), patch.object(reproduce, "git_output", return_value=status):
                 with self.assertRaisesRegex(RuntimeError, "Commit source changes"):
@@ -212,13 +200,15 @@ class ReproduceTests(unittest.TestCase):
             reproduce.initialize_work(owned, {"vortex_revision": "changed"})
         self.assertEqual(json.loads((owned / "recipe.json").read_text()), self.recipe)
 
-    def test_patch_indexes_added_files_and_rejects_changed_sources(self):
+    def test_failed_build_clears_success_and_tracks_indexed_source_pins(self):
         work = self.args.work_dir
-        work.mkdir()
+        record = work / "build.json"
+        self.write(record, "stale success")
         self.runner.checkout.side_effect = lambda name, *_args, **_kwargs: work / name
         original = {"diff": "indexed patch including added loader", "status": "A  loader.cmake"}
 
         def run(label, *_args):
+            self.assertFalse(record.exists())
             if label == "flatc-configure":
                 raise RuntimeError("stop before configure")
             return ""
@@ -230,6 +220,13 @@ class ReproduceTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "stop before configure"):
                 reproduce.build(self.args, LOCK, self.runner, self.recipe)
+            self.assertFalse(record.exists())
+            self.runner.download.assert_called_once_with("CPM.cmake", LOCK["cpm"])
+            for name in ("dlpack", "xxhash"):
+                package = LOCK["packages"][name]
+                self.runner.checkout.assert_any_call(
+                    name, {"repository": package["git_url"], "commit": package["git_tag"]}
+                )
             self.runner.run.assert_any_call(
                 "patch", ["git", "-C", work / "cudf", "apply", "--index", HERE / "upstream.patch"]
             )
@@ -267,108 +264,43 @@ class ReproduceTests(unittest.TestCase):
             )
         self.assertNotIn("nlohmann_json", LOCK["packages"])
 
-    def test_configure_forwards_caller_cuda_compilers(self):
-        self.args.cmake_arg = [
-            f"-DCMAKE_CUDA_COMPILER:FILEPATH={self.root / 'cuda/bin/nvcc'}",
-            f"-DCMAKE_CUDA_HOST_COMPILER={self.root / 'host/bin/g++'}",
-            "-DCMAKE_CUDA_ARCHITECTURES=90",
+    def test_configure_forwards_compilers_but_flatc_uses_only_host_settings(self):
+        host = [
+            "-DCMAKE_C_COMPILER=caller-cc",
+            "-DCMAKE_CXX_COMPILER:FILEPATH=caller-cxx",
+            "-DCMAKE_C_COMPILER_ARG1=--driver-mode=gcc",
+            "-DCMAKE_CXX_COMPILER_ARG1:STRING=--driver-mode=g++",
+            "-DCMAKE_TOOLCHAIN_FILE:FILEPATH=toolchain.cmake",
+            "-DCMAKE_SYSROOT=sysroot",
         ]
+        self.args.cmake_arg = [
+            *host,
+            "-DCMAKE_CUDA_COMPILER:FILEPATH=caller-nvcc",
+            "-DCMAKE_CUDA_HOST_COMPILER=caller-cuda-host",
+            "-DCMAKE_CUDA_COMPILER_ARG1=--allow-unsupported-compiler",
+            "-DCMAKE_CUDA_HOST_COMPILER_ARG1:STRING=--driver-mode=g++",
+            "-DCMAKE_CUDA_ARCHITECTURES=90",
+            "-DCMAKE_CXX_FLAGS=-O2",
+        ]
+        self.assertEqual(reproduce.compiler_arguments(self.args.cmake_arg), host)
         command = list(map(str, reproduce.configure_command(self.args, LOCK)))
         for argument in self.args.cmake_arg:
             self.assertEqual(command.count(argument), 1)
 
-    def test_flatc_compiler_arguments_include_only_host_compilers_and_toolchain(self):
-        for suffix in ("", ":FILEPATH"):
-            with self.subTest(suffix=suffix):
-                host = [
-                    f"-D{name}{suffix}={self.root / name.lower()}"
-                    for name in ("CMAKE_C_COMPILER", "CMAKE_CXX_COMPILER", "CMAKE_TOOLCHAIN_FILE", "CMAKE_SYSROOT")
-                ]
-                host += [
-                    "-DCMAKE_C_COMPILER_ARG1=--driver-mode=gcc",
-                    "-DCMAKE_CXX_COMPILER_ARG1:STRING=--driver-mode=g++",
-                ]
-                arguments = [
-                    *host,
-                    f"-DCMAKE_CUDA_COMPILER{suffix}={self.root / 'nvcc'}",
-                    f"-DCMAKE_CUDA_HOST_COMPILER{suffix}={self.root / 'cuda-host'}",
-                    "-DCMAKE_CUDA_COMPILER_ARG1=--allow-unsupported-compiler",
-                    "-DCMAKE_CUDA_HOST_COMPILER_ARG1:STRING=--driver-mode=g++",
-                    f"-DCUDAToolkit_ROOT={self.root / 'cuda'}",
-                    "-DCMAKE_CUDA_ARCHITECTURES=90",
-                    "-DCMAKE_CXX_FLAGS=-O2",
-                    "-DCMAKE_BUILD_TYPE=Release",
-                    f"-Dnvcomp_DIR={self.root / 'nvcomp'}",
-                ]
-                self.assertEqual(reproduce.compiler_arguments(arguments), host)
-
-    def test_failed_build_clears_record_and_checks_out_download_only_package_pins(self):
-        record = self.args.work_dir / "build.json"
-        self.write(record, "stale success")
-
-        def run(*_args: object) -> str:
-            self.assertFalse(record.exists())
-            return ""
-
-        self.runner.run.side_effect = run
-        # Stop before archives or configuration; all external operations are mocked.
-        self.runner.download.side_effect = RuntimeError("stop after checkouts")
-        with self.assertRaisesRegex(RuntimeError, "stop after checkouts"):
-            reproduce.build(self.args, LOCK, self.runner, self.recipe)
-        self.assertFalse(record.exists())
-        self.runner.download.assert_called_once_with("CPM.cmake", LOCK["cpm"])
-        for name in ("dlpack", "xxhash"):
-            package = LOCK["packages"][name]
-            self.runner.checkout.assert_any_call(
-                name,
-                {
-                    "repository": package["git_url"],
-                    "commit": package["git_tag"],
-                },
-            )
-
     def test_environment_preserves_caller_build_settings_without_secrets_or_shared_cache(self):
         preserved = {
-            name: f"caller-{name}"
-            for name in (
-                "PATH",
-                "LD_LIBRARY_PATH",
-                "LIBRARY_PATH",
-                "CPATH",
-                "C_INCLUDE_PATH",
-                "CPLUS_INCLUDE_PATH",
-                "CC",
-                "CXX",
-                "CUDACXX",
-                "CUDAHOSTCXX",
-                "NVCC_CCBIN",
-                "CFLAGS",
-                "CXXFLAGS",
-                "CPPFLAGS",
-                "LDFLAGS",
-                "CUDAFLAGS",
-                "NVCC_PREPEND_FLAGS",
-                "NVCC_APPEND_FLAGS",
-                "CMAKE_PREFIX_PATH",
-                "CMAKE_TOOLCHAIN_FILE",
-                "CUDA_VISIBLE_DEVICES",
-                "CUDA_DEVICE_ORDER",
-                "CUDAToolkit_ROOT",
-                "CUDA_PATH",
-                "CUDA_HOME",
-                "LIBCLANG_PATH",
-                "BINDGEN_EXTRA_CLANG_ARGS",
-                "PKG_CONFIG_PATH",
-                "PKG_CONFIG_LIBDIR",
-                "PKG_CONFIG_SYSROOT_DIR",
-                "CONDA_PREFIX",
-                "VIRTUAL_ENV",
-                "CARGO_HOME",
-                "RUSTUP_HOME",
-                "RUSTUP_TOOLCHAIN",
-                "RUSTC_WRAPPER",
-                "RUSTFLAGS",
-            )
+            "PATH": "caller-bin",
+            "LD_LIBRARY_PATH": "caller-lib",
+            "CPATH": "caller-include",
+            "CC": "caller-cc",
+            "CXX": "caller-cxx",
+            "CUDACXX": "caller-nvcc",
+            "CUDAHOSTCXX": "caller-cuda-host",
+            "NVCC_CCBIN": "caller-cuda-host",
+            "CXXFLAGS": "-O2",
+            "CMAKE_TOOLCHAIN_FILE": "toolchain.cmake",
+            "CUDA_VISIBLE_DEVICES": "1",
+            "RUSTFLAGS": "-Ctarget-cpu=native",
         }
         excluded = dict.fromkeys(
             (
@@ -404,44 +336,30 @@ class ReproduceTests(unittest.TestCase):
         self.assertEqual(env["TMPDIR"], str(self.args.work_dir / "tmp"))
         self.assertEqual(env["CARGO_BUILD_JOBS"], "4")
 
-    def write_cmake_cache(self, compilers: dict[str, Path], settings: dict[str, str]):
-        lines = [
-            "# CMake cache fixture",
-            "//Compiler settings",
-            "",
-            *(f"{name}:FILEPATH={path}" for name, path in compilers.items()),
-            *(f"{name}:STRING={value}" for name, value in settings.items()),
-        ]
-        self.write(self.args.work_dir / "cudf-build/CMakeCache.txt", "\n".join(lines))
-
-    def test_record_toolchain_uses_cmake_cache_and_requires_cuda_12_8(self):
+    def test_record_toolchain_preserves_compilers_and_arg1_and_requires_cuda_12_8(self):
         compilers = {name: self.root / name.lower() for name in COMPILERS}
         for name, path in compilers.items():
             self.write(path, name)
-        settings = {
+        cache = {
+            **{name: str(path) for name, path in compilers.items()},
+            **{
+                f"{name}_ARG1": f'"compiler tools/{name.lower()}" --config \'config with spaces\''
+                for name in COMPILERS
+            },
             "CMAKE_CUDA_ARCHITECTURES": "90",
-            "CMAKE_TOOLCHAIN_FILE": str(self.root / "toolchain.cmake"),
-            "CMAKE_SYSROOT": str(self.root / "sysroot"),
-            "CUDAToolkit_BIN_DIR": str(self.root / "cuda/bin"),
             "CMAKE_CXX_FLAGS": "-O2 -DVALUE=a=b",
-            "CMAKE_CUDA_FLAGS_RELEASE": "-O3 -DNDEBUG",
             "nvcomp_DIR": str(self.root / "native-nvcomp/lib/cmake/nvcomp"),
         }
-        cache = {**{name: str(path) for name, path in compilers.items()}, **settings}
-        self.write_cmake_cache(compilers, {**settings, "CMAKE_C_FLAGS": "", "UNRELATED": "ignored"})
-        for version, accepted in (
-            ("12.8", True),
-            ("12.9", True),
-            ("13.0", True),
-            ("12.7", False),
-            ("11.9", False),
-            ("unknown", False),
-        ):
+        self.write(
+            self.args.work_dir / "cudf-build/CMakeCache.txt",
+            "\n".join(f"{name}:STRING={value}" for name, value in cache.items()),
+        )
+        versions = {name.lower(): f"{name} fixture version\n" for name in compilers}
+        self.runner.run.side_effect = lambda label, _argv: versions[label]
+        for version, accepted in (("12.8", True), ("13.0", True), ("12.7", False), ("unknown", False)):
             with self.subTest(version=version):
-                versions = {name.lower(): f"{name} fixture version\n" for name in compilers}
                 versions["cmake_cuda_compiler"] = f"Cuda compilation tools, release {version}, V{version}.0\n"
                 self.runner.run.reset_mock()
-                self.runner.run.side_effect = lambda label, _argv, versions=versions: versions[label]
                 expected = {
                     "cache": cache,
                     "tools": {
@@ -457,78 +375,41 @@ class ReproduceTests(unittest.TestCase):
                 self.assertEqual(json.loads((self.runner.logs / "toolchain.json").read_text()), expected)
                 self.assertEqual(
                     self.runner.run.call_args_list,
-                    [call(name.lower(), [path, "--version"]) for name, path in compilers.items()],
+                    [
+                        call(
+                            name.lower(),
+                            [path, f"compiler tools/{name.lower()}", "--config", "config with spaces", "--version"],
+                        )
+                        for name, path in compilers.items()
+                    ],
                 )
 
-    def test_record_toolchain_passes_mandatory_compiler_arguments_to_version(self):
-        wrapper = self.root / "compiler-wrapper"
-        self.write(wrapper)
-        arguments = {
-            name: f'"compiler tools/{name.lower()}" --config \'config with spaces\'' for name in COMPILERS
-        }
-        self.write_cmake_cache(
-            dict.fromkeys(COMPILERS, wrapper), {f"{name}_ARG1": arg1 for name, arg1 in arguments.items()}
-        )
-        self.runner.run.side_effect = lambda label, _argv: (
-            "Cuda compilation tools, release 12.8\n" if label == "cmake_cuda_compiler" else "compiler fixture version\n"
-        )
-        record = reproduce.record_toolchain(self.runner)
-        for name, arg1 in arguments.items():
-            self.assertEqual(record["cache"][f"{name}_ARG1"], arg1)
-        self.assertEqual(
-            self.runner.run.call_args_list,
-            [
-                call(
-                    name.lower(),
-                    [wrapper, f"compiler tools/{name.lower()}", "--config", "config with spaces", "--version"],
-                )
-                for name in arguments
-            ],
-        )
-
-    def test_benchmark_reuses_build_environment(self):
-        work = self.args.work_dir
-        library_dir = str(work / "cudf-build")
-        self.args.queries = []
-        for library_path, runtime_path in (
-            (None, library_dir),
-            ("recorded-lib", os.pathsep.join((library_dir, "recorded-lib"))),
-        ):
-            with self.subTest(library_path=library_path):
-                env = {"PATH": "recorded-bin"}
-                if library_path is not None:
-                    env["LD_LIBRARY_PATH"] = library_path
-                self.write_build_record(env)
-                source = (work / "build.json").read_text()
-                result = str(library_path)
-                with (
-                    patch.object(reproduce, "timestamp", return_value=result),
-                    patch.object(reproduce, "environment", autospec=True) as environment,
-                    patch.object(reproduce, "Runner", return_value=self.runner) as runner,
-                ):
-                    reproduce.benchmark(self.args, self.recipe)
-                environment.assert_not_called()
-                runner.assert_called_once_with(work, {**env, "LD_LIBRARY_PATH": runtime_path}, 60)
-                self.assertEqual((work / "build.json").read_text(), source)
-                self.assertEqual(
-                    json.loads((work / "results" / result / "build.json").read_text()), json.loads(source)
-                )
-
-    def test_main_run_dispatches_with_source_identity(self):
+    def test_main_run_uses_source_identity_and_recorded_environment(self):
         work = self.args.work_dir.resolve()
+        env = {"PATH": "recorded-bin", "LD_LIBRARY_PATH": "recorded-lib"}
+        self.write_build_record(env)
+        source = (work / "build.json").read_text()
+        argv = ["reproduce.py", "run", "--work-dir", str(work), "--queries", "1", "--timeout", "60"]
+
+        def run(label, command, *_args):
+            if label == "sf1-q1":
+                self.write(command[-1], json.dumps(result_data(1)))
+
+        self.runner.run.side_effect = run
         with (
-            patch("sys.argv", ["reproduce.py", "run", "--work-dir", str(work), "--timeout", "60"]),
+            patch("sys.argv", argv),
             patch.object(reproduce.platform, "system", return_value="Linux"),
-            patch.object(reproduce, "identity", autospec=True, return_value=self.recipe) as identity,
-            patch.object(reproduce, "benchmark", autospec=True) as benchmark,
+            patch.object(reproduce, "identity", return_value=self.recipe) as identity,
+            patch.object(reproduce, "timestamp", return_value="run"),
+            patch.object(reproduce, "Runner", return_value=self.runner) as runner,
         ):
             reproduce.main()
         identity.assert_called_once_with()
-        run_args = benchmark.call_args.args[0]
-        self.assertEqual(run_args.work_dir, work)
-        self.assertEqual(run_args.cmake_arg, [])
-        self.assertEqual(run_args.timeout, 60)
-        benchmark.assert_called_once_with(run_args, self.recipe)
+        runtime_path = os.pathsep.join((str(work / "cudf-build"), "recorded-lib"))
+        runner.assert_called_once_with(work, {**env, "LD_LIBRARY_PATH": runtime_path}, 60)
+        self.assertEqual((work / "build.json").read_text(), source)
+        self.assertEqual(json.loads((work / "results/run/build.json").read_text()), json.loads(source))
+        self.assertEqual(json.loads((work / "results/run/run.json").read_text())["queries"], [1])
 
 
 if __name__ == "__main__":

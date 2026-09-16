@@ -16,7 +16,6 @@
 
 #include <cudf/copying.hpp>
 
-#include <cmath>
 
 namespace {
 
@@ -98,7 +97,7 @@ void check_q9_cases()
       for (auto const& [key, value] : want.sum_profit) {
         auto const actual = cpu.sum_profit.find(key);
         CUDF_EXPECTS(actual != cpu.sum_profit.end() &&
-                       std::abs(actual->second - value) <= 1e-10 * std::max(1.0, std::abs(value)),
+                       ndsh::detail::reference_equal(actual->second, value),
                      "Q9 CPU reference amount/year regression");
       }
       for (auto const engine : {engine_type::BINARYOP, engine_type::AST, engine_type::TRANSFORM}) {
@@ -135,13 +134,8 @@ struct q9_files {
 
 void ndsh_q9_local(nvbench::state& state)
 {
-  auto const format   = state.get_string("format");
-  auto const workload = state.get_string("workload");
-  auto const engine   = engine_from_string(state.get_string("engine"));
-  auto const cold     = ndsh::use_cold_cache(state.get_string("cache"));
-  CUDF_EXPECTS(format == "parquet" || format == "vortex", "Unknown Q9 format");
-  CUDF_EXPECTS(workload == "read" || workload == "q9", "Unknown Q9 workload");
-  auto const use_vortex         = format == "vortex";
+  auto const engine = engine_from_string(state.get_string("engine"));
+  auto const [use_vortex, read_only, cold] = ndsh::local_options{state, 9};
   auto const& files             = ndsh::local_fixture<q9_files>(state.get_float64("scale_factor"));
   cuda::stream_ref const stream = cudf::get_default_stream();
   state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.get()));
@@ -153,7 +147,7 @@ void ndsh_q9_local(nvbench::state& state)
   };
   ndsh::warm_local_inputs(cold, [&] { return load_data(read); });
   ndsh::exec_local_benchmark(state, files.tables, use_vortex, cold, [&] {
-    if (workload == "read") {
+    if (read_only) {
       auto inputs = load_data(read);
       CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));
     } else {
@@ -163,12 +157,8 @@ void ndsh_q9_local(nvbench::state& state)
   });
   state.add_buffer_size(files.tables.bytes(use_vortex), "file_size", "Total file size");
   state.add_buffer_size(memory.peak_memory_usage(), "rmm_peak", "RMM peak (excludes Vortex)");
-  auto& matched = state.add_summary("ndsh/q9/matched_rows");
-  matched.set_string("name", "Q9 matched rows");
-  matched.set_int64("value", files.reference.matched);
-  auto& groups = state.add_summary("ndsh/q9/groups");
-  groups.set_string("name", "Q9 nation/year groups");
-  groups.set_int64("value", files.reference.sum_profit.size());
+  ndsh::add_count(state, "ndsh/q9/matched_rows", "Q9 matched rows", files.reference.matched);
+  ndsh::add_count(state, "ndsh/q9/groups", "Q9 nation/year groups", files.reference.sum_profit.size());
 }
 
 }  // namespace

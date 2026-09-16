@@ -160,8 +160,12 @@ uvx ruff check benchmarks/cudf-ndsh/*.py
 uvx ruff format --check benchmarks/cudf-ndsh/*.py
 ```
 
-Offline Python tests cover build wiring, reproduction safeguards, and selected
-benchmark-policy guards. They do not replace real cuDF builds or GPU validation.
+Offline Python tests cover opt-in/build isolation, reproduction safeguards, and
+focused timing/ownership guards—not snapshots of query implementations. Standalone
+adapter tests use representative batch/slice cases, checking types and values against
+independent host Arrow fixtures plus stream completion and result ownership. FFI tests
+cover the C boundary, projection pruning, and physical batch boundaries. These are not
+exhaustive cross-products, and offline tests do not replace real cuDF builds or GPU validation.
 
 ### Profiling safety
 

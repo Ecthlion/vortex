@@ -18,16 +18,10 @@
 
 #include <cudf/copying.hpp>
 
-#include <cmath>
+
 #include <cstdint>
 
 namespace {
-
-template <typename Read>
-std::unique_ptr<table_with_names> execute_q10(Read&& read, bool filter_predicates)
-{
-  return ::execute_q10(read, filter_predicates, [](auto& result) { return std::move(result); });
-}
 
 void check_q10_cases()
 {
@@ -116,8 +110,8 @@ void check_q10_cases()
                      actual_customer.address == expected_customer.address &&
                      actual_customer.phone == expected_customer.phone &&
                      actual_customer.comment == expected_customer.comment &&
-                     std::abs(actual_customer.revenue - expected_customer.revenue) <=
-                       1e-10 * std::max(1.0, std::abs(expected_customer.revenue)),
+                     ndsh::detail::reference_equal(actual_customer.revenue,
+                                                   expected_customer.revenue),
                    "Q10 CPU reference predicate/join/revenue regression");
     }
     for (bool post_read_filters : {true, false}) {
@@ -132,7 +126,7 @@ void check_q10_cases()
           return !post_read_filters && predicate ? apply_filter(table, *predicate)
                                                  : std::move(table);
         },
-        post_read_filters);
+        post_read_filters, ndsh::take_result);
       ndsh::check_q10_result(want, *result, stream);
     }
   }
@@ -149,7 +143,7 @@ struct q10_files {
     ndsh::make_reference_files<ndsh::q10_reference_builder>(
       scale_factor, tables, reference, q10_tables, q10_projections, true,
       [&](auto&& read, cuda::stream_ref stream) {
-        auto result = execute_q10(read, true);
+        auto result = execute_q10(read, true, ndsh::take_result);
         ndsh::check_q10_result(reference, *result, stream);
       });
   }
@@ -157,12 +151,7 @@ struct q10_files {
 
 void ndsh_q10_local(nvbench::state& state)
 {
-  auto const format   = state.get_string("format");
-  auto const workload = state.get_string("workload");
-  auto const cold     = ndsh::use_cold_cache(state.get_string("cache"));
-  CUDF_EXPECTS(format == "parquet" || format == "vortex", "Unknown Q10 format");
-  CUDF_EXPECTS(workload == "read" || workload == "q10", "Unknown Q10 workload");
-  auto const use_vortex         = format == "vortex";
+  auto const [use_vortex, read_only, cold] = ndsh::local_options{state, 10};
   auto const& files             = ndsh::local_fixture<q10_files>(state.get_float64("scale_factor"));
   cuda::stream_ref const stream = cudf::get_default_stream();
   state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.get()));
@@ -179,22 +168,18 @@ void ndsh_q10_local(nvbench::state& state)
   });
   ndsh::exec_local_benchmark(state, files.tables, use_vortex, cold, [&] {
     cudf::benchmark::scoped_range timed_range{"ndsh_q10_local_timed"};
-    if (workload == "read") {
+    if (read_only) {
       auto inputs = ndsh::read_local_tables(q10_tables, q10_projections, read);
       CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));
     } else {
-      auto result = execute_q10(read, true);
+      auto result = execute_q10(read, true, ndsh::take_result);
       CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));
     }
   });
   state.add_buffer_size(files.tables.bytes(use_vortex), "file_size", "Total file size");
   state.add_buffer_size(memory.peak_memory_usage(), "rmm_peak", "RMM peak (excludes Vortex)");
-  auto& matched = state.add_summary("ndsh/q10/matched_rows");
-  matched.set_string("name", "Q10 matched rows");
-  matched.set_int64("value", files.reference.matched);
-  auto& customers = state.add_summary("ndsh/q10/customers");
-  customers.set_string("name", "Q10 customers");
-  customers.set_int64("value", files.reference.customers.size());
+  ndsh::add_count(state, "ndsh/q10/matched_rows", "Q10 matched rows", files.reference.matched);
+  ndsh::add_count(state, "ndsh/q10/customers", "Q10 customers", files.reference.customers.size());
 }
 
 }  // namespace

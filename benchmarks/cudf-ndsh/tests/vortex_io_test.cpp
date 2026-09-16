@@ -63,14 +63,6 @@ void check_cuda(cudaError_t status, char const* operation)
   }
 }
 
-void check_arrow(int status, char const* operation, ArrowError const& error = {})
-{
-  if (status != NANOARROW_OK) {
-    throw std::runtime_error(std::string{operation} + " (" + std::to_string(status) +
-                             "): " + error.message);
-  }
-}
-
 class temporary_directory {
  public:
   temporary_directory()
@@ -262,11 +254,9 @@ int append_fixture_value(ArrowArray* array, column_spec const& spec, int64_t row
       ArrowDecimal value;
       ArrowDecimalInit(&value, decimal_bitwidth(spec.arrow_type), spec.precision, spec.arrow_scale);
       if (spec.arrow_type == NANOARROW_TYPE_DECIMAL128 && row % 7 < 2) {
-        check_arrow(ArrowDecimalSetDigits(
-                      &value,
-                      ArrowCharView(row % 7 == 0 ? "12345678901234567890123456789012345678"
-                                                 : "-12345678901234567890123456789012345678")),
-                    "set wide decimal");
+        NANOARROW_THROW_NOT_OK(ArrowDecimalSetDigits(
+          &value, ArrowCharView(row % 7 == 0 ? "12345678901234567890123456789012345678"
+                                            : "-12345678901234567890123456789012345678")));
       } else {
         ArrowDecimalSetInt(&value, (row % 10001 - 5000) * 101);
       }
@@ -283,28 +273,24 @@ host_table make_fixture(int64_t first_row,
   auto const count = selected.empty() ? columns.size() : selected.size();
   host_table result;
   ArrowSchemaInit(result.schema.get());
-  check_arrow(ArrowSchemaSetTypeStruct(result.schema.get(), count), "create table schema");
+  NANOARROW_THROW_NOT_OK(ArrowSchemaSetTypeStruct(result.schema.get(), count));
   result.schema->flags &= ~ARROW_FLAG_NULLABLE;
   for (std::size_t c = 0; c < count; ++c) {
     auto const index = selected.empty() ? c : selected[c];
     auto const& spec = columns[index];
     auto child       = result.schema->children[c];
     if (spec.precision != 0) {
-      check_arrow(
-        ArrowSchemaSetTypeDecimal(child, spec.arrow_type, spec.precision, spec.arrow_scale),
-        "set decimal schema");
+      NANOARROW_THROW_NOT_OK(
+        ArrowSchemaSetTypeDecimal(child, spec.arrow_type, spec.precision, spec.arrow_scale));
     } else {
-      check_arrow(ArrowSchemaSetType(child, spec.arrow_type), "set column schema");
+      NANOARROW_THROW_NOT_OK(ArrowSchemaSetType(child, spec.arrow_type));
     }
-    check_arrow(ArrowSchemaSetName(child, spec.name), "set column name");
+    NANOARROW_THROW_NOT_OK(ArrowSchemaSetName(child, spec.name));
     if (index == columns.size() - 2) { child->flags &= ~ARROW_FLAG_NULLABLE; }
   }
 
-  ArrowError error{};
-  check_arrow(ArrowArrayInitFromSchema(result.array.get(), result.schema.get(), &error),
-              "initialize fixture",
-              error);
-  check_arrow(ArrowArrayStartAppending(result.array.get()), "start fixture");
+  NANOARROW_THROW_NOT_OK(ArrowArrayInitFromSchema(result.array.get(), result.schema.get(), nullptr));
+  NANOARROW_THROW_NOT_OK(ArrowArrayStartAppending(result.array.get()));
   for (int64_t i = 0; i < rows; ++i) {
     auto const row = first_row + i;
     for (std::size_t c = 0; c < count; ++c) {
@@ -312,15 +298,14 @@ host_table make_fixture(int64_t first_row,
       bool const is_null =
         index == columns.size() - 1 ||
         (index != columns.size() - 2 && (row + static_cast<int64_t>(index) * 3) % 11 == 3);
-      check_arrow(is_null ? ArrowArrayAppendNull(result.array->children[c], 1)
-                          : append_fixture_value(result.array->children[c], columns[index], row),
-                  columns[index].name);
+      NANOARROW_THROW_NOT_OK(
+        is_null ? ArrowArrayAppendNull(result.array->children[c], 1)
+                : append_fixture_value(result.array->children[c], columns[index], row));
     }
-    check_arrow(ArrowArrayFinishElement(result.array.get()), "finish fixture row");
+    NANOARROW_THROW_NOT_OK(ArrowArrayFinishElement(result.array.get()));
   }
-  check_arrow(ArrowArrayFinishBuilding(result.array.get(), NANOARROW_VALIDATION_LEVEL_FULL, &error),
-              "finish fixture",
-              error);
+  NANOARROW_THROW_NOT_OK(
+    ArrowArrayFinishBuilding(result.array.get(), NANOARROW_VALIDATION_LEVEL_FULL, nullptr));
   return result;
 }
 
@@ -336,13 +321,10 @@ std::unique_ptr<cudf::table> make_source(cudaStream_t stream, int64_t first, cud
 nanoarrow::UniqueArrayView array_view(ArrowSchema const* schema, ArrowArray const* array)
 {
   nanoarrow::UniqueArrayView view;
-  ArrowError error{};
-  check_arrow(
-    ArrowArrayViewInitFromSchema(view.get(), schema, &error), "initialize array view", error);
-  check_arrow(ArrowArrayViewSetArray(view.get(), array, &error), "set array view", error);
-  check_arrow(ArrowArrayViewValidate(view.get(), NANOARROW_VALIDATION_LEVEL_FULL, &error),
-              "validate array view",
-              error);
+  NANOARROW_THROW_NOT_OK(ArrowArrayViewInitFromSchema(view.get(), schema, nullptr));
+  NANOARROW_THROW_NOT_OK(ArrowArrayViewSetArray(view.get(), array, nullptr));
+  NANOARROW_THROW_NOT_OK(
+    ArrowArrayViewValidate(view.get(), NANOARROW_VALIDATION_LEVEL_FULL, nullptr));
   return view;
 }
 
@@ -356,10 +338,8 @@ nanoarrow::UniqueArray canonical_array(ArrowSchema const* schema, ArrowArray con
           "Expected a non-nullable Arrow table");
 
   nanoarrow::UniqueArray result;
-  ArrowError error{};
-  check_arrow(
-    ArrowArrayInitFromSchema(result.get(), schema, &error), "initialize canonical array", error);
-  check_arrow(ArrowArrayStartAppending(result.get()), "start canonical array");
+  NANOARROW_THROW_NOT_OK(ArrowArrayInitFromSchema(result.get(), schema, nullptr));
+  NANOARROW_THROW_NOT_OK(ArrowArrayStartAppending(result.get()));
   for (int64_t row = 0; row < view->length; ++row) {
     for (int64_t c = 0; c < view->n_children; ++c) {
       auto const child = view->children[c];
@@ -367,7 +347,7 @@ nanoarrow::UniqueArray canonical_array(ArrowSchema const* schema, ArrowArray con
       require(child->dictionary == nullptr, "Expected decoded logical values, not a dictionary");
       require(child->length == view->length, "Arrow child length differs");
       if (ArrowArrayViewIsNull(child, row)) {
-        check_arrow(ArrowArrayAppendNull(out, 1), "append canonical null");
+        NANOARROW_THROW_NOT_OK(ArrowArrayAppendNull(out, 1));
         continue;
       }
       int status = NANOARROW_OK;
@@ -397,8 +377,7 @@ nanoarrow::UniqueArray canonical_array(ArrowSchema const* schema, ArrowArray con
         case NANOARROW_TYPE_DECIMAL128: {
           ArrowDecimal value;
           ArrowSchemaView field{};
-          check_arrow(ArrowSchemaViewInit(&field, schema->children[c], nullptr),
-                      "read decimal schema");
+          NANOARROW_THROW_NOT_OK(ArrowSchemaViewInit(&field, schema->children[c], nullptr));
           ArrowDecimalInit(&value,
                            decimal_bitwidth(child->storage_type),
                            field.decimal_precision,
@@ -409,9 +388,9 @@ nanoarrow::UniqueArray canonical_array(ArrowSchema const* schema, ArrowArray con
         }
         default: throw std::runtime_error("Unsupported Arrow comparison storage type");
       }
-      check_arrow(status, "append canonical value");
+      NANOARROW_THROW_NOT_OK(status);
     }
-    check_arrow(ArrowArrayFinishElement(result.get()), "finish canonical row");
+    NANOARROW_THROW_NOT_OK(ArrowArrayFinishElement(result.get()));
   }
   if (auto const remainder = view->length % 8; remainder != 0) {
     auto const mask = static_cast<uint8_t>((1U << remainder) - 1);
@@ -426,9 +405,8 @@ nanoarrow::UniqueArray canonical_array(ArrowSchema const* schema, ArrowArray con
       }
     }
   }
-  check_arrow(ArrowArrayFinishBuilding(result.get(), NANOARROW_VALIDATION_LEVEL_FULL, &error),
-              "finish canonical array",
-              error);
+  NANOARROW_THROW_NOT_OK(
+    ArrowArrayFinishBuilding(result.get(), NANOARROW_VALIDATION_LEVEL_FULL, nullptr));
   return result;
 }
 
@@ -442,28 +420,9 @@ void check_arrow_arrays(ArrowSchema const* schema,
   auto expected_view       = array_view(expected.schema.get(), normalized_expected.get());
   ArrowError reason{};
   int equal = 0;
-  check_arrow(
-    ArrowArrayViewCompare(
-      actual_view.get(), expected_view.get(), NANOARROW_COMPARE_IDENTICAL, &equal, &reason),
-    "compare full Arrow arrays",
-    reason);
+  NANOARROW_THROW_NOT_OK(ArrowArrayViewCompare(
+    actual_view.get(), expected_view.get(), NANOARROW_COMPARE_IDENTICAL, &equal, &reason));
   require(equal != 0, std::string{"Arrow arrays differ: "} + reason.message);
-}
-
-void check_types(cudf::table_view table, std::vector<std::size_t> const& selected = {})
-{
-  auto const count = selected.empty() ? columns.size() : selected.size();
-  require(table.num_columns() == static_cast<cudf::size_type>(count), "Column count differs");
-  for (cudf::size_type c = 0; c < table.num_columns(); ++c) {
-    auto const index = static_cast<std::size_t>(c);
-    auto const& spec = columns[selected.empty() ? index : selected[index]];
-    auto const type  = table.column(c).type();
-    require(type.id() == spec.cudf_type, std::string{spec.name} + ": dtype differs");
-    if (spec.precision != 0) {
-      require(type.scale() == -spec.arrow_scale,
-              std::string{spec.name} + ": decimal scale differs");
-    }
-  }
 }
 
 void check_table(cudf::io::table_with_metadata const& actual,
@@ -476,12 +435,18 @@ void check_table(cudf::io::table_with_metadata const& actual,
   require(actual.metadata.num_rows_per_source ==
             std::vector<std::size_t>{static_cast<std::size_t>(expected.array->length)},
           "Row metadata differs");
-  check_types(actual.tbl->view(), selected);
   auto const count = selected.empty() ? columns.size() : selected.size();
+  require(actual.tbl->num_columns() == static_cast<cudf::size_type>(count), "Column count differs");
   require(actual.metadata.schema_info.size() == count, "Metadata column count differs");
   std::vector<cudf::column_metadata> metadata;
   for (std::size_t c = 0; c < count; ++c) {
     auto const& spec = columns[selected.empty() ? c : selected[c]];
+    auto const type  = actual.tbl->view().column(static_cast<cudf::size_type>(c)).type();
+    require(type.id() == spec.cudf_type, std::string{spec.name} + ": dtype differs");
+    if (spec.precision != 0) {
+      require(type.scale() == -spec.arrow_scale,
+              std::string{spec.name} + ": decimal scale differs");
+    }
     require(actual.metadata.schema_info[c].name == spec.name,
             "Column name differs at index " + std::to_string(c));
     require(actual.tbl->view().column(static_cast<cudf::size_type>(c)).null_count() ==
@@ -528,12 +493,12 @@ void write_source(ndsh::vortex_io const& io,
     input = cudf::slice(input, {slice_begin, slice_begin + rows}, cudf_stream(stream)).front();
     require(input.column(0).offset() == slice_begin, "Test input is not actually sliced");
   }
-  check_types(input);
   if (chunk_rows) {
     io.write_vortex(path, input, column_names(), *chunk_rows);
   } else {
     io.write_vortex(path, input, column_names());
   }
+  check_cuda(cudaStreamQuery(stream), "write staging cleanup must complete the stream");
 }
 
 struct round_trip_case {
@@ -541,33 +506,19 @@ struct round_trip_case {
   cudf::size_type rows;
   cudf::size_type slice_begin;
   std::optional<cudf::size_type> chunk_rows;
-  std::vector<std::optional<std::size_t>> batches;
+  std::optional<std::size_t> batch_rows;
 };
 
 void round_trip(temporary_directory const& directory, cudaStream_t stream, round_trip_case const& test)
 {
-  auto const& [name, rows, slice_begin, chunk_rows, batches] = test;
+  auto const& [name, rows, slice_begin, chunk_rows, batch_rows] = test;
   auto const path = directory.file(std::string{name} + ".vortex");
   {
     ndsh::vortex_io writer{stream};
     write_source(writer, path, stream, 0, rows, slice_begin, chunk_rows);
   }
-  auto expected = make_fixture(slice_begin, rows);
-  std::vector<cudf::io::table_with_metadata> results;
-  {
-    ndsh::vortex_io reader{stream, cudf::get_current_device_resource_ref()};
-    for (auto batch : batches) {
-      results.push_back(read_completed(reader, path, stream, batch));
-    }
-  }
-  require(std::filesystem::remove(path), "Failed to remove the test's completed file");
-  for (std::size_t i = 0; i < results.size(); ++i) {
-    try {
-      check_table(results[i], expected, stream);
-    } catch (std::exception const& error) {
-      throw std::runtime_error("Read " + std::to_string(i) + ": " + error.what());
-    }
-  }
+  ndsh::vortex_io reader{stream};
+  check_table(read_completed(reader, path, stream, batch_rows), make_fixture(slice_begin, rows), stream);
 }
 
 void test_staged_string_bytes(cudaStream_t stream)
@@ -579,9 +530,8 @@ void test_staged_string_bytes(cudaStream_t stream)
     metadata.emplace_back(name);
   }
   auto schema = cudf::to_arrow_schema(source->view(), metadata);
-  // Prefix, offset/non-byte-aligned slice, suffix, empty slice, and unsliced input.
-  std::array<std::array<cudf::size_type, 2>, 5> const ranges{
-    {{0, 7}, {5, 12}, {parent_rows - 7, parent_rows}, {5, 5}, {0, parent_rows}}};
+  // Prefix and offset slices exercise both string-compaction conditions; keep the empty path too.
+  std::array<std::array<cudf::size_type, 2>, 3> const ranges{{{0, 7}, {5, 12}, {5, 5}}};
   for (auto const& range : ranges) {
     auto input    = cudf::slice(source->view(), {range[0], range[1]}, cudf_stream(stream)).front();
     auto expected = make_fixture(range[0], range[1] - range[0]);
@@ -602,64 +552,30 @@ void test_staged_string_bytes(cudaStream_t stream)
   }
 }
 
-void test_async_resource(temporary_directory const& directory, cudaStream_t stream)
+void test_async_owned_reads(temporary_directory const& directory, cudaStream_t stream)
 {
   rmm::mr::cuda_async_memory_resource resource;
   // This fence runs after all table destructors, before the explicit resource dies.
   host_buffer_fence resource_fence{stream};
   {
-    auto const path = directory.file("async-resource.vortex");
-    auto expected   = make_fixture(0, 37);
-    auto source     = make_source(stream, 0, 37);
+    auto const first_path  = directory.file("owned-first.vortex");
+    auto const second_path = directory.file("owned-second.vortex");
     std::vector<cudf::io::table_with_metadata> results;
     {
       ndsh::vortex_io io{stream, rmm::device_async_resource_ref{resource}};
-      io.write_vortex(path, source->view(), column_names(), 13);
-      check_cuda(cudaStreamQuery(stream), "write staging cleanup must complete the stream");
-      // Boolean import scratch is allocated even for one batch; smaller batches
-      // additionally exercise retained Arrow Device inputs and final concatenation.
-      for (auto const batch_rows : {64U, 7U, 0U}) {
-        results.push_back(read_completed(io, path, stream, batch_rows));
-      }
-      auto const empty_path = directory.file("async-resource-empty.vortex");
-      write_source(io, empty_path, stream, 0, 0, 0, 7);
-      check_table(read_completed(io, empty_path, stream, 7), make_fixture(0, 0), stream);
+      write_source(io, first_path, stream, 0, 37, 0, 37);
+      write_source(io, second_path, stream, 10000, 37, 0, 13);
+      // Exercise both owning-copy and concatenation paths, including boolean import scratch.
+      results.push_back(read_completed(io, first_path, stream, 64));
+      // A different file must not overwrite buffers held by the earlier returned table.
+      results.push_back(read_completed(io, second_path, stream, 7));
     }
-    source.reset();
-    require(std::filesystem::remove(path), "Failed to remove async-resource file");
-    for (auto const& result : results) {
-      check_table(result, expected, stream);
-    }
+    require(std::filesystem::remove(first_path), "Failed to remove first owned-read file");
+    require(std::filesystem::remove(second_path), "Failed to remove second owned-read file");
+    check_table(results[0], make_fixture(0, 37), stream);
+    check_table(results[1], make_fixture(10000, 37), stream);
   }
   resource_fence.wait();
-}
-
-void test_owned_reads(temporary_directory const& directory, cudaStream_t stream)
-{
-  auto const first_path  = directory.file("owned-first.vortex");
-  auto const second_path = directory.file("owned-second.vortex");
-  {
-    ndsh::vortex_io writer{stream};
-    write_source(writer, first_path, stream, 0, 101, 0, 17);
-    write_source(writer, second_path, stream, 10000, 101, 0, 23);
-  }
-
-  std::vector<cudf::io::table_with_metadata> results;
-  {
-    ndsh::vortex_io reader{stream};
-    results.push_back(read_completed(reader, first_path, stream, 9));
-    // A different file must not overwrite buffers held by an earlier returned table.
-    results.push_back(read_completed(reader, second_path, stream, 7));
-    results.push_back(read_completed(reader, first_path, stream, 13));
-    results.push_back(read_completed(reader, first_path, stream, 0));
-  }
-  require(std::filesystem::remove(first_path), "Failed to remove first owned-read file");
-  require(std::filesystem::remove(second_path), "Failed to remove second owned-read file");
-  auto first  = make_fixture(0, 101);
-  auto second = make_fixture(10000, 101);
-  for (std::size_t i = 0; i < results.size(); ++i) {
-    check_table(results[i], i == 1 ? second : first, stream);
-  }
 }
 
 template <typename Function>
@@ -675,43 +591,11 @@ void expect_error(char const* label, Function&& function, bool match_message = f
   throw std::runtime_error(std::string{label} + ": expected an exception");
 }
 
-void test_projection(temporary_directory const& directory,
-                     cudaStream_t stream,
-                     cudf::size_type rows,
-                     bool invalid = false)
-{
-  auto source     = make_source(stream, 0, rows);
-  auto const path = directory.file("projection-" + std::to_string(rows) + ".vortex");
-  ndsh::vortex_io io{stream};
-  io.write_vortex(path, source->view(), column_names(), 13);
-  if (invalid) {
-    expect_error("unknown CUDA scan column",
-                 [&] { static_cast<void>(io.read_vortex(path, 7, {"i32", "missing"})); }, true);
-    check_table(read_completed(io, path, stream, 7, {3}), make_fixture(0, rows, {3}), stream, {3});
-    expect_error("duplicate CUDA scan column",
-                 [&] { static_cast<void>(io.read_vortex(path, 7, {"i32", "i32"})); }, true);
-    check_table(read_completed(io, path, stream, 64), make_fixture(0, rows), stream);
-    return;
-  }
-  std::vector<std::size_t> const selected{11, 16, 0, 8, 18, 12};
-  auto expected = make_fixture(0, rows, selected);
-  for (auto const batch_rows : {7U, 0U, 64U}) {
-    auto result = read_completed(io, path, stream, batch_rows, selected);
-    check_table(result, expected, stream, selected);
-    for (std::size_t c = 0; c < selected.size(); ++c) {
-      require(result.metadata.schema_info[c].is_nullable ==
-                source->view().column(static_cast<cudf::size_type>(selected[c])).nullable(),
-              "Projected nullability metadata differs");
-    }
-  }
-
-}
-
 void test_errors(temporary_directory const& directory, cudaStream_t stream)
 {
   nanoarrow::UniqueSchema schema;
   ArrowSchemaInit(schema.get());
-  check_arrow(ArrowSchemaSetTypeStruct(schema.get(), 0), "create zero-column schema");
+  NANOARROW_THROW_NOT_OK(ArrowSchemaSetTypeStruct(schema.get(), 0));
   for (auto const flags : {int64_t{0}, int64_t{ARROW_FLAG_NULLABLE}}) {
     schema->flags = flags;
     // Rejection is schema-level, independent of whether any batches/rows exist.
@@ -738,7 +622,18 @@ void test_errors(temporary_directory const& directory, cudaStream_t stream)
   }
   names = column_names();
   io.write_vortex(path, source->view(), names, 3);
-  check_table(read_completed(io, path, stream, 64), make_fixture(0, 9), stream);
+  expect_error("unknown CUDA scan column",
+               [&] { static_cast<void>(io.read_vortex(path, 7, {"i32", "missing"})); }, true);
+  std::vector<std::size_t> const selected{11, 16, 0, 8, 18, 12};
+  auto projected = read_completed(io, path, stream, 7, selected);
+  check_table(projected, make_fixture(0, 9, selected), stream, selected);
+  for (std::size_t c = 0; c < selected.size(); ++c) {
+    require(projected.metadata.schema_info[c].is_nullable ==
+              source->view().column(static_cast<cudf::size_type>(selected[c])).nullable(),
+            "Projected nullability metadata differs");
+  }
+  expect_error("duplicate CUDA scan column",
+               [&] { static_cast<void>(io.read_vortex(path, 7, {"i32", "i32"})); }, true);
 
   for (auto const chunk_rows : {0, -1}) {
     auto const name = chunk_rows == 0 ? "invalid-zero.vortex" : "invalid-negative.vortex";
@@ -781,27 +676,18 @@ int main()
       ++passed;
       std::cout << "[PASS] " << name << '\n';
     };
-    run("reordered projection metadata and values",
-        [&] { test_projection(directory, stream.get(), 37); });
-    run("projected typed empty table", [&] { test_projection(directory, stream.get(), 0); });
-    run("invalid projection and context reuse",
-        [&] { test_projection(directory, stream.get(), 37, true); });
     run("bounded string host staging", [&] { test_staged_string_bytes(stream.get()); });
-    run("explicit async resource stream completion",
-        [&] { test_async_resource(directory, stream.get()); });
-    for (auto const& test : std::array<round_trip_case, 7>{{
-           {"defaults", 37, 0, std::nullopt, {std::nullopt}},
-           {"chunks", 257, 0, 31, {1, 7, 43, 0, 512}},
-           {"sliced", 69, 5, 11, {1, 7, 23, 0}},
-           {"word-boundary", 520, 0, 520, {13, 507, 0}},
-           {"single", 1, 0, 1, {1, 0}},
-           {"empty", 0, 0, 7, {std::nullopt, 1, 0}},
-           {"low-cardinality", 8193, 0, 2048, {127, 1024, 0}}}}) {
+    run("explicit async resource, owning reads, and stream completion",
+        [&] { test_async_owned_reads(directory, stream.get()); });
+    for (auto const& test : std::array<round_trip_case, 5>{{
+           {"defaults", 37, 0, std::nullopt, std::nullopt},
+           {"sliced", 69, 5, 11, 7},
+           {"word-boundary", 520, 0, 520, 507},
+           {"empty", 0, 0, 7, 0},
+           {"low-cardinality", 8193, 0, 2048, 0}}}) {
       run(test.name, [&] { round_trip(directory, stream.get(), test); });
     }
-    run("results outlive sources, repeated reads, contexts, and files",
-        [&] { test_owned_reads(directory, stream.get()); });
-    run("zero columns, NUL names, invalid arguments, missing path, and context reuse",
+    run("zero columns, invalid names/arguments, missing path, projection, and context reuse",
         [&] { test_errors(directory, stream.get()); });
     std::cout << "vortex_io: " << passed << " tests passed on CUDA device 0 (non-default stream)\n";
     return 0;

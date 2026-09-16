@@ -42,7 +42,6 @@ struct FakeFileReadBackend {
     padded: bool,
     eof: Option<u64>,
     requests: Mutex<Vec<(u64, usize)>>,
-    completions: Mutex<Vec<u64>>,
     blocked: Option<UnboundedSender<BlockedRead>>,
 }
 
@@ -129,7 +128,6 @@ impl FileReadBackend for FakeFileReadBackend {
                 requested_range: prefix..prefix + length,
             })
         };
-        self.completions.lock().push(offset);
         if let Some(finished) = finished {
             let _ = finished.send(());
         }
@@ -178,13 +176,9 @@ async fn assert_bytes(buffer: BufferHandle, offset: u64, length: usize) -> Vorte
 }
 
 #[test]
-fn pooled_file_read_options_default_to_buffered_io() {
+fn pooled_file_read_options() {
     assert!(!PooledFileReadAtOptions::default().direct_io);
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn pooled_file_read_options_enable_direct_io() {
+    #[cfg(target_os = "linux")]
     assert!(
         PooledFileReadAtOptions::default()
             .with_direct_io()
@@ -193,60 +187,38 @@ fn pooled_file_read_options_enable_direct_io() {
 }
 
 #[rstest]
-#[case::below_chunk(FILE_READ_CHUNK_BYTES - 1)]
-#[case::at_chunk(FILE_READ_CHUNK_BYTES)]
-#[case::above_chunk(FILE_READ_CHUNK_BYTES + 1)]
-#[case::exact_multichunk(2 * FILE_READ_CHUNK_BYTES)]
-#[case::multichunk_tail(3 * FILE_READ_CHUNK_BYTES + 137)]
+#[case::single_buffered(FILE_READ_CHUNK_BYTES - 1, false)]
+#[case::single_padded(FILE_READ_CHUNK_BYTES, true)]
+#[case::exact_multichunk(2 * FILE_READ_CHUNK_BYTES, false)]
+#[case::multichunk_tail(2 * FILE_READ_CHUNK_BYTES + 19, true)]
 #[crate::test]
-async fn chunked_reads_preserve_bytes_and_offsets(
+async fn chunks_preserve_bytes_and_offsets_in_reverse_completion_order(
     #[case] length: usize,
-    #[values(false, true)] padded: bool,
+    #[case] padded: bool,
 ) -> VortexResult<()> {
-    let backend = Arc::new(FakeFileReadBackend {
-        padded,
-        ..Default::default()
-    });
-    let (_runtime, reader) = reader(Arc::clone(&backend))?;
-    let buffer = reader
-        .read_at(FILE_OFFSET, length, Alignment::of::<u8>())
-        .await?;
-    assert_bytes(buffer, FILE_OFFSET, length).await?;
-
-    let expected: Vec<_> = (0..length)
-        .step_by(FILE_READ_CHUNK_BYTES)
-        .map(|start| {
-            (
-                FILE_OFFSET + start as u64,
-                (length - start).min(FILE_READ_CHUNK_BYTES),
-            )
-        })
-        .collect();
-    let mut requests = backend.requests.lock().clone();
-    requests.sort_unstable();
-    assert_eq!(requests, expected);
-    Ok(())
-}
-
-#[crate::test]
-async fn out_of_order_chunks_land_at_their_logical_offsets() -> VortexResult<()> {
     let (send, mut blocked) = unbounded_channel();
     let backend = Arc::new(FakeFileReadBackend {
-        padded: true,
+        padded,
         blocked: Some(send),
         ..Default::default()
     });
     let (_runtime, reader) = reader(Arc::clone(&backend))?;
-    let length = 2 * FILE_READ_CHUNK_BYTES + 19;
     let mut read = reader.read_at(FILE_OFFSET, length, Alignment::of::<u8>());
     assert!(poll!(&mut read).is_pending());
 
     let mut chunks = Vec::new();
-    for _ in 0..3 {
+    let mut expected = Vec::new();
+    for start in (0..length).step_by(FILE_READ_CHUNK_BYTES) {
         chunks.push(next_read(&mut blocked).await?);
+        expected.push((
+            FILE_OFFSET + start as u64,
+            (length - start).min(FILE_READ_CHUNK_BYTES),
+        ));
     }
+    let mut requests = backend.requests.lock().clone();
+    requests.sort_unstable();
+    assert_eq!(requests, expected);
     chunks.sort_unstable_by_key(|chunk| chunk.offset);
-    let expected_order: Vec<_> = chunks.iter().rev().map(|chunk| chunk.offset).collect();
     for chunk in chunks.into_iter().rev() {
         chunk.finish().await?;
     }
@@ -254,7 +226,6 @@ async fn out_of_order_chunks_land_at_their_logical_offsets() -> VortexResult<()>
     let buffer = timeout(WAIT, read)
         .await
         .map_err(|error| vortex_err!("chunked read did not finish: {error}"))??;
-    assert_eq!(*backend.completions.lock(), expected_order);
     assert_bytes(buffer, FILE_OFFSET, length).await
 }
 

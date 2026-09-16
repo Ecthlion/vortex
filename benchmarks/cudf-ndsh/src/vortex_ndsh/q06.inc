@@ -21,12 +21,6 @@
 
 namespace {
 
-template <typename Read>
-std::unique_ptr<table_with_names> execute_q6(Read&& read)
-{
-  return ::execute_q6(read, true, [](auto& result) { return std::move(result); });
-}
-
 std::optional<double> revenue_value(table_with_names const& result)
 {
   auto value = cudf::get_element(result.column("revenue"), 0);
@@ -40,10 +34,8 @@ void check_q6_result(ndsh::q6_reference_result const& expected, table_with_names
   if (expected.matched == 0) {
     CUDF_EXPECTS(!value, "Q6 SUM over no matching rows must be null");
   } else {
-    CUDF_EXPECTS(
-      value && std::isfinite(*value) &&
-        std::abs(*value - expected.revenue) <= 1e-10 * std::max(1.0, std::abs(expected.revenue)),
-      "Q6 GPU revenue differs from CPU reference");
+    CUDF_EXPECTS(value && ndsh::detail::reference_equal(*value, expected.revenue),
+                 "Q6 GPU revenue differs from CPU reference");
   }
 }
 
@@ -67,10 +59,11 @@ void check_q6_reference_boundaries()
     CUDF_EXPECTS(
       cpu.matched == expected.matched && std::abs(cpu.revenue - expected.revenue) < 1e-12,
       "Q6 CPU reference boundary/slice regression");
-    auto result = execute_q6([&](auto const& columns, auto const&) {
-      return std::make_unique<table_with_names>(std::make_unique<cudf::table>(projected),
-                                                columns);
-    });
+    auto result = execute_q6(
+      [&](auto const& columns, auto const&) {
+        return std::make_unique<table_with_names>(std::make_unique<cudf::table>(projected), columns);
+      },
+      true, ndsh::take_result);
     check_q6_result(expected, *result);
   }
 }
@@ -87,11 +80,12 @@ void check_q6_boundaries()
     {8765, 8766, 9130, 9131, 8766, 8766, 8766, 8766, 8766}};
   cudf::test::fixed_width_column_wrapper<double> quantity{{23, 23, 23, 23, 23, 23, 24, 23, 23}};
   CUDF_CUDA_TRY(cudaDeviceSynchronize());
-  auto result = execute_q6([&](auto const& columns, auto const&) {
-    return std::make_unique<table_with_names>(
-      std::make_unique<cudf::table>(cudf::table_view{{price, discount, shipdate, quantity}}),
-      columns);
-  });
+  auto result = execute_q6(
+    [&](auto const& columns, auto const&) {
+      return std::make_unique<table_with_names>(
+        std::make_unique<cudf::table>(cudf::table_view{{price, discount, shipdate, quantity}}), columns);
+    },
+    true, ndsh::take_result);
   auto value = revenue_value(*result);
   CUDF_EXPECTS(value && std::abs(*value - 18.0) < 1e-8, "Q6 boundary/null regression");
 }
@@ -113,7 +107,8 @@ struct q6_files {
       auto input =
         ndsh::read_local_file(tables.path("lineitem", use_vortex), use_vortex, io, q6_columns);
       ndsh::check_projection(generated->select(q6_columns), *input, q6_columns);
-      auto result = execute_q6([&](auto const&, auto const&) { return std::move(input); });
+      auto result = execute_q6(
+        [&](auto const&, auto const&) { return std::move(input); }, true, ndsh::take_result);
       check_q6_result(reference, *result);
     }
     CUDF_CUDA_TRY(cudaDeviceSynchronize());
@@ -122,26 +117,19 @@ struct q6_files {
 
 void ndsh_q6_local(nvbench::state& state)
 {
-  auto const format   = state.get_string("format");
-  auto const workload = state.get_string("workload");
-  auto const cold     = ndsh::use_cold_cache(state.get_string("cache"));
-  CUDF_EXPECTS(format == "parquet" || format == "vortex", "Unknown Q6 format");
-  CUDF_EXPECTS(workload == "read" || workload == "q6", "Unknown Q6 workload");
-  auto const use_vortex         = format == "vortex";
+  auto const [use_vortex, read_only, cold] = ndsh::local_options{state, 6};
   auto const& files             = ndsh::local_fixture<q6_files>(state.get_float64("scale_factor"));
   cuda::stream_ref const stream = cudf::get_default_stream();
   state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.get()));
   auto const memory = cudf::memory_stats_logger();
   ndsh::vortex_io io{stream.get()};
-  auto read = [&] {
+  auto read = [&](auto const&...) {
     return ndsh::read_local_file(
       files.tables.path("lineitem", use_vortex), use_vortex, io, q6_columns, cold);
   };
   ndsh::warm_local_inputs(cold, read);
   ndsh::exec_local_benchmark(state, files.tables, use_vortex, cold, [&] {
-    auto result = workload == "read"
-                    ? read()
-                    : execute_q6([&](auto const&, auto const&) { return read(); });
+    auto result = read_only ? read() : execute_q6(read, true, ndsh::take_result);
     CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));
   });
   state.add_buffer_size(files.tables.bytes(use_vortex), "file_size", "File size");
@@ -153,9 +141,7 @@ void ndsh_q6_local(nvbench::state& state)
   } else {
     summary.set_float64("value", files.reference.revenue);
   }
-  auto& matched = state.add_summary("ndsh/q6/matched_rows");
-  matched.set_string("name", "Q6 matched rows");
-  matched.set_int64("value", files.reference.matched);
+  ndsh::add_count(state, "ndsh/q6/matched_rows", "Q6 matched rows", files.reference.matched);
 }
 
 }  // namespace

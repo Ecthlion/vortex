@@ -24,6 +24,7 @@
 #include <memory>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace ndsh {
@@ -101,10 +102,34 @@ std::vector<std::unique_ptr<table_with_names>> read_local_tables(
   return tables;
 }
 
-inline bool use_cold_cache(std::string const& cache)
+struct local_options {
+  bool use_vortex, read_only, cold;
+
+  local_options(nvbench::state& state, int query)
+  {
+    auto const format   = state.get_string("format");
+    auto const workload = state.get_string("workload");
+    auto const cache    = state.get_string("cache");
+    auto const number   = std::to_string(query);
+    CUDF_EXPECTS(cache == "warm" || cache == "cold", "Unknown cache mode");
+    CUDF_EXPECTS(format == "parquet" || format == "vortex", "Unknown Q" + number + " format");
+    CUDF_EXPECTS(workload == "read" || workload == "q" + number, "Unknown Q" + number + " workload");
+    use_vortex = format == "vortex";
+    read_only  = workload == "read";
+    cold       = cache == "cold";
+  }
+};
+
+inline void add_count(nvbench::state& state, char const* key, char const* name, int64_t value)
 {
-  CUDF_EXPECTS(cache == "warm" || cache == "cold", "Unknown cache mode");
-  return cache == "cold";
+  auto& summary = state.add_summary(key);
+  summary.set_string("name", name);
+  summary.set_int64("value", value);
+}
+
+inline std::unique_ptr<table_with_names> take_result(std::unique_ptr<table_with_names>& result)
+{
+  return std::move(result);
 }
 
 inline void evict_file_pages(std::vector<std::string> const& paths)

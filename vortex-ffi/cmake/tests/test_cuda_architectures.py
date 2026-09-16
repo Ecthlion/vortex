@@ -55,15 +55,12 @@ class CudaArchitectureTests(CMakeTest):
                 else:
                     self.assertEqual((self.work / "flags.txt").read_text(encoding="utf-8"), expected)
 
-    def cuda_fixture(self, *, symlink_nvcc: bool = False) -> tuple[Path, Path]:
-        cuda_root = self.work / "fake CUDA toolkit's"
+    def cuda_fixture(self) -> tuple[Path, Path]:
+        cuda_root = self.work / "fake CUDA toolkit's/targets/sbsa-linux"
         nvcc = self.executable("fake CUDA toolkit's/bin/nvcc", "raise SystemExit('No native compilation expected')\n")
-        if symlink_nvcc:
-            cuda_root /= "targets/sbsa-linux"
-            target_nvcc = cuda_root / "bin/nvcc"
-            target_nvcc.parent.mkdir(parents=True)
-            target_nvcc.symlink_to("../../../bin/nvcc")
-            nvcc = str(target_nvcc)
+        target_nvcc = cuda_root / "bin/nvcc"
+        target_nvcc.parent.mkdir(parents=True)
+        target_nvcc.symlink_to("../../../bin/nvcc")
         # Stub discovery only; production Configure.cmake and its Cargo driver run unchanged.
         self.write(
             "source/FindCUDAToolkit.cmake",
@@ -72,7 +69,7 @@ class CudaArchitectureTests(CMakeTest):
                 message(FATAL_ERROR "CPU build must not discover CUDA")
             endif()
             set(CUDAToolkit_FOUND TRUE)
-            set(CUDAToolkit_NVCC_EXECUTABLE "{nvcc}")
+            set(CUDAToolkit_NVCC_EXECUTABLE "{target_nvcc}")
             set(CUDAToolkit_TARGET_DIR "{cuda_root}")
             """,
         )
@@ -111,24 +108,39 @@ class CudaArchitectureTests(CMakeTest):
 
     def test_configure_forwards_flags_and_cpu_ignores_policy(self) -> None:
         source, cuda_root = self.cuda_fixture()
-        for cuda, architectures, expected in (
-            ("ON", ARCHITECTURES, " ".join(ARCH_FLAGS)),
-            ("ON", "OFF", ""),
-            ("OFF", "invalid;native", None),
+        compiler = self.executable("parent toolchain's/bin/g++", "raise SystemExit('No compilation expected')\n")
+        build = self.work / "build"
+        for cuda, architectures, expected, selected, ambient in (
+            ("ON", ARCHITECTURES, " ".join(ARCH_FLAGS), compiler, "build-time-g++"),
+            ("ON", "OFF", "", None, "build-time-g++"),
+            ("ON", ARCHITECTURES, " ".join(ARCH_FLAGS), "", None),
+            ("OFF", "invalid;native", None, "ccache;g++", "build-time-g++"),
         ):
-            with self.subTest(cuda=cuda, architectures=architectures):
-                build = self.work / cuda
-                env = self.env.copy()
+            with self.subTest(cuda=cuda, architectures=architectures, selected=selected):
+                env = self.env | {
+                    "VORTEX_CUDA_HOST_COMPILER": "build-time-private-g++",
+                    "NVCC_PREPEND_FLAGS": "-ccbin=prepend-g++",
+                    "NVCC_APPEND_FLAGS": "-ccbin=append-g++ --use_fast_math",
+                }
                 env.pop("CUDA_PATH", None)
                 env.pop("VORTEX_CUDA_ARCH_FLAGS", None)
+                env.pop("NVCC_CCBIN", None)
                 if cuda == "ON":
                     env["VORTEX_CUDA_ARCH_FLAGS"] = "-arch=ambient"
+                if ambient is not None:
+                    env["NVCC_CCBIN"] = ambient
                 self.cmake_configure(
                     source,
                     build,
                     f"-DVORTEX_ENABLE_CUDA={cuda}",
                     f"-DCMAKE_CUDA_ARCHITECTURES={architectures}",
-                    env=env,
+                    "-UFIXTURE_CUDA_HOST_COMPILER"
+                    if selected is None
+                    else f"-DFIXTURE_CUDA_HOST_COMPILER={selected}",
+                    env=env | {
+                        "NVCC_CCBIN": "configure-time-g++",
+                        "VORTEX_CUDA_HOST_COMPILER": "configure-time-private-g++",
+                    },
                 )
                 self.cmake_build(build, "--target", "vortex_ffi_cargo_build", env=env)
                 self.assertEqual((build / "vortex-artifacts/libvortex_ffi.a").read_bytes(), b"recorded archive")
@@ -137,58 +149,15 @@ class CudaArchitectureTests(CMakeTest):
                 self.assertEqual(args[args.index("--package") + 1], "vortex-cuda-ffi" if cuda == "ON" else "vortex-ffi")
                 self.assertEqual(forwarded.get("VORTEX_CUDA_ARCH_FLAGS"), expected)
                 self.assertEqual(forwarded.get("CUDA_PATH"), str(cuda_root) if cuda == "ON" else None)
-
-    def test_configure_resolves_nvcc_symlink_and_preserves_cuda_root(self) -> None:
-        source, cuda_root = self.cuda_fixture(symlink_nvcc=True)
-        build = self.work / "symlink-nvcc"
-        self.cmake_configure(source, build, "-DVORTEX_ENABLE_CUDA=ON")
-        self.cmake_build(build, "--target", "vortex_ffi_cargo_build")
-        forwarded = self.cargo_recording(build / "cargo-target")["env"]
-        self.assertEqual(forwarded["CUDA_PATH"], str(cuda_root))
-        # Compare the invocation path: resolving the lookup result would hide the bug.
-        self.assertEqual(shutil.which("nvcc", path=forwarded["PATH"]), str((cuda_root / "bin/nvcc").resolve()))
-
-    def test_host_compiler_forwarding_and_fallback(self) -> None:
-        source, _ = self.cuda_fixture()
-        compiler = self.executable("parent toolchain's/bin/g++", "raise SystemExit('No compilation expected')\n")
-        build = self.work / "host-compiler"
-        configure_env = self.env | {
-            "NVCC_CCBIN": "configure-time-g++",
-            "VORTEX_CUDA_HOST_COMPILER": "configure-time-private-g++",
-        }
-        for cuda, selected in (
-            ("ON", compiler),
-            ("ON", None),
-            ("ON", ""),
-            ("OFF", compiler),
-            ("OFF", "ccache;g++"),
-        ):
-            with self.subTest(cuda=cuda, selected=selected):
-                self.cmake_configure(
-                    source,
-                    build,
-                    f"-DVORTEX_ENABLE_CUDA={cuda}",
-                    "-UFIXTURE_CUDA_HOST_COMPILER"
-                    if selected is None
-                    else f"-DFIXTURE_CUDA_HOST_COMPILER={selected}",
-                    env=configure_env,
-                )
-                for ambient in (None, "build-time-g++"):
-                    with self.subTest(ambient=ambient):
-                        env = self.env | {
-                            "VORTEX_CUDA_HOST_COMPILER": "build-time-private-g++",
-                            "NVCC_PREPEND_FLAGS": "-ccbin=prepend-g++",
-                            "NVCC_APPEND_FLAGS": "-ccbin=append-g++ --use_fast_math",
-                        }
-                        env.pop("NVCC_CCBIN", None)
-                        if ambient is not None:
-                            env["NVCC_CCBIN"] = ambient
-                        self.cmake_build(build, "--target", "vortex_ffi_cargo_build", env=env)
-                        forwarded = self.cargo_recording(build / "cargo-target")["env"]
-                        expected = (selected or None) if cuda == "ON" else env["VORTEX_CUDA_HOST_COMPILER"]
-                        self.assertEqual(forwarded.get("VORTEX_CUDA_HOST_COMPILER"), expected)
-                        for name in ("NVCC_CCBIN", "NVCC_PREPEND_FLAGS", "NVCC_APPEND_FLAGS"):
-                            self.assertEqual(forwarded.get(name), env.get(name))
+                host_compiler = (selected or None) if cuda == "ON" else env["VORTEX_CUDA_HOST_COMPILER"]
+                self.assertEqual(forwarded.get("VORTEX_CUDA_HOST_COMPILER"), host_compiler)
+                for name in ("NVCC_CCBIN", "NVCC_PREPEND_FLAGS", "NVCC_APPEND_FLAGS"):
+                    self.assertEqual(forwarded.get(name), env.get(name))
+                if cuda == "ON":
+                    # Compare the invocation path: resolving the lookup result would hide the bug.
+                    self.assertEqual(
+                        shutil.which("nvcc", path=forwarded["PATH"]), str((cuda_root / "bin/nvcc").resolve())
+                    )
 
     def test_host_compiler_rejects_command_arguments(self) -> None:
         source, _ = self.cuda_fixture()

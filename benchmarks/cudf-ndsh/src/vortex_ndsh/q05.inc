@@ -19,12 +19,6 @@
 
 namespace {
 
-template <typename Read>
-std::unique_ptr<table_with_names> execute_q5(Read&& read, bool filter_predicates)
-{
-  return ::execute_q5(read, filter_predicates, [](auto& result) { return std::move(result); });
-}
-
 std::vector<std::string> const q5_tables{
   "customer", "orders", "lineitem", "supplier", "nation", "region"};
 
@@ -107,7 +101,7 @@ void check_q5_boundaries()
           return !filter_predicates && predicate ? apply_filter(table, *predicate)
                                                  : std::move(table);
         },
-        filter_predicates);
+        filter_predicates, ndsh::take_result);
       ndsh::check_q5_result(want, *result, stream);
     }
   }
@@ -124,7 +118,7 @@ struct q5_files {
     ndsh::make_reference_files<ndsh::q5_reference_builder>(
       scale_factor, tables, reference, q5_tables, q5_projections, false,
       [&](auto&& read, cuda::stream_ref stream) {
-        auto result = execute_q5(read, true);
+        auto result = execute_q5(read, true, ndsh::take_result);
         ndsh::check_q5_result(reference, *result, stream);
       });
   }
@@ -132,12 +126,7 @@ struct q5_files {
 
 void ndsh_q5_local(nvbench::state& state)
 {
-  auto const format   = state.get_string("format");
-  auto const workload = state.get_string("workload");
-  auto const cold     = ndsh::use_cold_cache(state.get_string("cache"));
-  CUDF_EXPECTS(format == "parquet" || format == "vortex", "Unknown Q5 format");
-  CUDF_EXPECTS(workload == "read" || workload == "q5", "Unknown Q5 workload");
-  auto const use_vortex         = format == "vortex";
+  auto const [use_vortex, read_only, cold] = ndsh::local_options{state, 5};
   auto const& files             = ndsh::local_fixture<q5_files>(state.get_float64("scale_factor"));
   cuda::stream_ref const stream = cudf::get_default_stream();
   state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.get()));
@@ -153,22 +142,18 @@ void ndsh_q5_local(nvbench::state& state)
     return ndsh::read_local_tables(q5_tables, q5_projections, read);
   });
   ndsh::exec_local_benchmark(state, files.tables, use_vortex, cold, [&] {
-    if (workload == "read") {
+    if (read_only) {
       auto inputs = ndsh::read_local_tables(q5_tables, q5_projections, read);
       CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));
     } else {
-      auto result = execute_q5(read, true);
+      auto result = execute_q5(read, true, ndsh::take_result);
       CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));
     }
   });
   state.add_buffer_size(files.tables.bytes(use_vortex), "file_size", "Total file size");
   state.add_buffer_size(memory.peak_memory_usage(), "rmm_peak", "RMM peak (excludes Vortex)");
-  auto& matched = state.add_summary("ndsh/q5/matched_rows");
-  matched.set_string("name", "Q5 matched rows");
-  matched.set_int64("value", files.reference.matched);
-  auto& countries = state.add_summary("ndsh/q5/countries");
-  countries.set_string("name", "Q5 countries");
-  countries.set_int64("value", files.reference.revenue.size());
+  ndsh::add_count(state, "ndsh/q5/matched_rows", "Q5 matched rows", files.reference.matched);
+  ndsh::add_count(state, "ndsh/q5/countries", "Q5 countries", files.reference.revenue.size());
 }
 
 }  // namespace

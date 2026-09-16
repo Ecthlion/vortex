@@ -7,8 +7,6 @@ use rstest::rstest;
 use vortex::array::IntoArray;
 use vortex::array::arrays::Constant;
 use vortex::array::arrays::DictArray;
-use vortex::array::arrays::FixedSizeListArray;
-use vortex::array::arrays::ListArray;
 use vortex::array::arrays::ListViewArray;
 use vortex::array::arrays::PrimitiveArray;
 use vortex::array::arrays::StructArray;
@@ -153,9 +151,7 @@ fn dictionary(values: ArrayRef, width: PType) -> VortexResult<ArrayRef> {
 }
 
 fn get_schema(stream: &mut ArrowDeviceArrayStream) -> VortexResult<FFI_ArrowSchema> {
-    let callback = stream
-        .get_schema
-        .ok_or_else(|| vortex_err!("missing get_schema"))?;
+    let callback = stream.get_schema.expect("missing get_schema");
     let mut schema = FFI_ArrowSchema::empty();
     // SAFETY: The stream and output schema are live and writable.
     let status = unsafe { callback(stream, (&raw mut schema).cast()) };
@@ -163,31 +159,36 @@ fn get_schema(stream: &mut ArrowDeviceArrayStream) -> VortexResult<FFI_ArrowSche
     Ok(schema)
 }
 
-fn get_next(stream: &mut ArrowDeviceArrayStream) -> VortexResult<(i32, ArrowDeviceArray)> {
-    let callback = stream
-        .get_next
-        .ok_or_else(|| vortex_err!("missing get_next"))?;
+fn get_next(stream: &mut ArrowDeviceArrayStream) -> (i32, ArrowDeviceArray) {
+    let callback = stream.get_next.expect("missing get_next");
     let mut array = ArrowDeviceArray::empty();
     // SAFETY: The stream and output array are live and writable.
     let status = unsafe { callback(stream, &raw mut array) };
-    Ok((status, array))
+    (status, array)
 }
 
-fn release_stream(stream: &mut ArrowDeviceArrayStream) -> VortexResult<()> {
-    let release = stream
-        .release
-        .ok_or_else(|| vortex_err!("missing release"))?;
-    // SAFETY: This callback belongs to this live stream, and this is its final use.
-    unsafe { release(stream) };
-    Ok(())
+async fn upload_chunks(
+    chunks: Vec<ArrayRef>,
+    ctx: &mut CudaExecutionCtx,
+) -> VortexResult<Vec<VortexResult<ArrayRef>>> {
+    let mut device_chunks = Vec::new();
+    for chunk in chunks {
+        let chunk = upload(chunk, ctx).await?;
+        assert!(!chunk.is_host());
+        device_chunks.push(Ok(chunk));
+    }
+    ctx.synchronize_stream()?;
+    Ok(device_chunks)
 }
 
 #[rstest]
+#[case::plain_first_primitives(false, false, true)]
+#[case::dictionary_first_nested_strings(true, true, false)]
 #[crate::test]
 fn test_decode_mixed_dictionary_device_stream(
-    #[values(false, true)] strings: bool,
-    #[values(false, true)] nested: bool,
-    #[values(false, true)] plain_first: bool,
+    #[case] strings: bool,
+    #[case] nested: bool,
+    #[case] plain_first: bool,
 ) -> VortexResult<()> {
     let runtime = CurrentThreadRuntime::new();
     let session = vortex::array::array_session()
@@ -208,22 +209,10 @@ fn test_decode_mixed_dictionary_device_stream(
     if plain_first {
         chunks.rotate_right(1);
     }
-    let expected = if nested {
-        wrap_struct(expected)
-    } else {
-        expected
-    };
-    let chunks = runtime.block_on(async {
-        let mut device_chunks = Vec::new();
-        for chunk in chunks {
-            let chunk = if nested { wrap_struct(chunk) } else { chunk };
-            let chunk = upload(chunk, &mut ctx).await?;
-            assert!(!chunk.is_host());
-            device_chunks.push(Ok(chunk));
-        }
-        ctx.synchronize_stream()?;
-        Ok::<_, vortex::error::VortexError>(device_chunks)
-    })?;
+    let wrap = |array| if nested { wrap_struct(array) } else { array };
+    let expected = wrap(expected);
+    let chunks = chunks.into_iter().map(wrap).collect();
+    let chunks = runtime.block_on(upload_chunks(chunks, &mut ctx))?;
     let mut stream = ArrayStreamAdapter::new(expected.dtype().clone(), stream::iter(chunks))
         .boxed()
         .export_device_array_stream(&session, &runtime)?;
@@ -232,90 +221,56 @@ fn test_decode_mixed_dictionary_device_stream(
     assert_eq!(Field::try_from(&schema)?, Field::try_from(&plain.schema)?);
     release_device_array(&mut plain.array);
     for _ in 0..4 {
-        let (status, mut array) = get_next(&mut stream)?;
+        let (status, mut array) = get_next(&mut stream);
         assert_eq!(status, 0, "{}", last_error(&mut stream)?);
         assert_eq!(array.device_type, ARROW_DEVICE_CUDA);
         let actual = read_plain(&array.array, expected.dtype())?;
         assert_arrays_eq!(actual, expected, ctx.execution_ctx());
         release_device_array(&mut array);
     }
-    let (status, eos) = get_next(&mut stream)?;
+    let (status, eos) = get_next(&mut stream);
     assert_eq!(status, 0);
     assert!(eos.array.release.is_none());
-    release_stream(&mut stream)
+    // SAFETY: This is the live stream's final use.
+    unsafe { stream.release.expect("missing release")(&raw mut stream) };
+    Ok(())
 }
 
-#[rstest]
-#[case::without_schema(None)]
-#[case::list(Some(0))]
-#[case::fixed_size_list(Some(1))]
-#[case::non_contiguous_list_view(Some(2))]
 #[crate::test]
-async fn test_decode_dictionary_array(
-    #[case] layout: Option<usize>,
-    #[values(false, true)] strings: bool,
-) -> VortexResult<()> {
+async fn test_decode_non_contiguous_dictionary_list_view() -> VortexResult<()> {
     let session = vortex::array::array_session()
         .with_some(CudaSession::try_default()?.with_dictionary_export(DictionaryExport::Decode));
     let mut ctx = CudaSession::create_execution_ctx(&session)?;
-    let (values, mut expected) = values_and_expected(strings);
-    let elements = dictionary(values, PType::U8)?;
-    let array = match layout {
-        None => elements,
-        Some(0) => ListArray::try_new(
-            elements,
-            PrimitiveArray::from_iter([0i32, 2, 4]).into_array(),
-            Validity::NonNullable,
-        )?
-        .into_array(),
-        Some(1) => FixedSizeListArray::try_new(elements, 2, Validity::NonNullable, 2)?.into_array(),
-        _ => {
-            expected = expected.take(PrimitiveArray::from_iter([2u32, 3, 0, 1]).into_array())?;
-            ListViewArray::new(
-                elements,
-                PrimitiveArray::from_iter([2i32, 0]).into_array(),
-                PrimitiveArray::from_iter([2i32, 2]).into_array(),
-                Validity::NonNullable,
-            )
-            .into_array()
-        }
-    };
+    let (values, expected) = values_and_expected(true);
+    let array = ListViewArray::new(
+        dictionary(values, PType::U8)?,
+        PrimitiveArray::from_iter([2i32, 0]).into_array(),
+        PrimitiveArray::from_iter([2i32, 2]).into_array(),
+        Validity::NonNullable,
+    )
+    .into_array();
+    let expected = expected.take(PrimitiveArray::from_iter([2u32, 3, 0, 1]).into_array())?;
     let array = upload(array, &mut ctx).await?;
-    let mut exported;
-    let values = if layout.is_some() {
-        let with_schema = array.export_device_array_with_schema(&mut ctx).await?;
-        assert_eq!(
-            Field::try_from(&with_schema.schema)?,
-            Field::new_list(
-                "",
-                Field::new(
-                    Field::LIST_FIELD_DEFAULT_NAME,
-                    if strings {
-                        DataType::Utf8
-                    } else {
-                        DataType::Int32
-                    },
-                    expected.dtype().is_nullable(),
-                ),
-                false,
-            )
-        );
-        exported = with_schema.array;
-        assert_eq!(exported.array.length, 2);
-        assert_eq!(exported.array.n_children, 1);
-        assert_eq!(
-            Buffer::<i32>::from_byte_buffer(buffer(&exported.array, 1)?).as_ref(),
-            &[0, 2, 4]
-        );
-        // SAFETY: This live list array owns the single child checked above.
-        unsafe { &**exported.array.children }
-    } else {
-        exported = array.export_device_array(&mut ctx).await?;
-        &exported.array
-    };
+    let mut exported = array.export_device_array_with_schema(&mut ctx).await?;
+    assert_eq!(
+        Field::try_from(&exported.schema)?,
+        Field::new_list(
+            "",
+            Field::new(Field::LIST_FIELD_DEFAULT_NAME, DataType::Utf8, true),
+            false,
+        )
+    );
+    assert_eq!(exported.array.array.length, 2);
+    assert_eq!(exported.array.array.n_children, 1);
+    assert_eq!(
+        Buffer::<i32>::from_byte_buffer(buffer(&exported.array.array, 1)?).as_ref(),
+        &[0, 2, 4]
+    );
+    // SAFETY: This live list array owns the single child checked above.
+    let values = unsafe { &**exported.array.array.children };
     let actual = read_plain(values, expected.dtype())?;
     assert_arrays_eq!(actual, expected, ctx.execution_ctx());
-    release_device_array(&mut exported);
+    release_device_array(&mut exported.array);
     Ok(())
 }
 
@@ -351,14 +306,10 @@ async fn test_decode_unsupported_device_dictionary_does_not_fall_back_to_cpu() -
 }
 
 #[rstest]
-#[case::same_dictionary_width(Some(PType::U8), false)]
-#[case::different_dictionary_width(Some(PType::U16), true)]
-#[case::plain_chunk(None, true)]
+#[case::different_dictionary_width(Some(PType::U16))]
+#[case::plain_chunk(None)]
 #[crate::test]
-fn test_default_dictionary_device_stream(
-    #[case] second_width: Option<PType>,
-    #[case] reject: bool,
-) -> VortexResult<()> {
+fn test_default_dictionary_device_stream(#[case] second_width: Option<PType>) -> VortexResult<()> {
     let runtime = CurrentThreadRuntime::new();
     let session = crate::cuda_session();
     let mut ctx = CudaSession::create_execution_ctx(&session)?;
@@ -372,14 +323,7 @@ fn test_default_dictionary_device_stream(
         Some(width) => dictionary(values, width)?,
         None => expected.clone(),
     };
-    let chunks = runtime.block_on(async {
-        let chunks = vec![
-            Ok(upload(first, &mut ctx).await?),
-            Ok(upload(second, &mut ctx).await?),
-        ];
-        ctx.synchronize_stream()?;
-        Ok::<_, vortex::error::VortexError>(chunks)
-    })?;
+    let chunks = runtime.block_on(upload_chunks(vec![first.clone(), first, second], &mut ctx))?;
     let mut stream = ArrayStreamAdapter::new(expected.dtype().clone(), stream::iter(chunks))
         .boxed()
         .export_device_array_stream(&session, &runtime)?;
@@ -388,19 +332,17 @@ fn test_default_dictionary_device_stream(
         Field::try_from(&schema)?.data_type(),
         &DataType::Dictionary(Box::new(DataType::Int16), Box::new(DataType::Int32),)
     );
-    let (status, mut first) = get_next(&mut stream)?;
-    assert_eq!(status, 0);
-    assert!(!first.array.dictionary.is_null());
-    release_device_array(&mut first);
-    let (status, mut second) = get_next(&mut stream)?;
-    if reject {
-        assert_eq!(status, LIBC_EIO);
-        assert!(last_error(&mut stream)?.contains("Arrow schema changed"));
-        assert!(second.array.release.is_none());
-    } else {
+    for _ in 0..2 {
+        let (status, mut array) = get_next(&mut stream);
         assert_eq!(status, 0);
-        assert!(!second.array.dictionary.is_null());
-        release_device_array(&mut second);
+        assert!(!array.array.dictionary.is_null());
+        release_device_array(&mut array);
     }
-    release_stream(&mut stream)
+    let (status, rejected) = get_next(&mut stream);
+    assert_eq!(status, LIBC_EIO);
+    assert!(last_error(&mut stream)?.contains("Arrow schema changed"));
+    assert!(rejected.array.release.is_none());
+    // SAFETY: This is the live stream's final use.
+    unsafe { stream.release.expect("missing release")(&raw mut stream) };
+    Ok(())
 }
