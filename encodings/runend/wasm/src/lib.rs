@@ -4,22 +4,20 @@
 //! The embeddable WASM decoder for `vortex.runend`.
 //!
 //! Run-end is the canonical **structural** encoding: its output is not new data, it is the values
-//! child repeated. So this kernel never touches the values child at all. It declares it
-//! [`ChildMode::Reference`], expands the run ends into one gather index per output row, and
-//! returns the plan `take(child(VALUES), indices)` — the host resolves the child in its own
-//! encoding and gathers it lazily.
+//! child repeated. So this kernel computes nothing about the values themselves. It expands the run
+//! ends into one gather index per output row and hands them to [`Decoded::take`], the SDK's
+//! generic gather over a canonical child of *any* dtype.
 //!
 //! That is what makes this kernel *dtype-agnostic*. The native decoder
 //! (`run_end_canonicalize`, `encodings/runend/src/array.rs`) needs a separate implementation per
 //! dtype — bool, primitive, varbinview — and `vortex_bail!`s on anything else. This kernel has
-//! none of that: because the values child is only *named*, run-end over strings, decimals, or any
-//! future dtype works with no code here, and none of it crosses the sandbox boundary.
+//! none of that: the values child arrives in Vortex's canonical layout for whatever its dtype is
+//! (a struct of lists of strings, a timestamp extension, a union), and `take` follows that layout.
 //!
 //! Serialized parts consumed:
 //! - **metadata**: prost `RunEndMetadata` `{1: ends_ptype, 2: num_runs, 3: offset}`;
 //! - **buffers**: none (run-end has `nbuffers() == 0`);
-//! - **children**: `[ends (primitive, num_runs, Values), values (parent dtype, num_runs,
-//!   Reference)]`.
+//! - **children**: `[ends (primitive, num_runs), values (parent dtype, num_runs)]`.
 //!
 //! Index expansion mirrors `trimmed_ends_iter` (`encodings/runend/src/iter.rs`): each run end is
 //! shifted by the array's `offset` and clamped to `len`, so a sliced run-end array decodes
@@ -35,24 +33,19 @@ use vortex_wasm_guest::GuestError;
 use vortex_wasm_guest::GuestResult;
 use vortex_wasm_guest::WasmEncoding;
 use vortex_wasm_guest::abi::PType;
-use vortex_wasm_guest::data::ChildView;
 use vortex_wasm_guest::data::Decoded;
-use vortex_wasm_guest::data::DecodedPrimitive;
-use vortex_wasm_guest::data::Validity;
 use vortex_wasm_guest::dtype::DTypeExpr;
 use vortex_wasm_guest::export_wasm_encoding;
 use vortex_wasm_guest::guest_ensure;
 use vortex_wasm_guest::node::ChildSpec;
 use vortex_wasm_guest::node::NodeHeader;
 use vortex_wasm_guest::node::NodeView;
-use vortex_wasm_guest::plan::NodeId;
-use vortex_wasm_guest::plan::PlanBuilder;
 use vortex_wasm_guest::proto::Field;
 use vortex_wasm_guest::proto::ProtoReader;
 
 /// Serialized child slots.
-const ENDS: u16 = 0;
-const VALUES: u16 = 1;
+const ENDS: usize = 0;
+const VALUES: usize = 1;
 
 /// Mirror of the native `RunEndMetadata` prost message.
 #[derive(Default)]
@@ -92,71 +85,48 @@ impl WasmEncoding for RunEnd {
         );
         guest_ensure!(header.n_children == 2, "run-end expects exactly 2 children");
 
-        let mut specs = Vec::with_capacity(2);
-        // The ends are read here, to build the gather indices.
-        specs.push(ChildSpec::values(
-            DTypeExpr::primitive(ends_ptype, false),
-            meta.num_runs,
-        ));
-        // The values are only named: same dtype as the parent, whatever that is, and never copied
-        // into guest memory.
-        specs.push(ChildSpec::reference(DTypeExpr::parent(), meta.num_runs));
-        Ok(specs)
+        Ok(alloc::vec![
+            ChildSpec::new(DTypeExpr::primitive(ends_ptype, false), meta.num_runs),
+            // Same dtype as the parent, whatever that is: the kernel never needs to know.
+            ChildSpec::new(DTypeExpr::parent(), meta.num_runs),
+        ])
     }
 
-    fn decode(node: &NodeView<'_>, plan: &mut PlanBuilder) -> GuestResult<NodeId> {
+    fn decode(node: &NodeView<'_>) -> GuestResult<Decoded> {
         let meta = parse_metadata(node.metadata)?;
         let offset = meta.offset;
 
-        let ChildView::Primitive(ends) = node.child(ENDS as usize)? else {
-            return Err(GuestError::new("run-end ends child must be primitive"));
-        };
+        let ends = node.child(ENDS)?.as_primitive()?;
         guest_ensure!(
             ends.len as u64 == meta.num_runs,
             "run-end ends length disagrees with num_runs"
         );
-
-        // One run index per output row. `num_runs` bounds the index values, and the host
-        // re-validates every index against the values child's length before gathering.
         guest_ensure!(
             meta.num_runs <= u32::MAX as u64,
             "run-end has too many runs for u32 indices"
         );
-        let mut indices: Vec<u8> = Vec::with_capacity(node.len * 4);
-        let mut filled: usize = 0;
 
+        // One run index per output row, mirroring `trimmed_ends_iter`: shift each end by the slice
+        // offset and clamp it to len.
+        let mut indices: Vec<u32> = Vec::with_capacity(node.len);
         for run in 0..ends.len {
-            if filled >= node.len {
+            if indices.len() >= node.len {
                 break;
             }
-            // Mirror `trimmed_ends_iter`: shift by the slice offset, clamp to len.
             let raw = ends.value_u64(run);
             guest_ensure!(raw >= offset, "run end precedes the array offset");
             let end = (raw - offset).min(node.len as u64) as usize;
-            guest_ensure!(end >= filled, "run ends must be non-decreasing");
-
-            let index = (run as u32).to_le_bytes();
-            for _ in filled..end {
-                indices.extend_from_slice(&index);
-            }
-            filled = end;
+            guest_ensure!(end >= indices.len(), "run ends must be non-decreasing");
+            indices.resize(end, run as u32);
         }
         guest_ensure!(
-            filled == node.len,
+            indices.len() == node.len,
             "run ends do not cover the array's length"
         );
 
-        let values = plan.child(VALUES);
-        let indices = plan.materialized(
-            DTypeExpr::primitive(PType::U32, false),
-            Decoded::Primitive(DecodedPrimitive {
-                ptype: PType::U32,
-                len: node.len,
-                values: indices,
-                validity: Validity::NonNullable,
-            }),
-        );
-        Ok(plan.take(values, indices))
+        // `take` bounds-checks every index against the values child and follows its canonical
+        // layout, whatever the dtype.
+        Decoded::take(&node.child(VALUES)?, &indices)
     }
 }
 

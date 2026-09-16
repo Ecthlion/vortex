@@ -53,7 +53,7 @@ pure decode libraries so semantics match by construction:
 | Kernel crate | Encoding | Reuses |
 | --- | --- | --- |
 | `encodings/fastlanes/wasm` | `fastlanes.bitpacked` | the [`fastlanes`] crate's unpack kernels |
-| `encodings/runend/wasm` | `vortex.runend` | nothing — it gathers instead of decoding (5.9 KB) |
+| `encodings/runend/wasm` | `vortex.runend` | nothing — the SDK's generic `take` over its values child (18 KB) |
 | `encodings/fsst/wasm` | `vortex.fsst` | [`fsst`] (fsst-rs)'s `Decompressor` |
 | `encodings/onpair/wasm` | `vortex.onpair` | the [`onpair`] crate's `try_decode_into` |
 
@@ -128,35 +128,31 @@ kernel across the files that share it, are not yet implemented.
   (default `runtime` feature; disable it when a dependency links `std`), and the
   [`WasmEncoding`] trait + `export_wasm_encoding!` macro.
 
-## Two kinds of encoding, two result shapes
+## One result shape: the kernel always materializes
 
-The axis that matters is **not** leaf-vs-nested, and it is **not** buffers-vs-children (5 of the 6
-"leaf" encodings have zero buffers and read a child). It is:
+A kernel's output is **a canonical array of the node's own dtype**, whatever that dtype is. The
+host hands every declared child to the kernel in Vortex's canonical layout and reads one canonical
+array back; there is no second result kind.
 
-> Does the decode produce **new element values**, or is the output a **permutation, subset, or
-> overlay** of a child's existing values?
+Two kinds of encoding still exist, and the difference matters for how a kernel is *written*, not
+for what it returns:
 
-- **Value-producing** (bit-packing, FSST, zstd, delta, zigzag, ALP): the output bytes exist
-  nowhere until the kernel computes them. Delta is the extreme case — Vortex has no scan kernel,
-  so it cannot be delegated even in principle. These kernels must **materialize**.
-- **Re-arranging** (run-end, dict, sparse, patched, chunked, masked, struct, list, extension):
-  the output is the child, reordered/overlaid. Making the guest materialize these is wrong four
-  ways: it forces the guest to reproduce dtypes it cannot even name, doubles the boundary
-  crossings, blows up memory (chunked would canonicalize every chunk into a 4 GiB sandbox), and
-  destroys host pushdown. These kernels must **not** materialize.
+- **Value-producing** (bit-packing, FSST, OnPair, zstd, delta, ALP): the output bytes exist nowhere
+  until the kernel computes them. The kernel reads its buffers and writes elements.
+- **Re-arranging** (run-end, dict, sparse, masked, extension-over-storage): the output is a child's
+  values reordered or overlaid. The kernel computes indices and applies the SDK's generic
+  [`Decoded::take`](../../vortex-wasm-guest/src/data.rs) to the canonical child, which follows the
+  canonical layout of *any* dtype — strings, decimals, lists, structs, unions, maps, extension
+  types — so the kernel needs no per-dtype code and is generic over types added after it was built.
 
-Roughly 20 of ~29 surveyed encodings are re-arranging. So the ABI's job is to let a kernel say
-*"my output is child N, gathered like this"* without ever touching child N.
-
-Hence a per-child access mode, and a result that is a **plan** rather than an array:
-
-| | value-producing | re-arranging |
-| --- | --- | --- |
-| child access | `ChildMode::Values` — canonicalized and copied into the sandbox | `ChildMode::Reference` — resolved lazily, in its own encoding, never copied |
-| result | a plan ending in one `Materialized` node | a plan of `Child` / `Take` / `Slice` / `Concat` / `Constant` / `SetValidity` nodes |
-| guest bytes moved | O(len) | 0 for the referenced child |
-
-See [The plan vocabulary](#the-plan-vocabulary).
+An earlier revision of this design let a re-arranging kernel return a *plan* (`take(child(1),
+indices)`) that the host evaluated lazily over children it never canonicalized. That kept the
+values out of the sandbox but split the decode across two trust domains, gave the host a small
+interpreter to validate, and made a kernel's semantics depend on which host constructors existed.
+The design now trades that laziness for a single, closed contract: **the kernel owns the whole
+decode, and the host only has to check that what came back is a well-formed array of the promised
+type.** [The array frame](#the-array-frame) below is that contract; the cost of the trade is
+measured in [the run-end section](#vortexrunend-encodingsrunendwasm--the-structural-case).
 
 ## The encoding trait (guest)
 
@@ -165,28 +161,27 @@ knows its children's dtypes, decoding is two-phase:
 
 ```rust
 pub trait WasmEncoding {
-    /// From the metadata (and the serialized child count), declare each child's dtype, length,
-    /// and access mode.
+    /// From the metadata (and the serialized child count), declare each child's dtype and length.
     fn children(header: &NodeHeader<'_>) -> GuestResult<Vec<ChildSpec>>;
 
-    /// Describe the node's output as a plan over its children, returning the root node.
-    fn decode(node: &NodeView<'_>, plan: &mut PlanBuilder) -> GuestResult<NodeId>;
+    /// Decode the node into its canonical array, of the node's own dtype and length.
+    fn decode(node: &NodeView<'_>) -> GuestResult<Decoded>;
 }
 
-export_wasm_encoding!(MyEncoding); // defines vx_alloc + vx_children + vx_decode
+export_wasm_encoding!(MyEncoding); // defines vx_abi_version + vx_alloc + vx_children + vx_decode
 ```
 
-`ChildSpec::values(dtype, len)` declares a child the guest will read; `ChildSpec::reference(...)`
-declares one it will only *name*. Reference children are never canonicalized and never enter the
-sandbox, so **their dtype is unconstrained** — this is what lets one dtype-agnostic kernel cover
-cases the guest has no code for. The dtype is a [`DTypeExpr`](#the-dtype-channel): a literal, or a
-derivation such as `DTypeExpr::parent()`, which is all a re-arranging kernel needs since it is
-naming rather than reading.
+`ChildSpec::new(dtype, len)` declares a serialized child. The host decodes it in its own encoding
+(natively, or recursively through another kernel), canonicalizes it, and copies it into guest
+memory as an [`ArrayView`](#the-array-frame). The dtype is a [`DTypeExpr`](#the-dtype-channel): a
+literal, or a derivation such as `DTypeExpr::parent()`, which is all a re-arranging kernel needs
+since its values child has its own type.
 
 `NodeView` exposes the node's full dtype, the metadata bytes (parse with `proto`), the raw buffers
-(resident in guest memory, 8-byte aligned so they can be cast in place), and typed views of the
-`Values` children. `PlanBuilder` hands back a `NodeId` per node, which is the only way to name
-one — so a kernel cannot express a dangling or cyclic reference even by accident.
+(resident in guest memory, 8-byte aligned so they can be cast in place), and each child as an
+`ArrayView` — a borrowed, recursive view whose `kind` is one variant per canonical shape.
+`Decoded` is the owned mirror of that view; a kernel either builds one from its buffers or asks
+`Decoded::take(&child, &indices)` to gather one.
 
 ## Host / guest ABI (`abi_version = 1`)
 
@@ -201,44 +196,84 @@ Guest exports:
 - `vx_alloc(len) -> ptr` — bump allocation; the host uses it to place all inputs.
 - `vx_children(frame_ptr, frame_len) -> ptr` — input
   `[u64 len][u32 flags][u32 n_children][u32 dtype_len][u32 metadata_len][dtype][metadata]`; output
-  `[u32 n]` + `n` descriptors `[u8 mode][pad x3][u32 dtype_len][u64 len][dtype]`.
+  `[u32 n]` + `n` descriptors `[u32 dtype_len][u64 len][dtype]`.
 - `vx_decode(frame_ptr, frame_len) -> ptr` — input
   `[u64 len][u32 flags][u32 dtype_len][u32 metadata_len][u32 n_buffers][u32 n_children]`
-  `[dtype][metadata][(ptr,len) x buffers][child_entry x children]`; output points at a
-  [plan](#the-plan-vocabulary) frame.
+  `[dtype][metadata][(ptr,len) x buffers][u32 child_ptr x children]`, where each child pointer
+  addresses an [array frame](#the-array-frame) the host wrote; output points at one array frame —
+  the node's canonical array.
 
 `flags` bit 0 is the parent's nullability, kept because it is free and it is what most kernels
 branch on; the full type travels as a real [dtype expression](#the-dtype-channel). Negative
 returns are error codes; panics become traps, which the host surfaces as decode errors.
 
-### Array boundary: Vortex's own layouts, not Arrow
+### The array frame
 
-Arrays cross in Vortex's canonical layouts — a **buffer table plus a shape tag** — with no schema
-and no Arrow dependency.
+Arrays cross in **both directions** in one recursive wire format that mirrors Vortex's `Canonical`
+enum shape for shape. There is no schema in it: the host already holds the node's `DType`, the
+guest declared its children's dtypes, and every frame is read *against* a dtype the reader trusts.
 
-The boundary *was* the Arrow C Data Interface. It was removed because Arrow C FFI is a
-**schema-carrying protocol and this boundary has no schema to carry**: the host already holds the
-node's `DType`, and the guest declares its children's dtypes itself. The round trip therefore had
-the guest write a format string that the host parsed back into a type it already knew, ran
-`ArrayData::try_new` revalidation over, and then converted into Vortex's representation. For
-strings that conversion was also lossy in cost: Arrow utf8's i32 offsets import as `VarBin`, which
-is **not** canonical, so every string kernel paid a second full conversion of the heap.
+```text
+frame = [u8 shape][u8 param][u8 validity][u8 pad][u32 len][u32 validity_ptr]
+        [u32 n_buffers][(u32 ptr, u32 len) × n_buffers]
+        [u32 n_children][frame × n_children]          -- inline, preorder
+```
 
-- `shape` is `Primitive` (one values buffer), `Bool` (one bitmap), or `VarBinView` (16-byte views
-  plus the data buffers they reference — Vortex's canonical string form, which FSST now emits
-  directly).
-- `validity` is an **algebra** — `NonNullable | AllValid | AllInvalid | Bitmap` — so a
-  non-nullable or all-valid array transmits no bitmap at all. The Arrow-shaped channel copied one
-  for nothing.
-- Only primitive and boolean children are deliverable *into* the guest. That is not a limitation
-  in practice: anything else is declared `Reference` and never enters the sandbox.
+| `shape` | `param` | buffers | children | Vortex constructor on the way back |
+| --- | --- | --- | --- | --- |
+| `NULL` | | | | `NullArray::new` |
+| `BOOL` | | bitmap | | `BoolArray::try_new` |
+| `PRIMITIVE` | ptype | values | | `PrimitiveArray::from_byte_buffer` |
+| `DECIMAL` | storage width `I8..I256` | values | | `DecimalArray::try_new_handle` |
+| `VAR_BIN_VIEW` | | 16-byte views, then data buffers | | `VarBinViewArray::try_new` |
+| `LIST` | | | offsets, sizes, elements | `ListViewArray::try_new` |
+| `FIXED_SIZE_LIST` | | | elements | `FixedSizeListArray::try_new` |
+| `STRUCT` | | | one per field | `StructArray::try_new` |
+| `UNION` | | | type ids (`u8`, carries the outer validity), one per variant | `UnionArray::try_new` |
+| `MAP` | | | entries (a `LIST` of `{key, value}` structs) | `MapArray::try_new` |
+| `EXTENSION` | | | storage | `ExtensionArray::try_new` |
+
+- `validity` is an **algebra** — `NonNullable | AllValid | AllInvalid | Bitmap` — so a non-nullable
+  or all-valid array transmits no bitmap at all. Union, map, and extension frames carry no validity
+  of their own: it lives in the type-ids, entries, and storage child respectively, as in Vortex.
+- Strings cross as canonical views plus data buffers (which FSST and OnPair emit directly), lists
+  as list-views, so a sublist is a slice of the elements and never copied. For primitives and bools
+  the bytes are identical to Arrow's.
 - Bitmaps are byte-aligned via `shrink_offset` before crossing, closing the bit-offset hazard a
   sliced array's mask would otherwise cause.
+- **`Variant` is the one dtype with no frame.** Vortex defines no physical canonical layout for
+  variant values (canonicalization is the identity; the storage is a constant or chunked array of
+  variant scalars), so there is nothing to spell. A kernel may still *name* the type in the dtype
+  channel; asking it to produce or consume variant *values* is rejected with a clear error.
 
-For primitives and bools these bytes are identical to Arrow's; only the schema went away. What
-went with it: the `arrow-array`/`arrow-buffer`/`arrow-data`/`arrow-schema` dependencies, ~800
-lines of schema recursion, metadata-blob parsing, and dictionary handling — and the attack surface
-they carried.
+The boundary *was* the Arrow C Data Interface. It was removed because Arrow C FFI is a
+**schema-carrying protocol and this boundary has no schema to carry**, and because Arrow utf8's
+i32 offsets import as `VarBin`, which is not canonical, so every string kernel paid a second full
+conversion of the heap. What went with it: the `arrow-*` dependencies, ~800 lines of schema
+recursion, metadata-blob parsing, and dictionary handling — and the attack surface they carried.
+
+### What the host validates
+
+A returned frame is untrusted file data. It is parsed with a depth limit (32), a node budget
+(4096 frames), and a per-frame buffer cap (64), so a few hundred bytes of nested `LIST` tags cannot
+overflow the host stack or drive an unbounded allocation. It is then *built* against the node's
+dtype, level by level:
+
+| check | where |
+| --- | --- |
+| `shape` matches the dtype at this level; `param` matches the ptype or a valid decimal width | `ArrayDescriptor::build` |
+| every buffer lies inside guest memory; values buffers are exactly `len × width` bytes; bitmaps at least `ceil(len / 8)` | `copy_out`, `build` |
+| a non-nullable dtype gets no validity; a validity bitmap is `len` bits | `validity` |
+| child count matches the dtype (fields, variants, `3` for a list, `1` for FSL/map/extension) | `expect_children` |
+| list offsets and sizes are non-nullable integers with one entry per list, and every `offset + size` lands inside the elements | `ListViewArray::try_new` |
+| every string view's buffer index, offset, and size are in range, and utf8 is valid | `VarBinViewArray::try_new` |
+| decimal storage is wide enough for the precision | `DecimalArray::try_new_handle` |
+| union type ids are the variants' declared tags; map keys are non-nullable; extension storage matches | `UnionArray::try_new`, `MapArray::try_new`, `ExtensionArray::try_new` |
+| every level's length and dtype equal what was asked for | `build`, then `WasmEncodingPlugin::deserialize` |
+
+Guest memory dies with the instance, so each buffer is copied out once; the copy is where the
+alignment Vortex wants (`ByteBuffer::copy_from_aligned`) is applied, so the guest writes plain
+bytes and never has to know that a `DecimalArray<i128>` wants 16-byte alignment.
 
 ### Memory
 
@@ -252,7 +287,7 @@ frames, the raw buffers, the child structs) lands aligned, so kernels view typed
 place**: wasm32 is little-endian, matching the serialized format, so e.g. the bitpacked kernel
 casts its packed buffer to `&[u32]` (`align_to`, checked) instead of copying words out.
 
-Today the two shipped kernels disable the `runtime` feature because a dependency links `std`
+Today the bitpacked and FSST kernels disable the `runtime` feature because a dependency links `std`
 (fastlanes' `num-traits` edge lacks `default-features = false`; fsst-rs is not `#![no_std]`) —
 `std`'s dlmalloc/panic machinery then costs ~16 KB per blob. Both are one-PR fixes in
 SpiralDB-owned crates; with the fastlanes fix applied locally, the identical kernel source builds
@@ -270,12 +305,10 @@ validity]` children; unpacks 1024-element FastLanes chunks with the **same [`fas
 kernels the native encoding uses**. The packed buffer is **cast, not copied** (`vx_alloc`'s
 alignment guarantee + wasm32's little-endianness), and full in-range chunks unpack directly into
 the output — mirroring the native `decode_into` fast path — with scratch only for a sliced first
-chunk and a partial trailer. Patches overwrite `index - patches.offset` in the sandbox rather
-than going through `PlanBuilder::patch`: bit-packing's patch values are always the parent's own
-primitive type and there are few of them, so reading them costs less than the output-length index
-array a plan-level patch needs. The validity child carries through. Scope: 4-byte primitives — other widths are pure monomorphization at ~25 KB of
-unrolled unpack code per width family. Blob: **~51 KB** (~35 KB once fastlanes-rs's
-`num-traits` edge stops linking `std`; the unpack kernels dominate the rest).
+chunk and a partial trailer. Patches overwrite `index - patches.offset` in the sandbox, exactly as
+the native `apply_patches_to_uninit_range` does. The validity child carries through. Scope: 4-byte
+primitives — other widths are pure monomorphization at ~25 KB of unrolled unpack code per width
+family. Blob: **~58 KB** (the unpack kernels dominate; see [Binary size](#binary-size)).
 
 This is the shape of a kernel that genuinely computes. It takes a buffer, reads it as typed words
 in place, and writes elements:
@@ -292,15 +325,13 @@ for chunk in 0..num_chunks {
     unsafe { BitPacking::unchecked_unpack(bit_width, chunk_words, &mut out[dst..dst + CHUNK]) };
 }
 
-Ok(plan.materialized(DTypeExpr::parent(), Decoded::Primitive(DecodedPrimitive {
-    ptype, len: node.len, values, validity,
-})))
+Ok(Decoded::Primitive(DecodedPrimitive { ptype, len: node.len, values, validity }))
 ```
 
-`Materialized` is the only opcode that moves bytes, and this is what it is for: there is no
-re-arrangement of an existing child that produces bit-unpacked output, so something has to compute
-it. `DTypeExpr::parent()` names the output type without the kernel having to know what it is — the
-buffer layout alone would not say whether those four-byte values are `u32`, `i32`, or `f32`.
+There is no re-arrangement of an existing child that produces bit-unpacked output, so something
+has to compute it. The kernel reads the ptype off `node.dtype()` — the buffer layout alone would
+not say whether those four-byte values are `u32`, `i32`, or `f32` — and the host types the result
+with the node's own dtype when it rebuilds the frame.
 
 ### `vortex.fsst` (`encodings/fsst/wasm`)
 
@@ -313,7 +344,7 @@ sums of the uncompressed lengths are exactly the output utf8 offsets. Blob: **~2
 
 OnPair is FSST-shaped — a trained dictionary in buffer 0, a stream of fixed-width codes indexing
 it, per-row code boundaries, per-row uncompressed lengths — so its kernel is the same
-*value-producing* shape and returns one `Materialized` node. Two things about it are worth
+*value-producing* shape and returns a canonical string array. Two things about it are worth
 recording, because neither was true of the first two kernels.
 
 **Every child ptype comes from the metadata.** The four integer children flow through the ordinary
@@ -339,173 +370,67 @@ remove it.
 
 ### `vortex.runend` (`encodings/runend/wasm`) — the structural case
 
-Run-end is the canonical re-arranging encoding, and its kernel decodes **nothing**. It declares
-`ends` as `Values` (to build indices) and `values` as `Reference`, expands the run ends into one
-`u32` gather index per row — mirroring `trimmed_ends_iter`, so a sliced array's `offset` is
-honoured — and returns the plan `take(child(VALUES), indices)`. The host resolves the values child
-in its own encoding and calls `ArrayRef::take`, which builds a lazy `DictArray`: no
-canonicalization, no copy, no materialized output.
+Run-end is the canonical re-arranging encoding, and its kernel computes nothing about the values.
+It declares `ends` (a primitive) and `values` (the parent's own dtype, whatever that is), expands
+the run ends into one `u32` gather index per row — mirroring `trimmed_ends_iter`, so a sliced
+array's `offset` is honoured — and hands them to `Decoded::take`:
 
 ```rust
 fn children(header: &NodeHeader<'_>) -> GuestResult<Vec<ChildSpec>> {
     Ok(alloc::vec![
-        // Read: the kernel needs the run ends to build indices.
-        ChildSpec::values(DTypeExpr::primitive(ends_ptype, false), meta.num_runs),
-        // Named only: same dtype as the parent, whatever that is, never copied in.
-        ChildSpec::reference(DTypeExpr::parent(), meta.num_runs),
+        ChildSpec::new(DTypeExpr::primitive(ends_ptype, false), meta.num_runs),
+        // Same dtype as the parent, whatever that is: the kernel never needs to know.
+        ChildSpec::new(DTypeExpr::parent(), meta.num_runs),
     ])
 }
 
-fn decode(node: &NodeView<'_>, plan: &mut PlanBuilder) -> GuestResult<NodeId> {
+fn decode(node: &NodeView<'_>) -> GuestResult<Decoded> {
+    let ends = node.child(ENDS)?.as_primitive()?;
     // ... expand run ends into one u32 run index per output row ...
-    let values = plan.child(VALUES);              // a reference, not data
-    let indices = plan.materialized(DTypeExpr::primitive(PType::U32, false), /* … */);
-    Ok(plan.take(values, indices))                // the host gathers, lazily
+    Decoded::take(&node.child(VALUES)?, &indices)   // any dtype; every index bounds-checked
 }
 ```
 
-The only thing the kernel materializes is the index array. The values never enter the sandbox.
+`Decoded::take` is the SDK's one generic gather. It follows each canonical layout to its cheapest
+reading: primitives and decimals are copied by width, bools by bit, string *views* are gathered
+while the data buffers they point into are copied through once (no per-string copy), list offsets
+and sizes are gathered while the elements pass through untouched, and structs, unions, maps, and
+extension storage recurse. Validity is gathered alongside.
 
-The consequences are worth stating plainly, because they are the argument for the whole design:
+The consequences:
 
 - **The kernel is dtype-agnostic.** The *native* decoder needs three separate implementations
   (bool / primitive / varbinview) and `vortex_bail!`s on anything else. This kernel has none —
-  run-end over strings works with zero string code in the guest, and is covered by a test.
-- **It is 5.9 KB**, versus 51 KB for bitpacked. Not decoding is cheap.
+  run-end over strings, and over a `struct { utf8?, list<i32>, timestamp? }?` the native decoder
+  rejects outright, both work with zero dtype-specific code in the guest, and both are covered by
+  tests.
 - **Validity falls out.** Run-end's output validity is the values' validity gathered through the
   same runs; `take` reproduces that, so the kernel never touches validity.
+- **It is 18 KB.** The generic gather is real code, monomorphized over the canonical shapes; the
+  earlier lazy version that only *named* its child was 5.9 KB.
 
-### The counterfactual: run-end expanded inside the sandbox
+### What materializing costs
 
-Nothing stops a kernel from doing the expansion itself. It is worth writing out, because the
-version that looks simpler is the one that loses capability.
+The previous revision of this kernel returned `take(child(VALUES), indices)` as a plan, and the
+host evaluated it with `ArrayRef::take` over the child in its *own* encoding — a lazy `DictArray`,
+no canonicalization, nothing copied in. That is what was given up:
 
-Only two lines change in `children` — `reference` becomes `values`, which obliges the host to
-canonicalize the child and copy every element into guest memory. Then `decode` expands run by run
-and returns a `Materialized` node instead of a `Take`:
-
-```rust
-let decoded = match node.child(VALUES)? {
-    ChildView::Primitive(values) => {
-        let width = values.ptype.byte_width();
-        let mut out: Vec<u8> = Vec::with_capacity(node.len * width);
-        for (run, end) in boundaries {
-            let value = &values.values[run * width..(run + 1) * width];
-            for _ in filled..end { out.extend_from_slice(value); }
-            filled = end;
-        }
-        Decoded::Primitive(DecodedPrimitive { ptype: values.ptype, len: node.len, values: out, .. })
-    }
-    ChildView::Bool(values) => { /* the same loop again, over a bitmap */ }
-    // Utf8, Binary, Decimal, List, Struct, Extension: no arm is possible.
-};
-Ok(plan.materialized(DTypeExpr::parent(), decoded))
-```
-
-That match needs no catch-all arm, and *that* is the finding: `ChildView` has exactly two variants,
-`Primitive` and `Bool`. A dtype the guest cannot read cannot be a `Values` child at all, so this
-kernel does not merely get slower on strings — it cannot be written for them. It has independently
-rediscovered the native decoder's limitation: `run_end_canonicalize` matches `Bool`, `Primitive`,
-`Utf8 | Binary`, and `vortex_bail!`s on the rest.
-
-The rest of the cost follows from the same choice:
-
-| | delegating (shipped) | expanded in-sandbox |
+| | delegating (previous) | materializing (shipped) |
 | --- | --- | --- |
-| Dtypes supported | every one, including nested | primitive and bool |
-| Bytes crossing in | `num_runs` ends | `num_runs` ends **+ the whole values child** |
-| Bytes crossing out | `len` × 4 index bytes | `len` × element width |
-| Host work | `take` → a lazy `DictArray` | copy the guest's output |
-| Guest code | one loop, no dtype dispatch | one loop per dtype family |
-| Compiled size | 5.9 KB | 6.8 KB |
+| Dtypes supported | every one, including nested | every one, including nested (Variant excepted) |
+| Bytes crossing in | `num_runs` ends | `num_runs` ends **+ the canonical values child** |
+| Bytes crossing out | `len` × 4 index bytes | `len` × element width, materialized |
+| Host work | `take` → a lazy `DictArray` | copy and validate the guest's output |
+| Host trust surface | a plan interpreter with 7 opcodes and its own validation table | one array-frame parser |
+| Kernel semantics depend on | which constructors the host offers | nothing outside the kernel |
+| Compiled size | 5.9 KB | 18 KB |
 
-The output-side byte counts are the same order, so this is not principally about the index array:
-it is that delegating keeps the *input* out of the sandbox and leaves the output unmaterialized
-until the scan asks for it. A filter that prunes the chunk pays for neither.
-
-The in-sandbox version is the right choice exactly when there is no re-arrangement to delegate —
-which is bitpacked's situation, and why both opcodes exist.
-
-## The plan vocabulary
-
-A kernel returns a **plan**, not an array: a small tree of operations over the node's children
-that the host evaluates. The design constraint that shapes everything else is that a kernel exists
-*precisely because the reader lacks that encoding*, so a plan may only name operations the reader
-is guaranteed to have. Every opcode is therefore one `vortex-array` constructor:
-
-| op | operands | evaluated as | needed by |
-| --- | --- | --- | --- |
-| `Materialized` | dtype + array descriptor | `convert::ArrayDescriptor::build` | bit-packing, FSST, zstd, ALP — anything computing new values |
-| `Child` | slot | the serialized child, in its own encoding | every re-arranging encoding |
-| `Take` | base, indices | `ArrayRef::take` → `DictArray` | run-end, dict |
-| `Slice` | base, start, stop | `ArrayRef::slice` → `SliceArray` | windowed children |
-| `Concat` | parts… | `ChunkedArray::try_new` | chunked; and patching, below |
-| `Constant` | scalar, len | `ConstantArray::new` | sparse's fill value |
-| `SetValidity` | base, mask | `MaskedArray::try_new` | encodings storing validity as a separate child |
-
-Two ops that a first sketch had, and that turned out not to be needed:
-
-- **`Patch`** is not a primitive. `patch(base, indices, values)` is exactly
-  `take(concat[base, values], merged)`, where `merged[i]` is either `i` or `base.len() + j`. The
-  guest SDK offers `PlanBuilder::patch` as sugar that emits those three nodes, so kernel authors
-  get the ergonomic op while the host's trusted evaluator stays smaller by one case. `PatchedArray`
-  would not have served anyway: it is a lane-transposed FastLanes-specific structure with
-  chunk-local `u16` indices, not a general overlay.
-- **`RunEnd`/`Dict`** are not ops. They *are* the encodings a kernel is standing in for, so
-  requiring them of the host would defeat the purpose.
-
-### Why the wire format is flat
-
-The plan is a flat postorder array, not a nested tree:
-
-```text
-[u32 n_nodes][u32 root][u32 aux_len][u32 reserved]
-[node × n_nodes]        node = [u8 op][u8 flags][u16 pad][u32 a][u32 b][u32 c]
-[aux bytes]
-```
-
-A node may only reference nodes at a **lower index**. This is the whole safety argument, and it
-buys three things at once:
-
-1. **Cycles are unrepresentable**, not merely rejected.
-2. **Evaluation is a `for` loop** over a slot table — no recursion, so no depth to bound and no
-   host stack to overflow. A nested encoding would have handed an untrusted file a recursive
-   descent parser.
-3. **Sharing is free.** References are by index, so a node used twice is evaluated once; the plan
-   is a DAG.
-
-Payloads that do not fit in three `u32`s — 64-bit ranges, scalars, `Concat`'s operand list, a
-`Materialized` descriptor — live in a trailing `aux` blob.
-
-### What the host validates
-
-The plan is untrusted file data, so every one of these is checked, and none of them may rely on
-anything the file says about itself:
-
-| checked at | check |
-| --- | --- |
-| parse | node count ≤ 1024; root in range; opcode known; **every operand strictly backwards**; aux payloads present and in range |
-| `Take` | indices are non-nullable unsigned primitives, and **every index is recomputed** against the base's length |
-| `Slice` | `start ≤ stop ≤ base.len()` |
-| `Concat` | ≤ 1024 parts, all of one dtype |
-| `SetValidity` | mask is a non-nullable boolean of the base's length |
-| `Constant` | scalar dtype is null/bool/primitive; length within budget |
-| every node | running total of intermediate rows ≤ 64× the node's length |
-| root | length and dtype match the node being decoded |
-
-Two of these deserve their reasoning spelled out.
-
-**Index bounds are recomputed, never read from statistics.** `Stat::Max` is itself
-attacker-controlled file data. It matters here because `ArrayRef::take` builds a `DictArray`,
-whose constructor checks only that codes are integral — an out-of-range index would surface later
-as a panic or as data from beyond the child. (The same reasoning applies to `Patches::new`, which
-in release builds only *debug*-asserts sortedness and bounds-checks the last index; that is why
-patching goes through `take`, which validates every index, rather than through `Patches`.)
-
-**A plan is cheap to write and can describe expensive work.** Twelve `Concat` nodes describe an
-array 4096× the size of their input. The ops build lazy arrays, so nothing blows up during
-evaluation — but the cost is real once the scan canonicalizes, so the running output total is
-capped at a multiple of the node's own length.
+The delegating design kept the input out of the sandbox and left the output unmaterialized until
+the scan asked for it; a filter that pruned the chunk paid for neither. Materializing pays both
+costs up front. What it buys is a closed contract: the kernel is the *complete* decoder for its
+encoding, the host does not need to grow a vocabulary (arithmetic, slicing, concatenation, ...)
+to keep up with new encodings, and there is exactly one thing to validate on the way back. The
+design accepts that trade; [laziness](#open-questions) is the open question it leaves.
 
 ## The dtype channel
 
@@ -515,24 +440,36 @@ It does not work: anything outside the enumerated set is then fatal rather than 
 `fixed_size_list` needs its size, and a kind tag shows none of it.
 
 So the ABI sends a real type, in a compact preorder encoding with a tag byte per node
-(`vortex-wasm-guest/src/dtype.rs` holds the grammar). It covers every `DType` variant.
+(`vortex-wasm-guest/src/dtype.rs` holds the grammar). **Every `DType` variant has a literal
+spelling, in both directions**: null, bool, primitive, decimal (precision, scale), utf8, binary,
+list, fixed-size list (size), struct (named fields), union (named variants with their type tags),
+variant, map (key, value, `keys_sorted`), and extension.
 
-The part that makes it *complete* rather than merely wide is **derivations**. A literal is not
-always writable: extension types resolve through a host vtable registry, so no byte encoding lets
-a guest construct one. And a kernel generic over its parent does not *want* to name a concrete
-type. So a guest may instead write a path:
+An extension literal carries the id, the vtable's **own serialized metadata** (the same bytes the
+file footer records — a Timestamp's unit and timezone, say), and the storage type. The host
+rebuilds it exactly as the footer's dtype is rebuilt: the session's extension registry finds the
+plugin for the id and asks it to deserialize the metadata against the storage type. An id the
+session does not know becomes a `ForeignExtDType` placeholder if the session `allow_unknown()`s
+foreign types, and is an error otherwise — the same policy as everywhere else in the reader, so a
+kernel cannot smuggle in a type the reader would have refused from the footer. A kernel can
+therefore both *inspect* an extension type it is handed (`node.dtype()?.extension_id()`,
+`extension_metadata()`, `storage()`) and *declare* one for a child.
+
+**Derivations** are the convenience on top. A kernel generic over its parent does not *want* to
+name a concrete type, so a guest may instead write a path:
 
 ```text
 Parent | Field(i, inner) | Element(inner) | Storage(inner) | Nullable(inner) | NonNullable(inner)
 ```
 
 These compose — `NonNullable(Element(Field(1, Parent)))` is valid — and the host resolves them
-against a `DType` it already trusts. The kernel never holds the type, only a route to it. That is
-how the run-end kernel stays dtype-agnostic: it declares its values child as `Parent` and works
-over strings, decimals, structs, or any type added later, with no code.
+against a `DType` it already trusts. That is how the run-end kernel stays dtype-agnostic: it
+declares its values child as `Parent` and works over strings, decimals, structs, or any type added
+later, with no code.
 
-The direction is asymmetric on purpose: the host only ever writes literals, because it holds the
-real type and has nothing to derive from.
+The host only ever writes literals, because it holds the real type and has nothing to derive from.
+Both directions are bounded the same way: 32 levels of nesting, 4096 named entries per struct or
+union, so a few hundred bytes of nested tags cannot overflow either stack.
 
 ## Editions and kernels: a new encoding, shipped with its decoder
 
@@ -565,63 +502,55 @@ with a kernel, the earliest reader is not the edition's `min_library_version` bu
 shipped the kernel loader and this ABI** — the same floor for every such component, forever, which
 is the point of the exercise.
 
-**Reading the inputs already works.** `vortex.decimal_byte_parts` has one child, `msp`, a signed
+**Reading the inputs works.** `vortex.decimal_byte_parts` has one child, `msp`, a signed
 primitive whose ptype is in the metadata; `_v2` adds `lower_part_count` unsigned 64-bit children.
-Every input is a primitive, so `ChildSpec::values(DTypeExpr::primitive(..))` covers all of them,
-and `node.dtype()?.kind()` hands the kernel `Decimal(precision, scale)` so it knows the target width.
+Every input is a primitive, so `ChildSpec::new(DTypeExpr::primitive(..))` covers all of them, and
+`node.dtype()?.kind()` hands the kernel `Decimal(precision, scale)` so it knows the target width.
 
-**Producing the output does not.** `Decoded` is `Primitive | Bool | VarBinView`; there is no
-decimal shape, so a decimal array cannot cross the boundary out. This is the "decimal output" gap
-below, and `decimal_byte_parts_v2` is the encoding that turns it from a footnote into the blocker.
-Closing it is bounded:
+**Producing the output works.** `Decoded::Decimal` carries one values buffer plus a storage-width
+tag (`I8`..`I256`); the host rebuilds it with `DecimalArray::try_new_handle`, which also checks the
+storage is wide enough for the precision. The guest writes plain bytes; the 16/32-byte alignment
+Vortex wants is applied by the copy every result already takes.
 
-- **`shape::DECIMAL` on the data channel** — one buffer plus a `DecimalType` tag (`I8`..`I256`,
-  which reuses the ptype byte), built on the host with `DecimalArray::try_new_handle` over a
-  `ByteBuffer::copy_from_aligned` of the guest bytes. The guest writes plain bytes; the 16/32-byte
-  alignment is a host concern, satisfied by the copy every result already takes.
-- **An `AsDecimal(child)` plan opcode**, for the v1 form specifically. `to_canonical_decimal` is
-  `DecimalArray::new_unchecked(msp.to_buffer::<P>(), decimal_dtype, validity)` — it *reinterprets*
-  the signed primitive's buffer as decimal storage of the same width, computing nothing. That is a
-  re-arranging encoding in disguise, and it maps 1:1 to a `vortex-array` constructor, so it belongs
-  in the vocabulary. With it the v1 kernel is one `Reference` child and one node, generic over every
-  storage width, and never copies the values into the sandbox.
-- **`Materialized` with the decimal shape**, for `_v2`. Combining parts is arithmetic —
-  `(msp as i128) << 64 | lower` — so it must be computed. `i128` is native on wasm32; `i256` is
-  two-limb arithmetic the guest writes itself, since it cannot link the host's type.
+- For the **v1** form, `to_canonical_decimal` *reinterprets* the signed primitive's buffer as
+  decimal storage of the same width, computing nothing. The kernel does the same: it takes the
+  `msp` child's bytes and re-emits them under the decimal shape with the child's validity. One
+  copy, no arithmetic, generic over every storage width.
+- For **`_v2`**, combining parts is arithmetic — `(msp as i128) << 64 | lower` — so it must be
+  computed. `i128` is native on wasm32; `i256` is two-limb arithmetic the guest writes itself,
+  since it cannot link the host's type.
 
 So: the kernel model handles the new encoding, the editions model handles who may write it, and the
-two meet at the wire id. What stands between the example and a passing round-trip is one result
-shape and one opcode, not a design change.
+two meet at the wire id. Nothing in the ABI stands between the example and a passing round-trip;
+what remains is writing the kernel.
 
 ## Remaining ABI gaps
 
-- **A kernel cannot *read* a string child.** Only primitive and boolean children are deliverable
-  into the sandbox. `ChildMode::Reference` covers every re-arranging encoding (the child never
-  enters the guest), so this only binds a hypothetical kernel that must inspect string bytes.
-- **Decimal output** is unsupported: `Decoded` has no decimal shape, so no kernel can produce a
-  decimal array. `decimal_byte_parts` — and any `_v2` of it — is blocked on exactly this; the
-  section above sizes the fix (a `DECIMAL` shape plus an `AsDecimal` opcode for the reinterpreting
-  v1 form).
-- **Arithmetic ops are still missing natively.** `for`/`bytebool`/`datetimeparts` would want
-  `WrappingAdd`, `Shl`, `Or` as plan nodes; `vortex-array`'s nearest equivalents are
-  checked/saturating, which would be a correctness regression. They must land natively before the
-  vocabulary can grow to cover those encodings.
-- **Child resolution is not memoized.** `SerializedArrayChildren::get` re-decodes the subtree on
-  every call, so a plan naming one slot 250 times decodes it 250 times. The node cap bounds this,
-  but a memo in the resolver closure is the real fix.
+- **`Variant` values cannot cross.** Every other dtype has an array frame; Vortex defines no
+  physical canonical layout for variant values, so there is nothing for a kernel to read or write.
+  The dtype channel still spells the type, and the host rejects a variant *array* in either
+  direction with a clear error rather than inventing a layout the rest of Vortex does not have.
+- **Every declared child is canonicalized and copied in.** A re-arranging kernel over a wide
+  values child pays for the whole child even if the runs it expands reference a fraction of it, and
+  `vortex.chunked` — whose children *are* the output — would copy every chunk into the sandbox and
+  back. The earlier plan-based design avoided this by letting the host gather lazily; the
+  materializing design accepts it for a closed contract (see
+  [What materializing costs](#what-materializing-costs)).
 - **`vortex.chunked` is inexpressible at any cost**: its per-chunk lengths are the *decoded
   contents of child 0*, and `children` is a single pure call with a mandatory length. Fixing it
-  requires an iterative declaration phase, not more plan ops.
-- **`children` cannot request a row window of a child.** `ChildSpec` carries a dtype, a length, and
-  an access mode, so a kernel that needs only part of a child still gets all of it. `vortex.onpair`
-  is the live case: `codes_offsets` bounds the run of `codes` belonging to the rows present, and the
-  native path point-looks-up those two boundaries and slices `codes` before materializing it. The
-  kernel slices the same window, but only after the host has already decoded and copied the whole
-  child in. Measured on a 161-of-400-row slice, the serialized array is 78% of the full array's
-  bytes rather than 40%, so the over-read is most of the codes stream. This is the `chunked` problem
-  in a milder form — the bound lives inside another child, which the single pure `vx_children` call
+  requires an iterative declaration phase.
+- **`children` cannot request a row window of a child.** `ChildSpec` carries a dtype and a length,
+  so a kernel that needs only part of a child still gets all of it. `vortex.onpair` is the live
+  case: `codes_offsets` bounds the run of `codes` belonging to the rows present, and the native
+  path point-looks-up those two boundaries and slices `codes` before materializing it. The kernel
+  slices the same window, but only after the host has already decoded and copied the whole child
+  in. Measured on a 161-of-400-row slice, the serialized array is 78% of the full array's bytes
+  rather than 40%, so the over-read is most of the codes stream. This is the `chunked` problem in a
+  milder form — the bound lives inside another child, which the single pure `vx_children` call
   cannot read — and it wants the same fix: a second declaration round, or a `ChildSpec` row range
   the host applies with `slice` before canonicalizing.
+- **No laziness.** The plugin decodes eagerly at deserialize time, and the kernel's output is
+  fully materialized. A filter that prunes a chunk still pays for decoding it.
 
 ## Runtime choice: `wasmtime`
 
@@ -652,9 +581,9 @@ battle-tested) and compile each kernel once, instantiating a fresh `Store` per n
 
 `wasmtime` is a sandbox: no host memory access beyond the explicit imports, no syscalls. We
 additionally cap guest linear-memory growth per decode via `StoreLimits`, cap declared
-child/buffer counts and schema recursion depth, validate every guest-returned structure through
-Arrow's own `ArrayData::try_new`, and treat any guest trap as a decode error (never a host
-panic). CPU-time bounding (wasmtime fuel or epoch interruption) is a planned follow-up. The
+child/buffer counts and type/frame recursion depth, rebuild every guest-returned frame through
+Vortex's own checked constructors (see [What the host validates](#what-the-host-validates)), and
+treat any guest trap as a decode error (never a host panic). CPU-time bounding (wasmtime fuel or epoch interruption) is a planned follow-up. The
 kernel is untrusted data from the file, exactly like array bytes; a buggy kernel can only corrupt
 *that array's* values, never host memory.
 
@@ -666,9 +595,14 @@ Compiled `wasm32-unknown-unknown`, size-optimized (`opt-level = "z"`, `lto`, `pa
 | kernel | size | notes |
 |---|---|---|
 | minimal SDK kernel (no_std, no deps) | ~4 KB | the SDK floor: allocator + buffer glue |
-| `vortex.fsst` | ~26 KB | fsst-rs `Decompressor` + `std` (fsst-rs is not yet no_std) |
-| `fastlanes.bitpacked` | ~51 KB | fastlanes unrolled unpack kernels + `std` via num-traits |
-| `fastlanes.bitpacked`, fully no_std | **~35 KB** | measured with num-traits `default-features = false` patched into fastlanes-rs |
+| `vortex.runend` | ~18 KB | the generic `Decoded::take` over every canonical shape; no decode library |
+| `vortex.onpair` | ~32 KB | the `onpair` crate's decoder |
+| `vortex.fsst` | ~33 KB | fsst-rs `Decompressor` + `std` (fsst-rs is not yet no_std) |
+| `fastlanes.bitpacked` | ~58 KB | fastlanes unrolled unpack kernels + `std` via num-traits |
+
+The recursive array frame and the generic gather cost every kernel a few KB over the earlier
+plan-returning SDK (bitpacked was 51 KB, fsst 26 KB); run-end tripled, because it now carries the
+gather instead of naming its child.
 
 The early prototype showed why the SDK avoids Vortex crates entirely: pulling `vortex-error`
 (which drags `jiff`/`prost`/`arrow-schema`) put kernels at ~74 KB before any real decode logic.
@@ -682,7 +616,7 @@ fixable upstream (`num-traits` default features in fastlanes-rs).
 2. **Arrow C Data Interface, then removed (done):** the boundary was briefly a complete, generic
    Arrow C FFI binding. It was deleted once it became clear Arrow is a schema-carrying protocol
    and this boundary carries no schema — see
-   [the array boundary](#array-boundary-vortexs-own-layouts-not-arrow).
+   [the array frame](#the-array-frame).
 3. **Session-level wasm encodings (done):** `WasmLayout` removed. Kernels decode the **real
    serialized parts** (`vx_children` plus the pushed `vx_decode` frame);
    [`WasmEncodingPlugin`] registers under the encoding's id and returns decoded arrays;
@@ -690,13 +624,10 @@ fixable upstream (`num-traits` default features in fastlanes-rs).
    Kernels live alongside their encodings (`encodings/fastlanes/wasm`, `encodings/fsst/wasm`)
    and reuse the same decode crates; parity is tested against natively-serialized bytes,
    including patches and nullable columns.
-4. **Structural decoding via `Take` (done):** the survey found that ~20 of ~29 encodings only
-   re-arrange a child, so the guest must not materialize them. `ChildMode::{Values, Reference}`
-   lets a kernel name a child without the host canonicalizing or copying it, and a gather lets the
-   host perform the re-arrangement with `ArrayRef::take` (a lazy `DictArray`). Proven by the
-   `vortex.runend` kernel — dtype-agnostic, and correct over strings, which the native decoder
-   needs a dedicated implementation for. Untrusted gather indices are validated by recomputing
-   bounds, never from statistics.
+4. **Structural decoding via a host-evaluated `Take` (done, superseded by 9):** the survey found
+   that ~20 of ~29 encodings only re-arrange a child. A per-child access mode let a kernel name a
+   child without the host canonicalizing or copying it, and the host performed the gather with
+   `ArrayRef::take` (a lazy `DictArray`). Proven by the `vortex.runend` kernel over strings.
 5. **Untrusted-input hardening (done):** `SerializedArray::decode` and the `ArrayChildren` blanket
    impl now return `VortexError` instead of `assert!`-ing, so a lying kernel cannot abort the
    process.
@@ -704,29 +635,35 @@ fixable upstream (`num-traits` default features in fastlanes-rs).
    writer, and loader-based registration at file-open — opt-in, file-scoped, and fetching only the
    kernels the reader actually lacks (see above). A `vx_abi_version` guest export makes a stale
    kernel a clear error rather than a misread frame.
-7. **Plan vocabulary and dtype channel (done):** `vx_decode` returns a flat postorder
-   [plan](#the-plan-vocabulary) — `Materialized`, `Child`, `Take`, `Slice`, `Concat`, `Constant`,
+7. **Plan vocabulary and dtype channel (done, plan superseded by 9):** `vx_decode` returned a
+   flat postorder plan — `Materialized`, `Child`, `Take`, `Slice`, `Concat`, `Constant`,
    `SetValidity` — each opcode one `vortex-array` constructor, evaluated in a single non-recursive
-   forward pass with per-node validation and an output budget. Patching is guest-side sugar over
-   `take`+`concat` rather than a host primitive. Types cross in the full
-   [dtype channel](#the-dtype-channel), with derivations so a kernel can name types it cannot
-   construct.
+   forward pass with per-node validation and an output budget. Types cross in the full
+   [dtype channel](#the-dtype-channel), with derivations.
 8. **A fourth kernel, `vortex.onpair` (done):** the first kernel written *against* the settled ABI
-   rather than alongside it, and it needed no ABI change — FSST's shape, so `Materialized` and the
-   dtype channel were already enough. What it did surface is the child-windowing gap below, plus a
-   dependency wart: `onpair` links `rand` for training, so the kernel crate has to select
-   `getrandom`'s custom backend to build for wasm32 at all.
-9. **Breadth (next):** more kernels (dict, ALP, sparse), the missing native arithmetic ops,
-   memoized child resolution, decimal output, kernel dedup + cross-file caching, CPU-time limits,
-   and the `wasm32` fallback runtime for the browser reader.
+   rather than alongside it, and it needed no ABI change — FSST's shape. What it did surface is the
+   child-windowing gap above, plus a dependency wart: `onpair` links `rand` for training, so the
+   kernel crate has to select `getrandom`'s custom backend to build for wasm32 at all.
+9. **Always materialize, every dtype (done):** the plan is gone. A kernel returns one canonical
+   [array frame](#the-array-frame) of the node's own dtype, and receives its children the same way,
+   with a frame shape for every `Canonical` variant — null, bool, primitive, decimal, string views,
+   list, fixed-size list, struct, union, map, extension — and `Variant` rejected explicitly. The
+   guest SDK's `Decoded::take` is the generic gather re-arranging kernels use in-sandbox. The dtype
+   channel gained extension literals with real metadata, resolved through the session registry in
+   both directions. Proven by `vortex.runend` over a nested struct-of-list-of-timestamp dtype the
+   native decoder cannot canonicalize.
+10. **Breadth (next):** more kernels (dict, ALP, sparse, `decimal_byte_parts`), kernel dedup +
+    cross-file caching, CPU-time limits, and the `wasm32` fallback runtime for the browser reader.
 
 Pushdown (filter/pruning into the kernel) is explicitly **out of scope** — WASM encodings only
 decompress; the engine filters on the decoded output.
 
 ## Open questions
 
-- **Laziness:** the plugin decodes eagerly at deserialize time. A lazy wrapper array (decode on
-  first execute) would let filters skip decodes for pruned ranges.
+- **Laziness:** the plugin decodes eagerly at deserialize time and the kernel materializes its
+  whole output. A lazy wrapper array (decode on first execute) would let filters skip decodes for
+  pruned ranges; a host-side gather for re-arranging kernels would keep wide children out of the
+  sandbox. Both were traded away for the closed contract above and could return behind it.
 - **Kernel caching key:** blob digest vs. segment id; cross-file caching in a session.
 - **Async vs. blocking:** running `wasmtime` on the IO runtime's blocking pool vs. a dedicated
   decode pool.

@@ -6,55 +6,29 @@
 use alloc::vec::Vec;
 
 use crate::abi::child_descriptor;
-use crate::abi::child_entry;
 use crate::abi::children_frame;
 use crate::abi::decode_frame;
-use crate::data::ChildView;
+use crate::data::ArrayView;
 use crate::dtype::DTypeExpr;
 use crate::dtype::DTypeView;
 use crate::error::GuestError;
 use crate::error::GuestResult;
 
-/// How the guest intends to use a serialized child.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ChildMode {
-    /// The guest reads this child's element bytes. The host canonicalizes it and copies it into
-    /// guest memory, so its dtype must be one the guest can read.
-    Values,
-    /// The guest only *names* this child in its plan (see [`PlanBuilder::child`](crate::plan::PlanBuilder::child)).
-    /// The host resolves it lazily in its own encoding and never canonicalizes or copies it —
-    /// so a referenced child may have **any** dtype, including nested ones the guest could
-    /// neither read nor reproduce.
-    Reference,
-}
-
-/// One serialized child's dtype, logical length, and access mode.
+/// One serialized child's dtype and logical length.
+///
+/// The host decodes every declared child, canonicalizes it, and copies it into guest memory
+/// before `vx_decode`, whatever its dtype.
 pub struct ChildSpec {
     /// The child's dtype, as a literal or a derivation of the parent's.
     pub dtype: DTypeExpr,
     /// The child's logical element count.
     pub len: u64,
-    /// Whether the guest reads this child or merely references it.
-    pub mode: ChildMode,
 }
 
 impl ChildSpec {
-    /// A child the guest will read.
-    pub fn values(dtype: DTypeExpr, len: u64) -> Self {
-        Self {
-            dtype,
-            len,
-            mode: ChildMode::Values,
-        }
-    }
-
-    /// A child the guest will only name in its plan.
-    pub fn reference(dtype: DTypeExpr, len: u64) -> Self {
-        Self {
-            dtype,
-            len,
-            mode: ChildMode::Reference,
-        }
+    /// Declare a child.
+    pub fn new(dtype: DTypeExpr, len: u64) -> Self {
+        Self { dtype, len }
     }
 }
 
@@ -92,9 +66,7 @@ impl<'a> NodeHeader<'a> {
     pub fn dtype(&self) -> GuestResult<DTypeView<'a>> {
         DTypeView::new(self.dtype)
     }
-}
 
-impl<'a> NodeHeader<'a> {
     /// Parse a `vx_children` input frame.
     pub fn parse(input: &'a [u8]) -> GuestResult<Self> {
         if input.len() < children_frame::HEADER {
@@ -124,12 +96,7 @@ pub fn write_child_specs(specs: &[ChildSpec]) -> i32 {
     let mut out = Vec::with_capacity(4 + specs.len() * (child_descriptor::HEADER + 2));
     out.extend_from_slice(&(specs.len() as u32).to_le_bytes());
     for spec in specs {
-        let mode = match spec.mode {
-            ChildMode::Values => child_descriptor::MODE_VALUES,
-            ChildMode::Reference => child_descriptor::MODE_REFERENCE,
-        };
         let dtype = spec.dtype.as_bytes();
-        out.extend_from_slice(&[mode, 0, 0, 0]);
         out.extend_from_slice(&(dtype.len() as u32).to_le_bytes());
         out.extend_from_slice(&spec.len.to_le_bytes());
         out.extend_from_slice(dtype);
@@ -170,7 +137,7 @@ impl<'a> NodeView<'a> {
         let metadata_start = decode_frame::HEADER + dtype_len;
         let buffers_table = metadata_start + metadata_len;
         let children_table = buffers_table + n_buffers * 8;
-        if input.len() < children_table + n_children * child_entry::SIZE {
+        if input.len() < children_table + n_children * 4 {
             return Err(GuestError::new("decode frame tables out of bounds"));
         }
         Ok(Self {
@@ -219,12 +186,13 @@ impl<'a> NodeView<'a> {
         self.n_children
     }
 
-    /// The `i`th host-supplied `Values` child, as a typed view.
-    pub fn child(&self, i: usize) -> GuestResult<ChildView> {
+    /// The `i`th host-decoded child, canonical, of whatever dtype the kernel declared for it.
+    pub fn child(&self, i: usize) -> GuestResult<ArrayView<'a>> {
         if i >= self.n_children {
             return Err(GuestError::new("child index out of bounds"));
         }
-        let start = self.children_table + i * child_entry::SIZE;
-        crate::data::read_child(&self.input[start..start + child_entry::SIZE])
+        let ptr = read_u32(self.input, self.children_table + i * 4);
+        // SAFETY: the host wrote this frame into guest memory before calling vx_decode.
+        unsafe { ArrayView::parse(ptr) }
     }
 }

@@ -27,7 +27,6 @@ use vortex_wasm_guest::GuestError;
 use vortex_wasm_guest::GuestResult;
 use vortex_wasm_guest::WasmEncoding;
 use vortex_wasm_guest::abi::PType;
-use vortex_wasm_guest::data::ChildView;
 use vortex_wasm_guest::data::Decoded;
 use vortex_wasm_guest::data::DecodedVarBinView;
 use vortex_wasm_guest::data::Validity;
@@ -37,8 +36,6 @@ use vortex_wasm_guest::guest_ensure;
 use vortex_wasm_guest::node::ChildSpec;
 use vortex_wasm_guest::node::NodeHeader;
 use vortex_wasm_guest::node::NodeView;
-use vortex_wasm_guest::plan::NodeId;
-use vortex_wasm_guest::plan::PlanBuilder;
 use vortex_wasm_guest::proto::Field;
 use vortex_wasm_guest::proto::ProtoReader;
 
@@ -78,17 +75,17 @@ impl WasmEncoding for Fsst {
     fn children(header: &NodeHeader<'_>) -> GuestResult<Vec<ChildSpec>> {
         let meta = parse_metadata(header.metadata)?;
         let mut specs = Vec::with_capacity(3);
-        specs.push(ChildSpec::values(
+        specs.push(ChildSpec::new(
             DTypeExpr::primitive(meta.uncompressed_lengths_ptype, false),
             header.len as u64,
         ));
         // VarBin offsets are len + 1.
-        specs.push(ChildSpec::values(
+        specs.push(ChildSpec::new(
             DTypeExpr::primitive(meta.codes_offsets_ptype, false),
             header.len as u64 + 1,
         ));
         if header.n_children == 3 {
-            specs.push(ChildSpec::values(DTypeExpr::bool(false), header.len as u64));
+            specs.push(ChildSpec::new(DTypeExpr::bool(false), header.len as u64));
         }
         guest_ensure!(
             specs.len() == header.n_children,
@@ -97,7 +94,7 @@ impl WasmEncoding for Fsst {
         Ok(specs)
     }
 
-    fn decode(node: &NodeView<'_>, plan: &mut PlanBuilder) -> GuestResult<NodeId> {
+    fn decode(node: &NodeView<'_>) -> GuestResult<Decoded> {
         guest_ensure!(
             node.nbuffers() == 3,
             "fsst expects [symbols, symbol_lengths, codes] buffers"
@@ -124,9 +121,7 @@ impl WasmEncoding for Fsst {
         let decompressor = Decompressor::new(&symbols, symbol_lengths);
 
         // The codes heap is bounded by the final codes offset.
-        let ChildView::Primitive(codes_offsets) = node.child(1)? else {
-            return Err(GuestError::new("fsst codes offsets must be primitive"));
-        };
+        let codes_offsets = node.child(1)?.as_primitive()?;
         guest_ensure!(
             codes_offsets.len == node.len + 1,
             "fsst codes offsets must have len + 1 entries"
@@ -139,20 +134,14 @@ impl WasmEncoding for Fsst {
         // lengths' prefix sums are the output utf8 offsets.
         let values = decompressor.decompress(&codes[..codes_end]);
 
-        let ChildView::Primitive(lengths) = node.child(0)? else {
-            return Err(GuestError::new(
-                "fsst uncompressed lengths must be primitive",
-            ));
-        };
+        let lengths = node.child(0)?.as_primitive()?;
         guest_ensure!(
             lengths.len == node.len,
             "fsst uncompressed lengths must have len entries"
         );
 
         let validity = if node.nchildren() == 3 {
-            let ChildView::Bool(bits) = node.child(2)? else {
-                return Err(GuestError::new("fsst validity child must be boolean"));
-            };
+            let bits = node.child(2)?.as_bool()?;
             Validity::Bitmap(bits.bits[..node.len.div_ceil(8)].to_vec())
         } else if node.nullable {
             Validity::AllValid
@@ -162,17 +151,14 @@ impl WasmEncoding for Fsst {
 
         // Emit Vortex's canonical view layout directly. The previous Arrow-shaped output used i32
         // offsets, which the host imported as `VarBin` — not canonical — costing a second full
-        // conversion of the whole heap on every string decode.
-        // The parent dtype carries through: FSST compresses both Utf8 and Binary, and the view
-        // layout alone does not distinguish them.
-        Ok(plan.materialized(
-            DTypeExpr::parent(),
-            Decoded::VarBinView(DecodedVarBinView::from_heap(
-                values,
-                (0..node.len).map(|i| lengths.value_u64(i) as usize),
-                validity,
-            )?),
-        ))
+        // conversion of the whole heap on every string decode. The host types the result with the
+        // node's own dtype: FSST compresses both Utf8 and Binary, and the view layout alone does
+        // not distinguish them.
+        Ok(Decoded::VarBinView(DecodedVarBinView::from_heap(
+            values,
+            (0..node.len).map(|i| lengths.value_u64(i) as usize),
+            validity,
+        )?))
     }
 }
 

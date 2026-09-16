@@ -16,9 +16,16 @@ use vortex_array::ArrayRef;
 use vortex_array::IntoArray;
 use vortex_array::VortexSessionExecute;
 use vortex_array::array_session;
+use vortex_array::arrays::ExtensionArray;
+use vortex_array::arrays::ListViewArray;
 use vortex_array::arrays::PrimitiveArray;
+use vortex_array::arrays::StructArray;
 use vortex_array::arrays::VarBinViewArray;
 use vortex_array::assert_arrays_eq;
+use vortex_array::dtype::FieldName;
+use vortex_array::dtype::Nullability;
+use vortex_array::extension::datetime::TimeUnit;
+use vortex_array::extension::datetime::Timestamp;
 use vortex_array::serde::SerializeOptions;
 use vortex_array::serde::SerializedArray;
 use vortex_array::session::ArraySession;
@@ -26,6 +33,7 @@ use vortex_array::validity::Validity;
 use vortex_buffer::Buffer;
 use vortex_buffer::ByteBuffer;
 use vortex_buffer::ByteBufferMut;
+use vortex_buffer::buffer;
 use vortex_error::VortexResult;
 use vortex_fastlanes::BitPacked;
 use vortex_fastlanes::BitPackedArrayExt;
@@ -208,8 +216,8 @@ fn fsst_nullable_decodes_via_wasm() -> VortexResult<()> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Run-end: the structural case. The kernel never sees the values child — it only expands the run
-// ends into gather indices and names the child, so the host gathers it lazily. That is what lets
+// Run-end: the structural case. The kernel expands the run ends into gather indices and applies
+// the SDK's generic `take` to the canonical values child, whatever its dtype. That is what lets
 // these tests cover dtypes the kernel contains no code for.
 // ---------------------------------------------------------------------------------------------
 
@@ -234,8 +242,8 @@ fn runend_primitive_decodes_via_wasm() -> VortexResult<()> {
 
 #[test]
 fn runend_strings_decode_via_wasm() -> VortexResult<()> {
-    // The payoff of ChildMode::Reference: the kernel has no string code at all, and strings never
-    // enter guest memory. The native decoder needs a dedicated varbinview implementation for this.
+    // The kernel has no string code at all: it gathers the canonical view layout, copying each
+    // referenced byte once. The native decoder needs a dedicated varbinview implementation.
     let session = native_session();
     let mut ctx = session.create_execution_ctx();
 
@@ -308,8 +316,8 @@ fn runend_sliced_decodes_via_wasm() -> VortexResult<()> {
 
 #[test]
 fn runend_nullable_decodes_via_wasm() -> VortexResult<()> {
-    // Run-end's output validity is the values' validity gathered through the same runs; the host
-    // `take` reproduces that without the kernel touching validity at all.
+    // Run-end's output validity is the values' validity gathered through the same runs; the
+    // generic `take` reproduces that without the kernel touching validity at all.
     let session = native_session();
     let mut ctx = session.create_execution_ctx();
 
@@ -325,6 +333,72 @@ fn runend_nullable_decodes_via_wasm() -> VortexResult<()> {
         RUNEND_KERNEL,
     )?;
     assert_arrays_eq!(decoded, array, &mut ctx);
+    Ok(())
+}
+
+#[test]
+fn runend_nested_dtype_decodes_via_wasm() -> VortexResult<()> {
+    // The payoff of materializing through the generic `take`: run-end over a dtype the *native*
+    // decoder rejects outright (`run_end_canonicalize` bails on anything but bool, primitive,
+    // decimal, and strings). The kernel has no struct, list, or timestamp code — it follows the
+    // canonical layout it is handed, and the host rebuilds the result level by level.
+    let session = native_session();
+    let mut ctx = session.create_execution_ctx();
+
+    // Five run values of `struct { name: utf8?, tags: list<i32>, at: timestamp[ms]? }?`.
+    let names = VarBinViewArray::from_iter_nullable_str([
+        Some("alpha"),
+        None,
+        Some("gamma, long enough to spill into the data buffer"),
+        Some("delta"),
+        Some("epsilon"),
+    ])
+    .into_array();
+    let tags = ListViewArray::try_new(
+        PrimitiveArray::new(
+            buffer![1i32, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            Validity::NonNullable,
+        )
+        .into_array(),
+        PrimitiveArray::new(buffer![0i32, 2, 2, 5, 9], Validity::NonNullable).into_array(),
+        PrimitiveArray::new(buffer![2i32, 0, 3, 4, 1], Validity::NonNullable).into_array(),
+        Validity::NonNullable,
+    )?
+    .into_array();
+    let at = ExtensionArray::try_new(
+        Timestamp::new(TimeUnit::Milliseconds, Nullability::Nullable).erased(),
+        PrimitiveArray::new(
+            buffer![1_700_000_000_000i64, 2, 0, 4, 5],
+            Validity::from_iter([true, true, false, true, true]),
+        )
+        .into_array(),
+    )?
+    .into_array();
+    let names_fields: Vec<FieldName> = vec!["name".into(), "tags".into(), "at".into()];
+    let run_values = StructArray::try_new(
+        names_fields.into(),
+        [names, tags, at],
+        5,
+        Validity::from_iter([true, true, true, false, true]),
+    )?
+    .into_array();
+
+    let ends = PrimitiveArray::new(buffer![3u32, 7, 8, 12, 20], Validity::NonNullable).into_array();
+    let encoded = RunEnd::try_new(ends, run_values.clone(), &mut ctx)?;
+    let expected = run_values.take(
+        buffer![
+            0u32, 0, 0, 1, 1, 1, 1, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4
+        ]
+        .into_array(),
+    )?;
+
+    let decoded = round_trip_via_wasm(
+        encoded.into_array(),
+        &session,
+        "vortex.runend",
+        RUNEND_KERNEL,
+    )?;
+    assert_arrays_eq!(decoded, expected, &mut ctx);
     Ok(())
 }
 

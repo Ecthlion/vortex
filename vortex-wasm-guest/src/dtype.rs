@@ -51,7 +51,9 @@
 //! it. The host resolves the path against the dtype it already has.
 //!
 //! Only the guest→host direction uses derivations. The host always writes literals — it holds the
-//! real [`DType`] and has nothing to derive from.
+//! real `DType` and has nothing to derive from. Extension literals carry the type's real
+//! serialized metadata in both directions, and the host resolves a guest-written one through its
+//! dtype registry, so a kernel may name any extension type the reader knows.
 
 use alloc::vec::Vec;
 
@@ -64,8 +66,8 @@ use crate::error::GuestResult;
 
 /// Maximum type nesting the guest will parse, matching the host's limit.
 ///
-/// Bounds recursion in [`DTypeView::skip`] so a deeply nested type traps at a defined point
-/// instead of overflowing the guest stack.
+/// Bounds recursion when skipping over a nested type so a deeply nested one traps at a defined
+/// point instead of overflowing the guest stack.
 pub const MAX_DEPTH: usize = 32;
 
 /// Read a LEB128 unsigned varint, returning the value and the number of bytes consumed.
@@ -140,7 +142,7 @@ pub enum DTypeKind {
     },
 }
 
-/// A borrowed, lazily parsed view of an encoded [`DType`].
+/// A borrowed, lazily parsed view of an encoded Vortex `DType`.
 ///
 /// Parsing is on demand: constructing a view validates only the tag byte, and walking into a
 /// composite type happens when a caller asks for a field or element. A kernel that only needs to
@@ -289,6 +291,29 @@ impl<'a> DTypeView<'a> {
         )
     }
 
+    /// The extension type's serialized metadata — what its vtable's `serialize_metadata` wrote.
+    ///
+    /// The bytes are the extension's own format (a Timestamp's, say, is its prost message);
+    /// the SDK does not interpret them.
+    pub fn extension_metadata(&self) -> GuestResult<&'a [u8]> {
+        if self.kind()? != DTypeKind::Extension {
+            return Err(GuestError::new("dtype is not an extension"));
+        }
+        let (id_len, n) = read_varint(self.bytes, 1)?;
+        let after_id =
+            1 + n + usize::try_from(id_len).map_err(|_| GuestError::new("id too long"))?;
+        let (meta_len, n) = read_varint(self.bytes, after_id)?;
+        let start = after_id + n;
+        let end = start
+            .checked_add(
+                usize::try_from(meta_len).map_err(|_| GuestError::new("metadata too long"))?,
+            )
+            .ok_or(GuestError::new("truncated extension dtype"))?;
+        self.bytes
+            .get(start..end)
+            .ok_or(GuestError::new("truncated extension metadata"))
+    }
+
     /// The extension type's id, as raw UTF-8 bytes.
     pub fn extension_id(&self) -> GuestResult<&'a [u8]> {
         if self.kind()? != DTypeKind::Extension {
@@ -421,10 +446,11 @@ impl<'a> DTypeView<'a> {
 
 /// A type expression the guest writes to name a child's dtype.
 ///
-/// Prefer the derivations ([`Self::PARENT`], [`Self::field`], ...) over literals wherever the
-/// kernel does not genuinely need to know the type. A kernel that derives is automatically
-/// generic over every dtype Vortex has, including ones it could not construct: extension types
-/// need a host vtable, and nothing here can conjure one.
+/// Every Vortex dtype has a literal spelling here, extension types included
+/// ([`Self::extension`] carries the id, the serialized metadata, and the storage type). Still,
+/// prefer the derivations ([`Self::parent`], [`Self::field`], ...) wherever the kernel does not
+/// genuinely need to know the type: a kernel that derives is automatically generic over every
+/// dtype Vortex has, including ones added after the kernel was built.
 pub struct DTypeExpr {
     bytes: Vec<u8>,
 }
@@ -534,6 +560,22 @@ impl DTypeExpr {
         let mut expr = Self::literal(kind::UNION, nullable);
         write_varint(&mut expr.bytes, n);
         expr.bytes.extend_from_slice(&body);
+        expr
+    }
+
+    /// An extension type: `id` and `metadata` as the host's registry expects them, over `storage`.
+    ///
+    /// The host resolves `id` in its dtype registry and hands `metadata` to that type's own
+    /// deserializer, so this can name any extension type the reader has registered. For the
+    /// node's own extension type, or one reachable from it, prefer [`Self::parent`] and
+    /// [`Self::storage`]: they need no knowledge of the metadata format at all.
+    pub fn extension(id: &str, metadata: &[u8], storage: DTypeExpr, nullable: bool) -> Self {
+        let mut expr = Self::literal(kind::EXTENSION, nullable);
+        write_varint(&mut expr.bytes, id.len() as u64);
+        expr.bytes.extend_from_slice(id.as_bytes());
+        write_varint(&mut expr.bytes, metadata.len() as u64);
+        expr.bytes.extend_from_slice(metadata);
+        expr.bytes.extend_from_slice(&storage.bytes);
         expr
     }
 

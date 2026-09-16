@@ -10,12 +10,11 @@
 //! decoded array — so wasm-backed encodings are decode-only and nothing wasm-specific survives
 //! past deserialization.
 //!
-//! A kernel does not return an array, it returns a *plan* — a small tree of operations over the
-//! node's children that the host evaluates with its own lazy arrays.
-//! Value-producing encodings end their plan in one materialized node. Re-arranging encodings
-//! (run-end, dict, sparse, ...) name their children and say what to do with them, so those
-//! children are never canonicalized, never copied into the sandbox, and may have any dtype —
-//! including ones the kernel could not represent.
+//! A kernel always materializes its output: it returns a canonical array of the node's own dtype,
+//! whatever that dtype is. Children the kernel declares are decoded by the host (natively, or
+//! recursively through another kernel), canonicalized, and copied into the sandbox, so a kernel
+//! that re-arranges a child (run-end, dict, sparse, ...) gathers it in-sandbox with a generic
+//! `take` that works for any dtype.
 //!
 //! Kernels never shadow native decoders: [`register_wasm_encodings`] skips any id already present
 //! in the session registry.
@@ -27,20 +26,16 @@ use vortex_array::ArrayId;
 use vortex_array::ArrayPlugin;
 use vortex_array::ArrayRef;
 use vortex_array::ArraySerialization;
-use vortex_array::Canonical;
 use vortex_array::VortexSessionExecute;
 use vortex_array::session::ArraySession;
 use vortex_buffer::ByteBuffer;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 use vortex_error::vortex_ensure;
-use vortex_error::vortex_err;
 use vortex_session::SessionExt;
 use vortex_session::VortexSession;
 
-use crate::ChildMode;
 use crate::WasmKernel;
-use crate::plan::PlanContext;
 
 /// An array encoding whose decoder is an embedded WebAssembly kernel.
 pub struct WasmEncodingPlugin {
@@ -110,51 +105,17 @@ impl ArrayPlugin for WasmEncodingPlugin {
 
         let mut decoder = self.kernel.decoder()?;
 
-        // Ask the kernel which children the node has and how it intends to use each.
-        let descriptors = decoder.children(dtype, len, children.len(), metadata)?;
+        // Ask the kernel for the dtype and length of every serialized child, then decode each one
+        // in its own encoding. The kernel receives them canonicalized.
+        let descriptors = decoder.children(dtype, len, children.len(), metadata, session)?;
+        let decoded_children = descriptors
+            .iter()
+            .enumerate()
+            .map(|(idx, d)| children.get(idx, &d.dtype, d.len))
+            .collect::<VortexResult<Vec<ArrayRef>>>()?;
 
-        // Only `Values` children are decoded and copied into the sandbox. `Reference` children are
-        // left alone here: they are resolved lazily below, in their own encoding, and only if the
-        // kernel's result actually names one.
-        let mut values_children = Vec::new();
-        for (idx, d) in descriptors.iter().enumerate() {
-            if d.mode == ChildMode::Values {
-                values_children.push(
-                    children
-                        .get(idx, &d.dtype, d.len)?
-                        .execute::<Canonical>(&mut ctx)?,
-                );
-            }
-        }
-
-        let (plan, guest_mem) =
-            decoder.decode(dtype, len, metadata, &buffers, &values_children, &mut ctx)?;
-
-        // Only the child slots the plan actually names get resolved, and each in its own encoding:
-        // a `Reference` child a plan does not mention costs nothing at all.
-        let id = self.id;
-        let mut resolve = |slot: usize| -> VortexResult<ArrayRef> {
-            let descriptor = descriptors.get(slot).ok_or_else(|| {
-                vortex_err!(
-                    "wasm kernel for {id} names child {slot}, but only {} were declared",
-                    descriptors.len()
-                )
-            })?;
-            vortex_ensure!(
-                descriptor.mode == ChildMode::Reference,
-                "wasm kernel for {id} names child {slot} in its plan, but declared it as Values"
-            );
-            children.get(slot, &descriptor.dtype, descriptor.len)
-        };
-        let decoded = plan.evaluate(
-            &mut PlanContext {
-                dtype,
-                len,
-                child: &mut resolve,
-            },
-            &mut ctx,
-            &guest_mem,
-        )?;
+        let decoded =
+            decoder.decode(dtype, len, metadata, &buffers, &decoded_children, &mut ctx)?;
 
         vortex_ensure!(
             decoded.len() == len,

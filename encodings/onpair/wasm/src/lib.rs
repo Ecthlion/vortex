@@ -5,8 +5,8 @@
 //!
 //! OnPair is FSST-shaped: a trained dictionary in a buffer, a stream of fixed-width codes
 //! indexing it, and per-row boundaries. So this is a **value-producing** kernel like
-//! `vortex.fsst` — the decompressed bytes exist nowhere in the file, so there is nothing to
-//! delegate and the kernel returns a single `Materialized` node.
+//! `vortex.fsst` — the decompressed bytes exist nowhere in the file, so the kernel computes them
+//! and returns the canonical string array directly.
 //!
 //! Serialized parts consumed:
 //! - **metadata**: prost `OnPairMetadata` `{1: uncompressed_lengths_ptype, 3: dict_size,
@@ -34,8 +34,8 @@
 //! `codes_offsets` bounds the run of `codes` belonging to the rows actually present, and the
 //! native canonical path point-looks-up those two boundaries and slices `codes` before
 //! materializing it. This kernel slices the same window, but only *after* the host has already
-//! decoded and copied the whole `codes` child into guest memory: `ChildSpec` carries a dtype, a
-//! length, and an access mode, and cannot ask for a row range. The bound it would need lives
+//! decoded and copied the whole `codes` child into guest memory: `ChildSpec` carries a dtype and
+//! a length, and cannot ask for a row range. The bound it would need lives
 //! inside another child, which `vx_children` — a single pure call made before any child is
 //! decoded — cannot read. This is the same shape of gap that makes `vortex.chunked`
 //! inexpressible, in a milder form: onpair still decodes correctly, it just over-reads for a
@@ -54,7 +54,6 @@ use vortex_wasm_guest::GuestError;
 use vortex_wasm_guest::GuestResult;
 use vortex_wasm_guest::WasmEncoding;
 use vortex_wasm_guest::abi::PType;
-use vortex_wasm_guest::data::ChildView;
 use vortex_wasm_guest::data::Decoded;
 use vortex_wasm_guest::data::DecodedVarBinView;
 use vortex_wasm_guest::data::PrimitiveView;
@@ -65,8 +64,6 @@ use vortex_wasm_guest::guest_ensure;
 use vortex_wasm_guest::node::ChildSpec;
 use vortex_wasm_guest::node::NodeHeader;
 use vortex_wasm_guest::node::NodeView;
-use vortex_wasm_guest::plan::NodeId;
-use vortex_wasm_guest::plan::PlanBuilder;
 use vortex_wasm_guest::proto::Field;
 use vortex_wasm_guest::proto::ProtoReader;
 
@@ -128,7 +125,7 @@ fn parse_metadata(bytes: &[u8]) -> GuestResult<OnPairMeta> {
 }
 
 /// Widen a narrowed integer child to `u32`, the width `onpair` wants for dictionary offsets.
-fn widen_u32(values: &PrimitiveView) -> GuestResult<Vec<u32>> {
+fn widen_u32(values: &PrimitiveView<'_>) -> GuestResult<Vec<u32>> {
     (0..values.len)
         .map(|i| {
             u32::try_from(values.value_u64(i))
@@ -138,20 +135,16 @@ fn widen_u32(values: &PrimitiveView) -> GuestResult<Vec<u32>> {
 }
 
 /// Widen a narrowed integer child to [`Token`], the width `onpair` wants for codes.
-fn widen_tokens(values: &PrimitiveView, range: core::ops::Range<usize>) -> GuestResult<Vec<Token>> {
+fn widen_tokens(
+    values: &PrimitiveView<'_>,
+    range: core::ops::Range<usize>,
+) -> GuestResult<Vec<Token>> {
     range
         .map(|i| {
             Token::try_from(values.value_u64(i))
                 .map_err(|_| GuestError::new("onpair code exceeds u16"))
         })
         .collect()
-}
-
-fn primitive(node: &NodeView<'_>, slot: usize, what: &'static str) -> GuestResult<PrimitiveView> {
-    match node.child(slot)? {
-        ChildView::Primitive(view) => Ok(view),
-        ChildView::Bool(_) => Err(GuestError::new(what)),
-    }
 }
 
 struct OnPair;
@@ -165,45 +158,37 @@ impl WasmEncoding for OnPair {
         );
 
         let mut specs = Vec::with_capacity(header.n_children);
-        specs.push(ChildSpec::values(
+        specs.push(ChildSpec::new(
             DTypeExpr::primitive(OnPairMeta::ptype(meta.dict_offsets_ptype), false),
             u64::from(meta.dict_size) + 1,
         ));
-        specs.push(ChildSpec::values(
+        specs.push(ChildSpec::new(
             DTypeExpr::primitive(OnPairMeta::ptype(meta.codes_ptype), false),
             meta.codes_len,
         ));
         // Row boundaries into `codes`, so len + 1 like any offsets child.
-        specs.push(ChildSpec::values(
+        specs.push(ChildSpec::new(
             DTypeExpr::primitive(OnPairMeta::ptype(meta.codes_offsets_ptype), false),
             header.len as u64 + 1,
         ));
-        specs.push(ChildSpec::values(
+        specs.push(ChildSpec::new(
             DTypeExpr::primitive(OnPairMeta::ptype(meta.uncompressed_lengths_ptype), false),
             header.len as u64,
         ));
         if header.n_children == 5 {
-            specs.push(ChildSpec::values(DTypeExpr::bool(false), header.len as u64));
+            specs.push(ChildSpec::new(DTypeExpr::bool(false), header.len as u64));
         }
         Ok(specs)
     }
 
-    fn decode(node: &NodeView<'_>, plan: &mut PlanBuilder) -> GuestResult<NodeId> {
+    fn decode(node: &NodeView<'_>) -> GuestResult<Decoded> {
         guest_ensure!(node.nbuffers() == 1, "onpair expects one dictionary buffer");
         let dict_bytes = node.buffer(0)?;
 
-        let dict_offsets = primitive(node, DICT_OFFSETS, "onpair dict offsets must be primitive")?;
-        let codes = primitive(node, CODES, "onpair codes must be primitive")?;
-        let codes_offsets = primitive(
-            node,
-            CODES_OFFSETS,
-            "onpair codes offsets must be primitive",
-        )?;
-        let lengths = primitive(
-            node,
-            UNCOMPRESSED_LENGTHS,
-            "onpair uncompressed lengths must be primitive",
-        )?;
+        let dict_offsets = node.child(DICT_OFFSETS)?.as_primitive()?;
+        let codes = node.child(CODES)?.as_primitive()?;
+        let codes_offsets = node.child(CODES_OFFSETS)?.as_primitive()?;
+        let lengths = node.child(UNCOMPRESSED_LENGTHS)?.as_primitive()?;
 
         guest_ensure!(
             codes_offsets.len == node.len + 1,
@@ -270,9 +255,7 @@ impl WasmEncoding for OnPair {
         unsafe { out.set_len(written) };
 
         let validity = if node.nchildren() == 5 {
-            let ChildView::Bool(bits) = node.child(VALIDITY)? else {
-                return Err(GuestError::new("onpair validity child must be boolean"));
-            };
+            let bits = node.child(VALIDITY)?.as_bool()?;
             Validity::Bitmap(bits.bits[..node.len.div_ceil(8)].to_vec())
         } else if node.nullable {
             Validity::AllValid
@@ -280,16 +263,13 @@ impl WasmEncoding for OnPair {
             Validity::NonNullable
         };
 
-        // OnPair compresses strings, but the same view layout serves Utf8 and Binary, so the
-        // output type comes from the parent rather than from the layout.
-        Ok(plan.materialized(
-            DTypeExpr::parent(),
-            Decoded::VarBinView(DecodedVarBinView::from_heap(
-                out,
-                (0..lengths.len).map(|i| lengths.value_u64(i) as usize),
-                validity,
-            )?),
-        ))
+        // OnPair compresses strings, but the same view layout serves Utf8 and Binary; the host
+        // types the result with the node's own dtype rather than from the layout.
+        Ok(Decoded::VarBinView(DecodedVarBinView::from_heap(
+            out,
+            (0..lengths.len).map(|i| lengths.value_u64(i) as usize),
+            validity,
+        )?))
     }
 }
 

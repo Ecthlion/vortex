@@ -11,11 +11,12 @@
 //!   literal or a **derivation** — a path from the node's own dtype, such as "struct field 2 of my
 //!   parent, made non-nullable".
 //!
-//! Derivations are what make the channel complete rather than merely wide. Extension types resolve
-//! through a vtable registry, so no byte encoding lets a guest construct one; a literal-only
-//! channel would leave every extension-typed child unnameable no matter how many kinds it spelled.
-//! A derivation sidesteps the problem by never having the guest hold the type at all — it names a
-//! path, and the host walks it against a `DType` it already trusts.
+//! Every `DType` Vortex defines has a literal spelling, extension types included: an extension
+//! literal carries the id, the vtable's own serialized metadata, and the storage type, and the
+//! host rebuilds it exactly as the file-footer path does — through the session's extension
+//! registry, or as a foreign placeholder when the session allows unknown types. Derivations are a
+//! convenience on top: a kernel that only re-arranges its parent's values can say "my parent's
+//! type" without re-spelling (or even understanding) it.
 
 use vortex_array::dtype::DType;
 use vortex_array::dtype::DecimalDType;
@@ -25,10 +26,14 @@ use vortex_array::dtype::Nullability;
 use vortex_array::dtype::PType;
 use vortex_array::dtype::StructFields;
 use vortex_array::dtype::UnionVariants;
+use vortex_array::dtype::extension::ExtId;
+use vortex_array::dtype::extension::ForeignExtDType;
+use vortex_array::dtype::session::DTypeSessionExt;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 use vortex_error::vortex_ensure;
 use vortex_error::vortex_err;
+use vortex_session::VortexSession;
 
 /// Tag byte layout, mirroring the guest SDK's `abi::dtype_tag`.
 const KIND_MASK: u8 = 0x3f;
@@ -174,10 +179,11 @@ fn encode_into(out: &mut Vec<u8>, dtype: &DType, depth: usize) -> VortexResult<(
             let id = ext.id();
             write_varint(out, id.as_ref().len() as u64);
             out.extend_from_slice(id.as_ref().as_bytes());
-            // Extension metadata is not part of the guest-visible contract yet: a kernel can read
-            // the id and the storage type, which is what distinguishes the type, and nothing here
-            // could rebuild the vtable anyway.
-            write_varint(out, 0);
+            // The vtable's own serialization, exactly as the file footer records it, so a kernel
+            // can echo the type back and the host can rebuild it through the same registry.
+            let metadata = ext.serialize_metadata()?;
+            write_varint(out, metadata.len() as u64);
+            out.extend_from_slice(&metadata);
             encode_into(out, ext.storage_dtype(), depth + 1)?;
         }
         DType::Map(map, _) => {
@@ -193,15 +199,22 @@ fn encode_into(out: &mut Vec<u8>, dtype: &DType, depth: usize) -> VortexResult<(
 /// Decode a type expression written by a kernel, resolving derivations against `parent`.
 ///
 /// Returns the type and the number of bytes consumed. `parent` is the dtype of the node being
-/// decoded — the anchor every derivation is relative to.
-pub fn decode(bytes: &[u8], parent: &DType) -> VortexResult<(DType, usize)> {
-    decode_at(bytes, 0, parent, 0)
+/// decoded — the anchor every derivation is relative to. `session` resolves extension literals:
+/// a registered plugin rebuilds its type from the metadata; an unknown id becomes a foreign
+/// placeholder if the session allows unknown types, and is an error otherwise.
+pub fn decode(
+    bytes: &[u8],
+    parent: &DType,
+    session: &VortexSession,
+) -> VortexResult<(DType, usize)> {
+    decode_at(bytes, 0, parent, session, 0)
 }
 
 fn decode_at(
     bytes: &[u8],
     offset: usize,
     parent: &DType,
+    session: &VortexSession,
     depth: usize,
 ) -> VortexResult<(DType, usize)> {
     vortex_ensure!(depth <= MAX_DEPTH, "dtype expression nested too deeply");
@@ -210,7 +223,7 @@ fn decode_at(
         .ok_or_else(|| vortex_err!("truncated dtype expression"))?;
 
     if tag & DERIVED != 0 {
-        return decode_derivation(bytes, offset, parent, depth, tag & KIND_MASK);
+        return decode_derivation(bytes, offset, parent, session, depth, tag & KIND_MASK);
     }
 
     let nullability = if tag & NULLABLE != 0 {
@@ -244,20 +257,20 @@ fn decode_at(
         KIND_UTF8 => DType::Utf8(nullability),
         KIND_BINARY => DType::Binary(nullability),
         KIND_LIST => {
-            let (element, n) = decode_at(bytes, offset + consumed, parent, depth + 1)?;
+            let (element, n) = decode_at(bytes, offset + consumed, parent, session, depth + 1)?;
             consumed += n;
             DType::List(element.into(), nullability)
         }
         KIND_FIXED_SIZE_LIST => {
             let (size, n) = read_varint(bytes, offset + consumed)?;
             consumed += n;
-            let (element, n) = decode_at(bytes, offset + consumed, parent, depth + 1)?;
+            let (element, n) = decode_at(bytes, offset + consumed, parent, session, depth + 1)?;
             consumed += n;
             DType::FixedSizeList(element.into(), u32::try_from(size)?, nullability)
         }
         KIND_STRUCT => {
             let (entries, n) =
-                decode_named_entries(bytes, offset + consumed, parent, depth, false)?;
+                decode_named_entries(bytes, offset + consumed, parent, session, depth, false)?;
             consumed += n;
             DType::Struct(
                 StructFields::new(entries.names.into(), entries.dtypes),
@@ -265,7 +278,8 @@ fn decode_at(
             )
         }
         KIND_UNION => {
-            let (entries, n) = decode_named_entries(bytes, offset + consumed, parent, depth, true)?;
+            let (entries, n) =
+                decode_named_entries(bytes, offset + consumed, parent, session, depth, true)?;
             consumed += n;
             DType::Union(
                 UnionVariants::try_new(entries.names.into(), entries.dtypes, entries.type_ids)?,
@@ -274,12 +288,44 @@ fn decode_at(
         }
         KIND_VARIANT => DType::Variant(nullability),
         KIND_EXTENSION => {
-            // Reconstructing an extension type needs its vtable, which lives in a host registry
-            // and cannot be conjured from bytes. A kernel that needs one should derive it from the
-            // parent instead of spelling it out.
-            vortex_bail!(
-                "a kernel cannot write an extension dtype literal; derive it from the parent instead"
-            )
+            let (id_len, n) = read_varint(bytes, offset + consumed)?;
+            consumed += n;
+            let id_len = usize::try_from(id_len)?;
+            let id = bytes
+                .get(offset + consumed..offset + consumed + id_len)
+                .ok_or_else(|| vortex_err!("truncated extension dtype id"))?;
+            consumed += id_len;
+            let id = ExtId::from(
+                std::str::from_utf8(id)
+                    .map_err(|_| vortex_err!("extension dtype id is not valid UTF-8"))?,
+            );
+
+            let (metadata_len, n) = read_varint(bytes, offset + consumed)?;
+            consumed += n;
+            let metadata_len = usize::try_from(metadata_len)?;
+            let metadata = bytes
+                .get(offset + consumed..offset + consumed + metadata_len)
+                .ok_or_else(|| vortex_err!("truncated extension dtype metadata"))?;
+            consumed += metadata_len;
+
+            let (storage, n) = decode_at(bytes, offset + consumed, parent, session, depth + 1)?;
+            consumed += n;
+
+            // The same resolution the file footer's dtype goes through: the registered plugin
+            // validates the metadata against the storage type it is given.
+            let plugin = session.dtypes().registry().get(&id);
+            let ext = if let Some(plugin) = plugin {
+                plugin.deserialize(metadata, storage)?
+            } else if session.allows_unknown() {
+                ForeignExtDType::from_parts(id, metadata.to_vec(), storage)?
+            } else {
+                vortex_bail!(
+                    "a kernel named extension dtype {id}, which this session does not know"
+                )
+            };
+            // An extension's nullability is its storage's; the tag bit is authoritative if the
+            // kernel spelled them inconsistently.
+            DType::Extension(ext.with_nullability(nullability))
         }
         KIND_MAP => {
             let keys_sorted = *bytes
@@ -287,9 +333,9 @@ fn decode_at(
                 .ok_or_else(|| vortex_err!("truncated map dtype"))?
                 != 0;
             consumed += 1;
-            let (key, n) = decode_at(bytes, offset + consumed, parent, depth + 1)?;
+            let (key, n) = decode_at(bytes, offset + consumed, parent, session, depth + 1)?;
             consumed += n;
-            let (value, n) = decode_at(bytes, offset + consumed, parent, depth + 1)?;
+            let (value, n) = decode_at(bytes, offset + consumed, parent, session, depth + 1)?;
             consumed += n;
             // `try_new` is where a nullable key — which Arrow maps forbid — is rejected.
             DType::Map(MapDType::try_new(key, value, keys_sorted)?, nullability)
@@ -313,6 +359,7 @@ fn decode_named_entries(
     bytes: &[u8],
     offset: usize,
     parent: &DType,
+    session: &VortexSession,
     depth: usize,
     with_type_ids: bool,
 ) -> VortexResult<(NamedEntries, usize)> {
@@ -348,7 +395,7 @@ fn decode_named_entries(
             );
             consumed += 1;
         }
-        let (dtype, n) = decode_at(bytes, offset + consumed, parent, depth + 1)?;
+        let (dtype, n) = decode_at(bytes, offset + consumed, parent, session, depth + 1)?;
         consumed += n;
         entries.dtypes.push(dtype);
     }
@@ -359,6 +406,7 @@ fn decode_derivation(
     bytes: &[u8],
     offset: usize,
     parent: &DType,
+    session: &VortexSession,
     depth: usize,
     op: u8,
 ) -> VortexResult<(DType, usize)> {
@@ -376,7 +424,7 @@ fn decode_derivation(
         0
     };
 
-    let (inner, n) = decode_at(bytes, offset + consumed, parent, depth + 1)?;
+    let (inner, n) = decode_at(bytes, offset + consumed, parent, session, depth + 1)?;
     consumed += n;
 
     let derived = match op {
@@ -411,10 +459,18 @@ fn decode_derivation(
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
+    use vortex_array::array_session;
+    use vortex_array::dtype::extension::ExtDTypeRef;
+    use vortex_array::extension::datetime::Date;
     use vortex_array::extension::datetime::TimeUnit;
     use vortex_array::extension::datetime::Timestamp;
 
     use super::*;
+
+    /// Decode against a default session, which knows the built-in extension types.
+    fn decode(bytes: &[u8], parent: &DType) -> VortexResult<(DType, usize)> {
+        super::decode(bytes, parent, &array_session())
+    }
 
     fn struct_of(fields: Vec<(&str, DType)>) -> DType {
         let names: Vec<FieldName> = fields.iter().map(|(name, _)| (*name).into()).collect();
@@ -662,27 +718,159 @@ mod tests {
         assert!(decode(&[KIND_PRIMITIVE, 99], &DType::Null).is_err());
     }
 
-    /// The host writes extension types so a kernel can inspect them; the kernel cannot write one
-    /// back, because rebuilding the vtable is not something bytes can do.
-    #[test]
-    fn extension_types_encode_but_do_not_decode_as_literals() -> VortexResult<()> {
-        let ext = DType::Extension(
-            Timestamp::new(TimeUnit::Milliseconds, Nullability::NonNullable).erased(),
-        );
-        let DType::Extension(inner) = &ext else {
-            unreachable!()
-        };
-        let storage = inner.storage_dtype().clone();
-        let bytes = encode(&ext)?;
+    /// An extension literal carries the vtable's real metadata, so a kernel can echo a type back
+    /// and the host rebuilds it through the session registry — timezone and all.
+    #[rstest]
+    #[case(Timestamp::new(TimeUnit::Milliseconds, Nullability::NonNullable).erased())]
+    #[case(Timestamp::new_with_tz(TimeUnit::Nanoseconds, Some("Europe/Warsaw".into()), Nullability::Nullable).erased())]
+    #[case(Date::new(TimeUnit::Days, Nullability::Nullable).erased())]
+    fn extension_types_round_trip_as_literals(#[case] ext: ExtDTypeRef) -> VortexResult<()> {
+        let storage = ext.storage_dtype().clone();
+        let dtype = DType::Extension(ext);
+        let bytes = encode(&dtype)?;
         assert_eq!(bytes[0] & KIND_MASK, KIND_EXTENSION);
-        // Round-tripping the literal is refused with a message pointing at the alternative.
-        let err = decode(&bytes, &DType::Null).unwrap_err().to_string();
-        assert!(err.contains("derive it from the parent"), "{err}");
-        // ...and the alternative works.
+        let (decoded, consumed) = decode(&bytes, &DType::Null)?;
+        assert_eq!(decoded, dtype);
+        assert_eq!(consumed, bytes.len());
+        // STORAGE(PARENT) still works for kernels that would rather not spell the type.
         assert_eq!(
-            decode(&[DERIVED | DERIVE_STORAGE, DERIVED | DERIVE_PARENT], &ext)?.0,
+            decode(&[DERIVED | DERIVE_STORAGE, DERIVED | DERIVE_PARENT], &dtype)?.0,
             storage
         );
+        Ok(())
+    }
+
+    /// Nullability of an extension type lives on its storage; the tag bit wins if a kernel
+    /// spells them inconsistently, so the result always agrees with itself.
+    #[test]
+    fn extension_tag_nullability_is_authoritative() -> VortexResult<()> {
+        let non_nullable =
+            DType::Extension(Timestamp::new(TimeUnit::Seconds, Nullability::NonNullable).erased());
+        let mut bytes = encode(&non_nullable)?;
+        bytes[0] |= NULLABLE;
+        let (decoded, _) = decode(&bytes, &DType::Null)?;
+        assert_eq!(decoded, non_nullable.as_nullable());
+        assert!(decoded.is_nullable());
+        Ok(())
+    }
+
+    /// An extension id the session has no plugin for: refused by default, a foreign placeholder
+    /// (readable as its storage type) when the session opts into unknown types — the same policy
+    /// the file footer's dtype follows.
+    #[test]
+    fn unknown_extension_ids_follow_the_session_policy() -> VortexResult<()> {
+        let mut bytes = vec![KIND_EXTENSION | NULLABLE];
+        write_varint(&mut bytes, b"acme.money".len() as u64);
+        bytes.extend_from_slice(b"acme.money");
+        write_varint(&mut bytes, 3);
+        bytes.extend_from_slice(&[1, 2, 3]);
+        bytes.extend(encode(&DType::Primitive(
+            PType::I64,
+            Nullability::Nullable,
+        ))?);
+
+        let strict = array_session();
+        let err = super::decode(&bytes, &DType::Null, &strict)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("acme.money"), "{err}");
+
+        let lenient = array_session();
+        lenient.allow_unknown();
+        let (decoded, consumed) = super::decode(&bytes, &DType::Null, &lenient)?;
+        assert_eq!(consumed, bytes.len());
+        let DType::Extension(ext) = &decoded else {
+            panic!("expected an extension dtype, got {decoded}")
+        };
+        assert_eq!(ext.id(), ExtId::from("acme.money"));
+        assert_eq!(ext.serialize_metadata()?, vec![1, 2, 3]);
+        assert_eq!(
+            ext.storage_dtype(),
+            &DType::Primitive(PType::I64, Nullability::Nullable)
+        );
+        // And it re-encodes to the same bytes, so a foreign type survives a further hop.
+        assert_eq!(encode(&decoded)?, bytes);
+        Ok(())
+    }
+
+    #[test]
+    fn a_truncated_extension_literal_is_rejected() {
+        let mut bytes = vec![KIND_EXTENSION];
+        write_varint(&mut bytes, 9);
+        bytes.extend_from_slice(b"short");
+        assert!(decode(&bytes, &DType::Null).is_err());
+        // Id complete, metadata promised but missing.
+        let mut bytes = vec![KIND_EXTENSION];
+        write_varint(&mut bytes, 4);
+        bytes.extend_from_slice(b"vort");
+        write_varint(&mut bytes, 100);
+        assert!(decode(&bytes, &DType::Null).is_err());
+    }
+
+    /// One type per `DType` variant, nested inside each other, round-trips through the channel:
+    /// the codec covers the whole type system, not a convenient subset.
+    #[test]
+    fn every_dtype_kind_round_trips_in_one_expression() -> VortexResult<()> {
+        let names: Vec<FieldName> = vec!["i".into(), "s".into()];
+        let union = DType::Union(
+            UnionVariants::try_new(
+                names.into(),
+                vec![
+                    DType::Primitive(PType::I16, Nullability::NonNullable),
+                    DType::Utf8(Nullability::Nullable),
+                ],
+                vec![0, 1],
+            )?,
+            Nullability::Nullable,
+        );
+        let map = DType::Map(
+            MapDType::try_new(
+                DType::Utf8(Nullability::NonNullable),
+                DType::Extension(Date::new(TimeUnit::Days, Nullability::Nullable).erased()),
+                false,
+            )?,
+            Nullability::NonNullable,
+        );
+        let dtype = struct_of(vec![
+            ("null", DType::Null),
+            ("bool", DType::Bool(Nullability::Nullable)),
+            (
+                "prim",
+                DType::Primitive(PType::F32, Nullability::NonNullable),
+            ),
+            (
+                "dec",
+                DType::Decimal(DecimalDType::try_new(38, 10)?, Nullability::Nullable),
+            ),
+            ("utf8", DType::Utf8(Nullability::NonNullable)),
+            ("bin", DType::Binary(Nullability::Nullable)),
+            (
+                "list",
+                DType::List(union.clone().into(), Nullability::Nullable),
+            ),
+            (
+                "fsl",
+                DType::FixedSizeList(map.clone().into(), 3, Nullability::NonNullable),
+            ),
+            ("union", union),
+            ("variant", DType::Variant(Nullability::Nullable)),
+            (
+                "ext",
+                DType::Extension(
+                    Timestamp::new_with_tz(
+                        TimeUnit::Microseconds,
+                        Some("UTC".into()),
+                        Nullability::NonNullable,
+                    )
+                    .erased(),
+                ),
+            ),
+            ("map", map),
+        ]);
+        let bytes = encode(&dtype)?;
+        let (decoded, consumed) = decode(&bytes, &DType::Null)?;
+        assert_eq!(decoded, dtype);
+        assert_eq!(consumed, bytes.len());
         Ok(())
     }
 }

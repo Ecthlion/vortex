@@ -14,6 +14,7 @@ use crate::dtype::extension::ExtId;
 use crate::dtype::extension::ExtVTable;
 use crate::scalar::ScalarValue;
 
+/// The opaque serialized metadata of a [`ForeignExtDType`], kept verbatim so it round-trips.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ForeignExtMetadata(pub Vec<u8>);
 
@@ -30,10 +31,13 @@ pub struct ForeignExtDType {
 }
 
 impl ForeignExtDType {
+    /// Create the placeholder vtable for an extension `id` this session has no plugin for.
     pub fn new(id: ExtId) -> Self {
         Self { id }
     }
 
+    /// Build an erased extension dtype for an unknown `id` from its serialized parts, so data of
+    /// that type can still be read (and written back) as its storage type.
     pub fn from_parts(
         id: ExtId,
         metadata: Vec<u8>,

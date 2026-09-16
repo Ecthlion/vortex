@@ -40,7 +40,6 @@ mod encoding;
 mod error;
 pub mod host;
 pub mod node;
-pub mod plan;
 pub mod proto;
 #[cfg(all(target_arch = "wasm32", feature = "runtime"))]
 mod runtime;

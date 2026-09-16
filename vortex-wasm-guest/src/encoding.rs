@@ -5,29 +5,26 @@
 
 use alloc::vec::Vec;
 
+use crate::data::Decoded;
 use crate::error::GuestResult;
 use crate::node::ChildSpec;
 use crate::node::NodeHeader;
 use crate::node::NodeView;
 use crate::node::write_child_specs;
-use crate::plan::NodeId;
-use crate::plan::PlanBuilder;
 
 /// The wasm decoder for a single Vortex array encoding.
 ///
-/// A kernel is the portable mirror of a native `VTable::deserialize`: it receives the encoding's
-/// **real serialized parts** — metadata, raw buffers, and children. Because only the encoding
-/// knows its children's dtypes, decode happens in two steps:
+/// A kernel is the portable mirror of a native `VTable::deserialize` and canonicalize: it
+/// receives the encoding's **real serialized parts** — metadata, raw buffers, and children — and
+/// returns the node's canonical array. Because only the encoding knows its children's dtypes,
+/// decode happens in two steps:
 ///
 /// 1. [`children`](Self::children) — from the metadata, declare each serialized child's dtype and
 ///    length so the host can decode them (natively, or recursively through another kernel).
-/// 2. [`decode`](Self::decode) — with buffers and decoded children in hand, describe the output as
-///    a [`plan`](crate::plan) over the node's children.
+/// 2. [`decode`](Self::decode) — with buffers and canonical children in hand, build the output.
 ///
-/// A kernel that computes new values ends its plan in a single
-/// [`materialized`](PlanBuilder::materialized) node. One that merely re-arranges a child should
-/// not materialize anything: name the child and say what to do with it, and its data never enters
-/// the sandbox at all.
+/// A kernel that computes new values builds a [`Decoded`] from its buffers. One that re-arranges a
+/// child uses [`Decoded::take`], which gathers a child of any dtype.
 ///
 /// Wire it up with [`export_wasm_encoding!`](crate::export_wasm_encoding).
 pub trait WasmEncoding {
@@ -37,8 +34,8 @@ pub trait WasmEncoding {
     /// optional trailing children such as a validity bitmap.
     fn children(header: &NodeHeader<'_>) -> GuestResult<Vec<ChildSpec>>;
 
-    /// Describe the node's decoded output as a plan, returning its root node.
-    fn decode(node: &NodeView<'_>, plan: &mut PlanBuilder) -> GuestResult<NodeId>;
+    /// Decode the node into its canonical array, of the node's own dtype and length.
+    fn decode(node: &NodeView<'_>) -> GuestResult<Decoded>;
 }
 
 fn input_slice(in_ptr: i32, in_len: i32) -> &'static [u8] {
@@ -61,10 +58,8 @@ pub fn __run_children<E: WasmEncoding>(in_ptr: i32, in_len: i32) -> i32 {
 /// Internal entry point invoked by [`export_wasm_encoding!`]. Not part of the stable API.
 #[doc(hidden)]
 pub fn __run_decode<E: WasmEncoding>(in_ptr: i32, in_len: i32) -> i32 {
-    let mut plan = PlanBuilder::new();
-    match NodeView::parse(input_slice(in_ptr, in_len)).and_then(|node| E::decode(&node, &mut plan))
-    {
-        Ok(root) => plan.finish(root),
+    match NodeView::parse(input_slice(in_ptr, in_len)).and_then(|node| E::decode(&node)) {
+        Ok(decoded) => decoded.write() as i32,
         Err(_) => -1,
     }
 }

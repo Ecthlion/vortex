@@ -17,8 +17,8 @@
 //! - [`abi`] defines the host/guest ABI constants.
 //! - the `convert` module moves arrays across the boundary in Vortex's own canonical layouts.
 //! - [`dtype`] is the compact type encoding both sides read and write.
-//! - [`WasmKernel`] is the `wasmtime`-backed runtime that drives the ABI, returning a decode plan
-//!   the host evaluates with its own lazy arrays.
+//! - [`WasmKernel`] is the `wasmtime`-backed runtime that drives the ABI and rebuilds the
+//!   kernel's materialized canonical output as a native array.
 //! - [`WasmEncodingPlugin`] adapts a kernel into a session-registered array encoding.
 //! - [`WasmKernelLoader`] wires kernels found in a file into the reader that opened it.
 //!
@@ -29,11 +29,9 @@ mod convert;
 pub mod dtype;
 mod kernel;
 mod loader;
-mod plan;
 mod plugin;
 
 pub use kernel::ChildDescriptor;
-pub use kernel::ChildMode;
 pub use kernel::WasmDecoder;
 pub use kernel::WasmKernel;
 pub use loader::WasmKernelLoader;

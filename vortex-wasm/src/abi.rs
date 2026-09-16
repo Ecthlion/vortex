@@ -12,7 +12,7 @@
 ///
 /// The host refuses to run a kernel whose recorded ABI version it does not understand.
 ///
-/// The frame layouts, the decode plan encoding, and the [`crate::dtype`] grammar are all part of
+/// The frame layouts, the canonical array frame, and the [`crate::dtype`] grammar are all part of
 /// version 1. Any change to one of them is a wire-format change and bumps this constant, so a
 /// kernel built against a different version is rejected rather than misread.
 pub const ABI_VERSION: u32 = 1;
@@ -39,10 +39,9 @@ pub const ALLOC_EXPORT: &str = "vx_alloc";
 pub const CHILDREN_EXPORT: &str = "vx_children";
 
 /// Guest export: `vx_decode(input_ptr: i32, input_len: i32) -> i32`. The input frame carries the
-/// node's metadata, its raw buffers (already in guest memory), and its host-decoded `Values`
-/// children as array descriptors. Returns the offset of a tagged result frame: either a
-/// materialized array descriptor or a gather over a child the kernel only named. Negative values
-/// are error codes.
+/// node's metadata, its raw buffers (already in guest memory), and its host-decoded children as
+/// canonical array frames. Returns the offset of the materialized output: one canonical array
+/// frame of the node's own dtype and length. Negative values are error codes.
 pub const DECODE_EXPORT: &str = "vx_decode";
 
 /// Host import: `vx_host_log(ptr: i32, len: i32)`. Logs a UTF-8 string from guest memory.
