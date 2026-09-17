@@ -100,7 +100,7 @@ pub static SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
 
 /// The compressor the benchmarks write with.
 ///
-/// [`BlockedFoRScheme`] is deliberately absent from [`vortex::compressor::ALL_SCHEMES`]: a
+/// [`BlockedFoRScheme`] is deliberately absent from the default `ALL_SCHEMES` set: a
 /// default session's encoding policy forbids `fastlanes.blockedfor`, and write paths that build
 /// a strategy without an allow list would fail to serialize it rather than silently fall back.
 /// The benchmarks opt in explicitly, alongside the edition enabled on [`SESSION`].
@@ -128,10 +128,10 @@ pub fn bench_strategy_builder(compaction: CompactionStrategy) -> WriteStrategyBu
 
 /// The write options every benchmark must write Vortex files with.
 ///
-/// A bare [`VortexSession::write_options`] builds its strategy from the default scheme set, which
-/// omits [`BlockedFoRScheme`]. A benchmark that writes through one measures a file the encoding
-/// never entered — identical to its base except for the edition's larger encoding table. Route
-/// every benchmark write through here so no call site can silently opt out.
+/// A bare [`WriteOptionsSessionExt::write_options`] builds its strategy from the default scheme
+/// set, which omits [`BlockedFoRScheme`]. A benchmark that writes through one measures a file
+/// the encoding never entered — identical to its base but for the edition's larger encoding
+/// table. Route every benchmark write through here so no call site can silently opt out.
 pub fn bench_write_options(compaction: CompactionStrategy) -> VortexWriteOptions {
     compaction.apply_options(SESSION.write_options())
 }
