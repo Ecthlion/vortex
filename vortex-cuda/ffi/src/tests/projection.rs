@@ -61,6 +61,28 @@ fn test_projection_names_are_owned_and_zero_count_means_all() -> VortexResult<()
 }
 
 #[test]
+fn test_projection_wide_order_and_first_late_duplicate() -> VortexResult<()> {
+    let columns: Vec<_> = (0..1024).rev().map(|i| format!("column_{i}")).collect();
+    let mut projection: Vec<_> = columns.iter().map(String::as_str).collect();
+    let parsed = names(&projection)?;
+    assert_eq!(
+        parsed
+            .iter()
+            .map(|name| name.as_ref())
+            .collect::<Vec<&str>>(),
+        projection
+    );
+
+    let duplicate = String::from("column_512");
+    projection.extend([duplicate.as_str(), "column_1023"]);
+    assert_error(
+        names(&projection),
+        "duplicate CUDA scan column: \"column_512\"",
+    );
+    Ok(())
+}
+
+#[test]
 fn test_projection_rejects_invalid_names_and_counts() {
     let invalid_utf8 = vx_view {
         ptr: [0xffu8].as_ptr().cast(),

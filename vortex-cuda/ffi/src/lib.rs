@@ -34,6 +34,7 @@ use vortex::layout::scan::scan_builder::ScanBuilder;
 use vortex::layout::scan::split_by::SplitBy;
 use vortex::session::SessionExt;
 use vortex::session::VortexSession;
+use vortex::utils::aliases::hash_set::HashSet;
 use vortex_cuda::CudaExecutionCtx;
 use vortex_cuda::CudaOpenOptionsExt;
 use vortex_cuda::CudaSession;
@@ -353,6 +354,7 @@ unsafe fn scan_columns(columns: *const vx_view, ncolumns: usize) -> VortexResult
     // SAFETY: Null, alignment, and size were checked; the caller guarantees readable views.
     let columns = unsafe { std::slice::from_raw_parts(columns, ncolumns) };
     let mut names = Vec::<FieldName>::with_capacity(ncolumns);
+    let mut seen = HashSet::<&str>::with_capacity(ncolumns);
     for (index, column) in columns.iter().enumerate() {
         vortex_ensure!(
             column.len <= isize::MAX as usize,
@@ -361,10 +363,7 @@ unsafe fn scan_columns(columns: *const vx_view, ncolumns: usize) -> VortexResult
         // SAFETY: The caller guarantees readable name bytes. as_str checks null and UTF-8.
         let name = unsafe { column.as_str() }
             .map_err(|error| vortex_err!("invalid CUDA scan column {index}: {error}"))?;
-        vortex_ensure!(
-            !names.iter().any(|existing| existing.as_ref() == name),
-            "duplicate CUDA scan column: {name:?}"
-        );
+        vortex_ensure!(seen.insert(name), "duplicate CUDA scan column: {name:?}");
         names.push(FieldName::from(name));
     }
     Ok(names.into())
