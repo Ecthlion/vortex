@@ -435,17 +435,14 @@ impl DeviceArrayStreamPrivateData {
         }
 
         let ArrowDeviceArrayWithSchema {
-            schema: mut ffi_schema,
+            schema: ffi_schema,
             array: mut device_array,
         } = self
             .runtime
             .block_on(array.export_device_array_with_schema(&mut self.ctx))?;
 
-        // Release the schema we no longer need, and on failure release the array we will not
-        // return.
-        let checked = self.check_stream_array(&ffi_schema, &device_array);
-        release_schema(&mut ffi_schema);
-        let exported_schema = match checked {
+        // Schemas release themselves on drop; rejected device arrays need explicit release.
+        let exported_schema = match self.check_stream_array(&ffi_schema, &device_array) {
             Ok(exported_schema) => exported_schema,
             Err(error) => {
                 release_device_array(&mut device_array);

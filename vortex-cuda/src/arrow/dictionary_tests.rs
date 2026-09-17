@@ -157,13 +157,13 @@ fn dictionary(values: ArrayRef, width: PType) -> VortexResult<ArrayRef> {
     Ok(DictArray::try_new(codes, values)?.into_array())
 }
 
-fn get_schema(stream: &mut ArrowDeviceArrayStream) -> VortexResult<FFI_ArrowSchema> {
+fn get_schema(stream: &mut ArrowDeviceArrayStream) -> VortexResult<Field> {
     let callback = stream.get_schema.expect("missing get_schema");
     let mut schema = FFI_ArrowSchema::empty();
     // SAFETY: The stream and output schema are live and writable.
     let status = unsafe { callback(stream, (&raw mut schema).cast()) };
     assert_eq!(status, 0, "{}", last_error(stream)?);
-    Ok(schema)
+    Ok(Field::try_from(&schema)?)
 }
 
 fn get_next(stream: &mut ArrowDeviceArrayStream) -> (i32, ArrowDeviceArray) {
@@ -225,10 +225,9 @@ fn test_decode_mixed_dictionary_device_stream(
     let mut stream = ArrayStreamAdapter::new(expected.dtype().clone(), stream::iter(chunks))
         .boxed()
         .export_device_array_stream(&session, &runtime)?;
-    let plain_schema = arrow_schema_for_array(&expected, &mut ctx)?;
+    let plain_schema = Field::try_from(&arrow_schema_for_array(&expected, &mut ctx)?)?;
     if schema_first {
-        let schema = get_schema(&mut stream)?;
-        assert_eq!(Field::try_from(&schema)?, Field::try_from(&plain_schema)?);
+        assert_eq!(get_schema(&mut stream)?, plain_schema);
     }
     for _ in 0..4 {
         let (status, mut array) = get_next(&mut stream);
@@ -238,8 +237,7 @@ fn test_decode_mixed_dictionary_device_stream(
         assert_arrays_eq!(actual, expected, ctx.execution_ctx());
         release_device_array(&mut array);
     }
-    let schema = get_schema(&mut stream)?;
-    assert_eq!(Field::try_from(&schema)?, Field::try_from(&plain_schema)?);
+    assert_eq!(get_schema(&mut stream)?, plain_schema);
     let (status, eos) = get_next(&mut stream);
     assert_eq!(status, 0);
     assert!(eos.array.release.is_none());
@@ -280,9 +278,8 @@ fn test_decode_stream_schema_does_not_poll(
         .boxed()
         .export_device_array_stream(&session, &runtime)?;
     for _ in 0..2 {
-        let schema = get_schema(&mut stream)?;
         assert_eq!(
-            Field::try_from(&schema)?,
+            get_schema(&mut stream)?,
             Field::new("", DataType::Int32, false)
         );
     }
@@ -436,9 +433,8 @@ fn test_default_dictionary_device_stream(#[case] second_width: Option<PType>) ->
     let mut stream = ArrayStreamAdapter::new(expected.dtype().clone(), stream::iter(chunks))
         .boxed()
         .export_device_array_stream(&session, &runtime)?;
-    let schema = get_schema(&mut stream)?;
     assert_eq!(
-        Field::try_from(&schema)?.data_type(),
+        get_schema(&mut stream)?.data_type(),
         &DataType::Dictionary(Box::new(DataType::Int16), Box::new(DataType::Int32),)
     );
     let (status, mut array) = get_next(&mut stream);
