@@ -33,12 +33,6 @@ const fn assert_input_visit_contract<F: RowFn, Args: ElementTuple>() {
         Args::ARITY == F::ARG_NAMES.len(),
         "the visited argument tuple must have the arity declared by RowFn::ARG_NAMES",
     );
-    // Dictionary push-down can evaluate values that no input row references. Every dispatch must
-    // therefore match the function-wide fallibility declaration.
-    assert!(
-        Args::DECODE_INFALLIBLE || !F::INFALLIBLE,
-        "RowFn::INFALLIBLE must be false when input decoding can fail",
-    );
 }
 
 pub(super) const fn assert_owned_visit_contract<Function, Args, Out>()
@@ -96,14 +90,17 @@ pub(super) fn validate_owned_visit<Args: ElementTuple, Out: OutputElement>(
     Ok(dtype)
 }
 
-pub(super) fn validate_sink_visit<Args, Sink>(dtypes: &[DType]) -> VortexResult<DType>
+pub(super) fn validate_sink_visit<Args, Sink>(
+    dtypes: &[DType],
+    params: &Sink::Params,
+) -> VortexResult<DType>
 where
     Args: ElementTuple,
     Sink: OutputSink,
 {
     Args::validate(dtypes)?;
 
-    let dtype = Sink::storage_dtype();
+    let dtype = Sink::storage_dtype(params);
     vortex_ensure!(
         !dtype.is_nullable(),
         "row output sinks must declare a non-nullable dtype, got {dtype}",

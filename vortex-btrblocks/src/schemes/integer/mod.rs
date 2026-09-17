@@ -5,7 +5,6 @@
 
 mod bitpacking;
 mod blocked_for;
-#[cfg(feature = "unstable_encodings")]
 mod delta;
 mod for_;
 mod rle;
@@ -19,14 +18,12 @@ mod pco;
 
 pub use bitpacking::BitPackingScheme;
 pub use blocked_for::BlockedFoRScheme;
-#[cfg(feature = "unstable_encodings")]
 pub use delta::DeltaScheme;
 pub use for_::FoRScheme;
 #[cfg(feature = "pco")]
 pub use pco::PcoScheme;
 pub use rle::IntRLEScheme;
 pub(crate) use rle::rle_compress;
-#[cfg(feature = "unstable_encodings")]
 pub(crate) use rle::try_compress_delta;
 pub use runend::RunEndScheme;
 pub use sequence::SequenceScheme;

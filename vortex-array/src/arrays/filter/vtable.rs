@@ -31,6 +31,7 @@ use crate::array::with_empty_buffers;
 use crate::arrays::filter::FilterArraySlotsExt;
 use crate::arrays::filter::array::FilterData;
 use crate::arrays::filter::array::FilterSlots;
+use crate::arrays::filter::execute::contiguous_filter_range;
 use crate::arrays::filter::execute::execute_all_null_filter_fast_path;
 use crate::arrays::filter::execute::execute_filter;
 use crate::arrays::filter::rules::PARENT_RULES;
@@ -164,6 +165,11 @@ impl VTable for Filter {
             Mask::Values(values) => MaskValuesRef::clone(values),
         };
 
+        // Filtering by one contiguous range is exactly a slice and can remain zero-copy.
+        if let Some(range) = contiguous_filter_range(array.filter_mask()) {
+            return Ok(ExecutionResult::done(array.child().slice(range)?));
+        }
+
         if let Some(canonical) =
             execute_all_null_filter_fast_path(array.as_view(), mask_values.true_count(), ctx)?
         {
@@ -177,7 +183,7 @@ impl VTable for Filter {
         // TODO(joe): fix the ownership of AnyCanonical
         let child = Canonical::from(array.child().as_::<AnyCanonical>());
         Ok(ExecutionResult::done(
-            execute_filter(child, &mask_values).into_array(),
+            execute_filter(child, &mask_values, ctx.allocator()).into_array(),
         ))
     }
 
@@ -194,6 +200,8 @@ impl VTable for Filter {
     }
 }
 impl OperationsVTable<Filter> for Filter {
+    type ProbeState = ();
+
     fn scalar_at(
         array: ArrayView<'_, Filter>,
         index: usize,

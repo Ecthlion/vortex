@@ -49,12 +49,13 @@ use kernel::FSSTExecutor;
 use kernel::FilterExecutor;
 use kernel::FoRExecutor;
 pub use kernel::LaunchStrategy;
+use kernel::ListExecutor;
+use kernel::MaskedExecutor;
 use kernel::OnPairExecutor;
 use kernel::RunEndExecutor;
 use kernel::SharedExecutor;
 pub use kernel::TracingLaunchStrategy;
 use kernel::ZigZagExecutor;
-#[cfg(feature = "unstable_encodings")]
 use kernel::ZstdBuffersExecutor;
 use kernel::ZstdExecutor;
 pub use kernel::ZstdKernelPrep;
@@ -75,6 +76,8 @@ use vortex::array::ArrayVTable;
 use vortex::array::arrays::Constant;
 use vortex::array::arrays::Dict;
 use vortex::array::arrays::Filter;
+use vortex::array::arrays::List;
+use vortex::array::arrays::Masked;
 use vortex::array::arrays::Shared;
 use vortex::array::arrays::Slice;
 use vortex::encodings::alp::ALP;
@@ -88,7 +91,6 @@ use vortex::encodings::runend::RunEnd;
 use vortex::encodings::sequence::Sequence;
 use vortex::encodings::zigzag::ZigZag;
 use vortex::encodings::zstd::Zstd;
-#[cfg(feature = "unstable_encodings")]
 use vortex::encodings::zstd::ZstdBuffers;
 #[cfg(test)]
 use vortex_cuda_macros::test;
@@ -119,6 +121,8 @@ pub fn initialize_cuda(session: &CudaSession) {
     session.register_kernel(DateTimeParts.id(), &DateTimePartsExecutor);
     session.register_kernel(DecimalByteParts.id(), &DecimalBytePartsExecutor);
     session.register_kernel(Dict.id(), &DictExecutor);
+    session.register_kernel(List.id(), &ListExecutor);
+    session.register_kernel(Masked.id(), &MaskedExecutor);
     session.register_kernel(Shared.id(), &SharedExecutor);
     session.register_kernel(Delta.id(), &DeltaExecutor);
     session.register_kernel(FoR.id(), &FoRExecutor);
@@ -128,7 +132,6 @@ pub fn initialize_cuda(session: &CudaSession) {
     session.register_kernel(Sequence.id(), &SequenceExecutor);
     session.register_kernel(ZigZag.id(), &ZigZagExecutor);
     session.register_kernel(Zstd.id(), &ZstdExecutor);
-    #[cfg(feature = "unstable_encodings")]
     session.register_kernel(ZstdBuffers.id(), &ZstdBuffersExecutor);
 
     // Operation kernels

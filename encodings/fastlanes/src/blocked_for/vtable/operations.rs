@@ -15,6 +15,8 @@ use crate::blocked_for::array::BlockedFoRArrayExt;
 use crate::blocked_for::array::BlockedFoRArraySlotsExt;
 
 impl OperationsVTable<BlockedFoR> for BlockedFoR {
+    type ProbeState = ();
+
     fn scalar_at(
         array: ArrayView<'_, BlockedFoR>,
         index: usize,

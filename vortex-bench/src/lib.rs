@@ -107,15 +107,15 @@ pub static SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
 pub fn bench_btrblocks_builder(compaction: CompactionStrategy) -> BtrBlocksCompressorBuilder {
     // Replace rather than add. `BlockedFoRScheme` subsumes `FoRScheme` — with no block narrower
     // than the array its references fold to a constant — but the two estimates are close enough
-    // that leaving both in lets `FoRScheme` win races the block-wise form serves better. On
-    // TPC-H SF=1 replacing gains 3.21% against 1.92% for merely adding.
+    // that leaving both in lets `FoRScheme` win races the block-wise form serves better.
     let builder = BtrBlocksCompressorBuilder::default()
         .exclude_schemes([FoRScheme.id()])
         .with_new_scheme(&BlockedFoRScheme);
-    match compaction {
+    let builder = match compaction {
         CompactionStrategy::Compact => builder.with_compact(),
         CompactionStrategy::Default => builder,
-    }
+    };
+    retain_edition_encodings(&SESSION, builder)
 }
 
 /// The write strategy the benchmarks use, carrying [`SESSION`]'s encoding policy.
@@ -123,14 +123,7 @@ pub fn bench_btrblocks_builder(compaction: CompactionStrategy) -> BtrBlocksCompr
 /// Mirrors what [`VortexWriteOptions::new`] builds, so the only difference from a default write
 /// is the extra scheme and the extra permitted encoding.
 pub fn bench_strategy_builder(compaction: CompactionStrategy) -> WriteStrategyBuilder {
-    WriteStrategyBuilder::default()
-        .with_btrblocks_builder(bench_btrblocks_builder(compaction))
-        .with_allow_encodings(
-            SESSION
-                .enabled_component_ids(ComponentKind::Array)
-                .into_iter()
-                .collect(),
-        )
+    WriteStrategyBuilder::default().with_btrblocks_builder(bench_btrblocks_builder(compaction))
 }
 
 /// The write options every benchmark must write Vortex files with.
@@ -198,6 +191,8 @@ impl Display for Target {
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Format {
+    #[clap(name = "arrow-ipc")]
+    ArrowIpc,
     #[clap(name = "csv")]
     Csv,
     #[clap(name = "parquet")]
@@ -226,10 +221,15 @@ impl Display for Format {
 }
 
 /// Allowed formats for benchmark CLI arguments.
-pub const ALLOWED_FORMATS: &[Format] = &[Format::Parquet, Format::OnDiskVortex, Format::Lance];
+pub const ALLOWED_FORMATS: &[Format] = &[
+    Format::ArrowIpc,
+    Format::Parquet,
+    Format::OnDiskVortex,
+    Format::Lance,
+];
 
 impl Format {
-    /// Clap value parser that only accepts parquet, vortex, and lance.
+    /// Clap value parser that only accepts formats supported by random-access benchmarks.
     pub fn parse_allowed(s: &str) -> Result<Format, String> {
         let format = Format::from_str(s, true)?;
         if ALLOWED_FORMATS.contains(&format) {
@@ -245,6 +245,7 @@ impl Format {
 
     pub fn name(&self) -> &'static str {
         match self {
+            Format::ArrowIpc => "arrow-ipc",
             Format::Csv => "csv",
             Format::Parquet => "parquet",
             Format::OnDiskVortex => "vortex-file-compressed",
@@ -257,6 +258,7 @@ impl Format {
 
     pub fn ext(&self) -> &'static str {
         match self {
+            Format::ArrowIpc => "arrow",
             Format::Csv => "csv",
             Format::Parquet => "parquet",
             Format::OnDiskVortex => "vortex",
@@ -302,6 +304,21 @@ impl CompactionStrategy {
     pub fn apply_options(&self, options: VortexWriteOptions) -> VortexWriteOptions {
         options.with_strategy(bench_strategy_builder(*self).build())
     }
+}
+
+/// Restrict `builder` to the encodings permitted by the session's enabled editions.
+///
+/// The default writer applies this filter itself. An explicit strategy bypasses it, so a
+/// benchmark that builds its own compressor applies it here to stay within editions.
+pub fn retain_edition_encodings(
+    session: &VortexSession,
+    builder: BtrBlocksCompressorBuilder,
+) -> BtrBlocksCompressorBuilder {
+    let allowed = session
+        .enabled_component_ids(ComponentKind::Array)
+        .into_iter()
+        .collect();
+    builder.retain_allowed_encodings(&allowed)
 }
 
 /// Verify that local data has already been prepared for the requested benchmark formats.

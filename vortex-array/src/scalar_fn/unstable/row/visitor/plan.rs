@@ -86,6 +86,7 @@ impl<F: RowFn> RowVisitor for BatchPlanner<'_, F> {
 
     fn visit_prepared_into<Args, Sink, Prepared, ApplyResult>(
         self,
+        params: Sink::Params,
         _prepare: impl FnOnce(Args::ConstElems<'_>) -> Prepared,
         _apply: impl Fn(&Prepared, Args::Elems<'_>, Sink::Row<'_>) -> ApplyResult,
     ) -> VortexResult<Self::VisitResult>
@@ -97,7 +98,7 @@ impl<F: RowFn> RowVisitor for BatchPlanner<'_, F> {
         const { assert_sink_visit_contract::<F, Args, ApplyResult>() };
 
         BatchPlan::new(
-            validate_sink_visit::<Args, Sink>(self.dtypes)?,
+            validate_sink_visit::<Args, Sink>(self.dtypes, &params)?,
             self.output_dtype,
             RowPolicy::for_sink::<Args, ApplyResult>(),
         )
@@ -284,7 +285,7 @@ pub(crate) enum RowPolicy {
     /// error.
     DenseWithRetry,
 
-    /// Execute only valid rows over the original inputs.
+    /// Execute only valid rows, filtering inputs if direct execution is unavailable.
     ValidOnly,
 }
 

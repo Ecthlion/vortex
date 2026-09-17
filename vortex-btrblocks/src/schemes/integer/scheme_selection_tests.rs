@@ -9,8 +9,6 @@ use std::sync::LazyLock;
 use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
-#[cfg(feature = "unstable_encodings")]
-use vortex_array::ArrayRef;
 use vortex_array::IntoArray;
 use vortex_array::VortexSessionExecute;
 use vortex_array::arrays::Constant;
@@ -23,7 +21,7 @@ use vortex_array::validity::Validity;
 use vortex_buffer::Buffer;
 use vortex_error::VortexResult;
 use vortex_fastlanes::BitPacked;
-#[cfg(not(any(feature = "unstable_encodings", feature = "pco")))]
+#[cfg(not(feature = "pco"))]
 use vortex_fastlanes::BlockedFoR;
 use vortex_fastlanes::FoR;
 use vortex_runend::RunEnd;
@@ -32,13 +30,13 @@ use vortex_session::VortexSession;
 use vortex_sparse::Sparse;
 
 use crate::BtrBlocksCompressor;
-#[cfg(not(any(feature = "unstable_encodings", feature = "pco")))]
+#[cfg(not(feature = "pco"))]
 use crate::BtrBlocksCompressorBuilder;
-#[cfg(not(any(feature = "unstable_encodings", feature = "pco")))]
+#[cfg(not(feature = "pco"))]
 use crate::SchemeExt;
-#[cfg(not(any(feature = "unstable_encodings", feature = "pco")))]
+#[cfg(not(feature = "pco"))]
 use crate::schemes::integer::BlockedFoRScheme;
-#[cfg(not(any(feature = "unstable_encodings", feature = "pco")))]
+#[cfg(not(feature = "pco"))]
 use crate::schemes::integer::FoRScheme;
 
 static SESSION: LazyLock<VortexSession> = LazyLock::new(vortex_array::array_session);
@@ -69,7 +67,7 @@ fn test_for_compressed() -> VortexResult<()> {
 /// Restricted to the default scheme set: `Delta` and `Pco` model this same shape and beat the
 /// blocked scheme on it, so with those compiled in the choice says nothing about this scheme.
 /// The bit-width property it exists for is covered feature-independently in `vortex-fastlanes`.
-#[cfg(not(any(feature = "unstable_encodings", feature = "pco")))]
+#[cfg(not(feature = "pco"))]
 #[test]
 fn test_blocked_for_compressed() -> VortexResult<()> {
     // Values that stay tightly clustered within each 1024-value block but drift far apart over
@@ -93,7 +91,7 @@ fn test_blocked_for_compressed() -> VortexResult<()> {
 /// two `Sequence` children for zero bytes, or that global `FoR` already packs the run's narrow
 /// range. Without a guard the analytic ratio outbids both — TPC-H `ps_partkey`, four suppliers
 /// per part, went from 0 bytes to 800 kB.
-#[cfg(not(any(feature = "unstable_encodings", feature = "pco")))]
+#[cfg(not(feature = "pco"))]
 #[test]
 fn test_blocked_for_never_loses_to_default_schemes_on_runs() -> VortexResult<()> {
     // Run length 4, drifting far enough over the array that per-block references would narrow
@@ -128,7 +126,7 @@ fn test_blocked_for_never_loses_to_default_schemes_on_runs() -> VortexResult<()>
 /// to a constant for almost nothing. Skipping instead would leave a compressor built without
 /// `FoRScheme` applying no frame of reference at all, dropping the array to plain bit packing —
 /// on ClickBench `WatchID` that cost 1.61%.
-#[cfg(not(any(feature = "unstable_encodings", feature = "pco")))]
+#[cfg(not(feature = "pco"))]
 #[test]
 fn test_blocked_for_stands_in_for_global_for() -> VortexResult<()> {
     let values: Vec<i32> = (0..16_384).map(|i| 1_000_000 + ((i * 37) % 100)).collect();
@@ -277,7 +275,6 @@ fn test_rle_compressed() -> VortexResult<()> {
 /// (so Sequence skips), all-unique with no runs (so RunEnd/Dict skip), and a wide absolute range.
 /// Delta's residuals are far smaller than the FoR span, so Delta should win and round-trip, and
 /// it must appear at most once in the tree.
-#[cfg(feature = "unstable_encodings")]
 #[test]
 fn test_delta_compressed() -> VortexResult<()> {
     let mut ctx = SESSION.create_execution_ctx();
@@ -316,7 +313,6 @@ fn test_delta_compressed() -> VortexResult<()> {
 
 /// Same as [`test_delta_compressed`], but with a length that is not a multiple of 1024.
 /// Zero-padding the trailing chunk used to inflate the delta span and cause DeltaScheme to skip.
-#[cfg(feature = "unstable_encodings")]
 #[test]
 fn test_delta_compressed_unaligned_length() -> VortexResult<()> {
     let mut ctx = SESSION.create_execution_ctx();
@@ -350,7 +346,6 @@ fn test_delta_compressed_unaligned_length() -> VortexResult<()> {
 /// Nullable unaligned monotone must round-trip through Delta (and a cascaded residual).
 ///
 /// Mirrors `duckdb/aggregate_pushdown.slt`: `NULL` then `1..=100000` (length 100001).
-#[cfg(feature = "unstable_encodings")]
 #[test]
 fn test_delta_nullable_unaligned_sum() -> VortexResult<()> {
     use vortex_array::aggregate_fn::fns::sum::sum;
@@ -379,8 +374,7 @@ fn test_delta_nullable_unaligned_sum() -> VortexResult<()> {
 }
 
 /// Returns true if any `Delta` array appears below an ancestor `Delta` in the tree.
-#[cfg(feature = "unstable_encodings")]
-fn has_nested_delta(array: &ArrayRef, under_delta: bool) -> bool {
+fn has_nested_delta(array: &vortex_array::ArrayRef, under_delta: bool) -> bool {
     use vortex_fastlanes::Delta;
 
     let is_delta = array.is::<Delta>();

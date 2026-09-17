@@ -1,7 +1,15 @@
 # Compression benchmark
 
-Measures compression and decompression throughput, plus resulting file sizes, for Vortex
-versus Parquet (and optionally Lance) across a range of datasets: NYC taxi data, several
+Measures compression and decompression throughput, plus resulting file sizes, for Vortex,
+Parquet, uncompressed Arrow IPC, and optionally Lance.
+
+[Arrow IPC](https://arrow.apache.org/docs/format/Columnar.html#ipc-file-format) is Apache
+Arrow's built-in file format, formerly called Feather V2. This suite writes it without
+optional buffer compression. Its timings therefore isolate serialization and deserialization
+without codec cost. Its file size provides the approximately 1x baseline for compression
+ratios. Parquet provides the established reference for a compressed columnar representation.
+
+The suite covers NYC taxi data and several
 [Public BI](https://github.com/cwida/public_bi_benchmark) tables (Arade, Bimbo,
 CMSprovider, Euro2016, Food, HashTags), TPC-H `l_comment` variants, and synthetic nested
 data. This is the workload behind the `Compression` PR comment.
@@ -33,11 +41,11 @@ Both sides therefore decode all the way to device-resident arrays, which is what
 
 ```bash
 cargo run -p compress-bench --profile release_debug \
-  --features cuda,unstable_encodings -- --gpu-decompress
+  --features cuda -- --gpu-decompress
 
 # pick the Parquet page codec the GPU file is written with (default: snappy)
 cargo run -p compress-bench --profile release_debug \
-  --features cuda,unstable_encodings -- --gpu-decompress --gpu-parquet-codec zstd
+  --features cuda -- --gpu-decompress --gpu-parquet-codec zstd
 ```
 
 ### cuDF
@@ -108,7 +116,7 @@ still publishes comparable numbers — it just takes considerably longer:
 
 ```bash
 cargo run -p compress-bench --profile release_debug \
-  --features cuda,unstable_encodings -- --gpu-decompress --gpu-verify --iterations 1
+  --features cuda -- --gpu-decompress --gpu-verify --iterations 1
 ```
 
 Any `--gpu-decompress` run reports on every dataset rather than stopping at the first failure, so
@@ -117,7 +125,11 @@ rendered before the failure summary, so a dataset the GPU cannot decode still le
 the matrix with numbers — the process exits non-zero either way.
 
 The dataset list in `src/main.rs` therefore holds only datasets a `--gpu-verify` run has confirmed.
-Several others are waiting on `vortex-cuda` kernel gaps (`u16` in `date_time_parts`, a
-`vortex.masked` kernel, and a CPU fallback reached with device-resident buffers); they are listed
-with their reasons next to `gpu_datasets`. Add one there once its gap is closed and verification
-passes.
+It now covers the whole compress suite: the kernel gaps that kept `taxi`, `Arade`, `CMSprovider`,
+`Euro2016`, `HashTags` and the `StructListOfInts` wide tables off it — `u16` components in
+`date_time_parts`, per-element `RunEnd` validity, and missing `vortex.masked` and `vortex.list`
+kernels — have since been closed. Add a new dataset there once verification passes.
+
+`airquality` and `rplace` download from pcodec's public bucket, which the CPU suite skips to avoid
+creating egress charges for pcodec. The GPU suite runs every entry on its explicit list, so both
+are fetched on each GPU run.
