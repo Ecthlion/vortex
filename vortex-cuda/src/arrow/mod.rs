@@ -9,6 +9,8 @@
 //! More documentation at <https://arrow.apache.org/docs/format/CDeviceDataInterface.html>
 
 mod canonical;
+#[cfg(test)]
+mod dictionary_tests;
 mod list_view;
 mod offsets;
 
@@ -62,6 +64,7 @@ use vortex_arrow::ArrowSessionExt;
 
 use crate::CudaBufferExt;
 use crate::CudaExecutionCtx;
+use crate::DictionaryExport;
 use crate::VarBinExportLayout;
 
 mod arrow_c_abi {
@@ -482,6 +485,8 @@ pub trait DeviceArrayStreamExt {
     /// The Arrow Device stream contract requires all arrays to share the schema reported by
     /// `get_schema`. The schema is derived from the first array, or from the logical dtype
     /// for an empty stream. Chunks that export to different Arrow types are rejected mid-stream.
+    /// Set [`DictionaryExport::Decode`] on the [`crate::CudaSession`] to export logical plain
+    /// types even when chunks vary between dictionary/plain encodings or dictionary index widths.
     ///
     /// Drive the returned stream from one thread. `runtime` must be the runtime that owns the
     /// underlying scan tasks and per-array exports.
@@ -499,38 +504,42 @@ impl DeviceArrayStreamExt for SendableArrayStream {
         session: &VortexSession,
         runtime: &CurrentThreadRuntime,
     ) -> VortexResult<ArrowDeviceArrayStream> {
-        let dtype = self.dtype().clone();
         let ctx = crate::CudaSession::create_execution_ctx(session)?;
-        let array_iter = Box::new(runtime.block_on_stream(self));
-        Ok(device_array_stream(array_iter, dtype, ctx, runtime.clone()))
+        Ok(ArrowDeviceArrayStream::new(self, ctx, runtime))
     }
 }
 
-/// Build the Arrow Device stream that owns `array_iter` and exports its arrays through `ctx`.
-fn device_array_stream(
-    array_iter: ArrayStreamIterator,
-    dtype: DType,
-    ctx: CudaExecutionCtx,
-    runtime: CurrentThreadRuntime,
-) -> ArrowDeviceArrayStream {
-    let private_data = Box::new(DeviceArrayStreamPrivateData {
-        device_id: ctx.stream().context().ordinal() as i64,
-        array_iter,
-        ctx,
-        runtime,
-        dtype,
-        schema: None,
-        pending_array: None,
-        last_error: None,
-    });
+impl ArrowDeviceArrayStream {
+    /// Export a stream using an owned context, retaining its session and per-context configuration.
+    ///
+    /// The schema, runtime, and release requirements of
+    /// [`DeviceArrayStreamExt::export_device_array_stream`] also apply here.
+    pub fn new(
+        array_stream: SendableArrayStream,
+        ctx: CudaExecutionCtx,
+        runtime: &CurrentThreadRuntime,
+    ) -> Self {
+        let dtype = array_stream.dtype().clone();
+        let array_iter = Box::new(runtime.block_on_stream(array_stream));
+        let private_data = Box::new(DeviceArrayStreamPrivateData {
+            device_id: ctx.stream().context().ordinal() as i64,
+            array_iter,
+            ctx,
+            runtime: runtime.clone(),
+            dtype,
+            schema: None,
+            pending_array: None,
+            last_error: None,
+        });
 
-    ArrowDeviceArrayStream {
-        device_type: ARROW_DEVICE_CUDA,
-        get_schema: Some(device_stream_get_schema),
-        get_next: Some(device_stream_get_next),
-        get_last_error: Some(device_stream_get_last_error),
-        release: Some(device_stream_release),
-        private_data: Box::into_raw(private_data).cast(),
+        Self {
+            device_type: ARROW_DEVICE_CUDA,
+            get_schema: Some(device_stream_get_schema),
+            get_next: Some(device_stream_get_next),
+            get_last_error: Some(device_stream_get_last_error),
+            release: Some(device_stream_release),
+            private_data: Box::into_raw(private_data).cast(),
+        }
     }
 }
 
@@ -690,6 +699,10 @@ pub(crate) fn arrow_schema_for_array(
     array: &ArrayRef,
     ctx: &mut CudaExecutionCtx,
 ) -> VortexResult<FFI_ArrowSchema> {
+    if ctx.cuda_session().dictionary_export() == DictionaryExport::Decode {
+        return ArrowDeviceStreamSchema::from_dtype(array.dtype(), ctx)?.to_ffi();
+    }
+
     if let Some(struct_array) = array.as_opt::<Struct>() {
         return Ok(FFI_ArrowSchema::try_from(Schema::new(
             arrow_device_export_struct_fields_for_array(
@@ -772,31 +785,21 @@ fn arrow_device_export_field_for_array(
         ));
     }
 
+    let mut list_field = |elements: &ArrayRef| {
+        let element =
+            arrow_device_export_field_for_array(Field::LIST_FIELD_DEFAULT_NAME, elements, ctx)?;
+        Ok(Field::new_list(name, element, array.dtype().is_nullable()))
+    };
     if let Some(list) = array.as_opt::<List>() {
-        let element = arrow_device_export_field_for_array(
-            Field::LIST_FIELD_DEFAULT_NAME,
-            list.elements(),
-            ctx,
-        )?;
-        return Ok(Field::new_list(name, element, array.dtype().is_nullable()));
+        return list_field(list.elements());
     }
 
     if let Some(list) = array.as_opt::<ListView>() {
-        let element = arrow_device_export_field_for_array(
-            Field::LIST_FIELD_DEFAULT_NAME,
-            list.elements(),
-            ctx,
-        )?;
-        return Ok(Field::new_list(name, element, array.dtype().is_nullable()));
+        return list_field(list.elements());
     }
 
     if let Some(list) = array.as_opt::<FixedSizeList>() {
-        let element = arrow_device_export_field_for_array(
-            Field::LIST_FIELD_DEFAULT_NAME,
-            list.elements(),
-            ctx,
-        )?;
-        return Ok(Field::new_list(name, element, array.dtype().is_nullable()));
+        return list_field(list.elements());
     }
 
     arrow_device_export_field(name, &arrow_device_export_dtype(array.dtype()), ctx)
@@ -962,7 +965,7 @@ mod tests {
     use crate::arrow::release_device_array;
     use crate::arrow::release_schema;
 
-    fn last_error(stream: &mut ArrowDeviceArrayStream) -> VortexResult<String> {
+    pub(super) fn last_error(stream: &mut ArrowDeviceArrayStream) -> VortexResult<String> {
         let get_last_error = stream
             .get_last_error
             .ok_or_else(|| vortex_err!("stream missing get_last_error callback"))?;

@@ -24,6 +24,9 @@ vortex-ffi = { path = "../../vortex-ffi" }
 [dev-dependencies]
 vortex-cuda-macros = { workspace = true }
 
+[build-dependencies]
+cbindgen = { workspace = true }
+
 [lib]
 name = "vortex_cuda_ffi"
 crate-type = ["rlib", "staticlib", "cdylib"]
