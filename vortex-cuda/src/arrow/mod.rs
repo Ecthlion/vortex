@@ -365,12 +365,15 @@ impl DeviceArrayStreamPrivateData {
         code
     }
 
-    /// Return the stream schema, exporting the first stream array to derive it if needed.
-    ///
-    /// A first array is held in `pending_array` so the following `get_next` returns it.
+    /// Derive decoded schemas from the dtype without pulling a batch. Preserved dictionaries
+    /// require the first array, held in `pending_array` for the following `get_next`.
     fn get_or_init_schema(&mut self) -> VortexResult<&ArrowDeviceStreamSchema> {
         if self.schema.is_none() {
-            match self.array_iter.next() {
+            let first = match self.ctx.cuda_session().dictionary_export() {
+                DictionaryExport::Preserve => self.array_iter.next(),
+                DictionaryExport::Decode => None,
+            };
+            match first {
                 Some(array) => self.pending_array = Some(self.export_stream_array(array?)?),
                 None => {
                     self.schema = Some(ArrowDeviceStreamSchema::from_dtype(
@@ -511,10 +514,11 @@ pub trait DeviceArrayStreamExt {
     /// embedded `release` callback.
     ///
     /// The Arrow Device stream contract requires all arrays to share the schema reported by
-    /// `get_schema`. The schema is derived from the first array, or from the logical dtype
-    /// for an empty stream. Chunks that export to different Arrow types are rejected mid-stream.
-    /// Set [`DictionaryExport::Decode`] on the [`crate::CudaSession`] to export logical plain
-    /// types even when chunks vary between dictionary/plain encodings or dictionary index widths.
+    /// `get_schema`. By default, the schema is derived from the first array, or from the logical
+    /// dtype for an empty stream. Chunks exporting different Arrow types are rejected mid-stream.
+    /// With [`DictionaryExport::Decode`], the logical dtype determines a stable plain schema even
+    /// when chunks vary between dictionary/plain encodings or dictionary index widths. In this
+    /// mode, `get_schema` does not pull or export a batch; read/decode errors surface in `get_next`.
     ///
     /// Drive the returned stream from one thread. `runtime` must be the runtime that owns the
     /// underlying scan tasks and per-array exports.
@@ -623,7 +627,7 @@ fn device_stream_callback(
     }
 }
 
-/// Write the stream's Arrow schema, initializing it from the first stream array if unset.
+/// Write the stream's Arrow schema, deriving it from the dtype or first array as needed.
 unsafe extern "C" fn device_stream_get_schema(
     stream: *mut ArrowDeviceArrayStream,
     out: *mut ArrowSchema,

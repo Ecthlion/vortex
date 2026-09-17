@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::task::Poll;
+
 use futures::future::BoxFuture;
 use futures::stream;
 use rstest::rstest;
@@ -241,6 +245,67 @@ fn test_decode_mixed_dictionary_device_stream(
     assert!(eos.array.release.is_none());
     // SAFETY: This is the live stream's final use.
     unsafe { stream.release.expect("missing release")(&raw mut stream) };
+    Ok(())
+}
+
+#[rstest]
+#[case::values(true, false)]
+#[case::error(true, true)]
+#[case::empty(false, false)]
+#[crate::test]
+fn test_decode_stream_schema_does_not_poll(
+    #[case] has_batch: bool,
+    #[case] fails: bool,
+    #[values(false, true)] consume: bool,
+) -> VortexResult<()> {
+    let runtime = CurrentThreadRuntime::new();
+    let session = vortex::array::array_session()
+        .with_some(CudaSession::try_default()?.with_dictionary_export(DictionaryExport::Decode));
+    let array = PrimitiveArray::from_iter([10i32, 20, 30]).into_array();
+    let dtype = array.dtype().clone();
+    let mut batch = has_batch.then(|| {
+        if fails {
+            Err(vortex_err!("deferred scan error"))
+        } else {
+            Ok(array)
+        }
+    });
+    let polls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&polls);
+    let input = stream::poll_fn(move |_| {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Poll::Ready(batch.take())
+    });
+    let mut stream = ArrayStreamAdapter::new(dtype, input)
+        .boxed()
+        .export_device_array_stream(&session, &runtime)?;
+    for _ in 0..2 {
+        let schema = get_schema(&mut stream)?;
+        assert_eq!(
+            Field::try_from(&schema)?,
+            Field::new("", DataType::Int32, false)
+        );
+    }
+    assert_eq!(polls.load(Ordering::Relaxed), 0);
+    if consume {
+        let (status, mut array) = get_next(&mut stream);
+        assert_eq!(polls.load(Ordering::Relaxed), 1);
+        if fails {
+            assert_eq!(status, LIBC_EIO);
+            assert!(last_error(&mut stream)?.contains("deferred scan error"));
+            assert!(array.array.release.is_none());
+        } else {
+            assert_eq!(status, 0, "{}", last_error(&mut stream)?);
+            assert_eq!(array.array.release.is_some(), has_batch);
+            if has_batch {
+                assert_eq!(array.array.length, 3);
+            }
+            release_device_array(&mut array);
+        }
+    }
+    // SAFETY: This is the live stream's final use, including schema-only consumers.
+    unsafe { stream.release.expect("missing release")(&raw mut stream) };
+    assert_eq!(polls.load(Ordering::Relaxed), usize::from(consume));
     Ok(())
 }
 
