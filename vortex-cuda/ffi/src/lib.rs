@@ -387,7 +387,7 @@ fn projected_scan(
                 "unknown CUDA scan column: {name:?}"
             );
         }
-        let projection = select(columns, root()).optimize_recursive(file.dtype())?;
+        let projection = select(columns, root()).optimize(file.dtype())?;
         scan = scan.with_projection(projection.bind(file.dtype())?);
     }
     if batch_rows != 0 {

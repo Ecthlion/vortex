@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering;
 
 use futures::TryStreamExt;
 use vortex::array::VortexSessionExecute;
-use vortex::arrow::ArrowSessionExt;
+use vortex::array::assert_arrays_eq;
 use vortex::buffer::ByteBuffer;
 use vortex::buffer::ByteBufferMut;
 use vortex::file::WriteOptionsSessionExt;
@@ -95,8 +95,8 @@ fn session() -> VortexSession {
     VortexSession::default().with_handle(ffi_runtime().handle())
 }
 
-fn table() -> VortexResult<ArrayRef> {
-    Ok(StructArray::try_new(
+fn table() -> VortexResult<StructArray> {
+    StructArray::try_new(
         ["ids", "unused", "値.x"].into(),
         vec![
             PrimitiveArray::from_iter(0u32..5).into_array(),
@@ -106,8 +106,7 @@ fn table() -> VortexResult<ArrayRef> {
         ],
         5,
         Validity::NonNullable,
-    )?
-    .into_array())
+    )
 }
 
 fn file_bytes(
@@ -140,22 +139,6 @@ fn open_file(
     session
         .open_options()
         .open_buffer(file_bytes(session, array, cuda_block_rows)?)
-}
-
-fn assert_arrow_eq(
-    session: &VortexSession,
-    actual: ArrayRef,
-    expected: ArrayRef,
-) -> VortexResult<()> {
-    let mut ctx = session.create_execution_ctx();
-    let mut to_data = |array| {
-        session
-            .arrow()
-            .execute_arrow(array, None, &mut ctx)
-            .map(|array| array.to_data())
-    };
-    assert_eq!(to_data(actual)?, to_data(expected)?);
-    Ok(())
 }
 
 #[test]
@@ -200,12 +183,8 @@ fn test_projection_cpu_never_requests_unselected_column_segments() -> VortexResu
     let session = session();
     let input = table()?;
     let columns = names(&["値.x", "ids"])?;
-    let expected = input
-        .clone()
-        .execute::<StructArray>(&mut session.create_execution_ctx())?
-        .project(columns.as_ref())?
-        .into_array();
-    let file = open_file(&session, input, None)?;
+    let expected = input.project(columns.as_ref())?.into_array();
+    let file = open_file(&session, input.into_array(), None)?;
     // TableStrategy writes one flat child per column, so child 1 is exactly the unused column.
     let children = file.footer().layout().children()?;
     let forbidden = children[1].segment_ids();
@@ -221,7 +200,7 @@ fn test_projection_cpu_never_requests_unselected_column_segments() -> VortexResu
             .into_array_stream()?
             .read_all(),
     )?;
-    assert_arrow_eq(&session, actual, expected)?;
+    assert_arrays_eq!(actual, expected, &mut session.create_execution_ctx());
     assert_eq!(source.rejected.load(Ordering::Relaxed), 0);
     // The same reader must fail without projection, proving the guard actually observes reads.
     assert_error(
@@ -389,7 +368,11 @@ fn batch_lengths(stream: &mut ArrowDeviceArrayStream) -> Vec<i64> {
 fn test_projection_gpu_local_file_schema_and_batch_boundaries() -> VortexResult<()> {
     for (block_rows, batch_rows) in [(0, 2), (2, 3)] {
         let session = session().with_some(CudaSession::try_default()?);
-        let file = LocalFile::new(&file_bytes(&session, table()?, Some(block_rows))?)?;
+        let file = LocalFile::new(&file_bytes(
+            &session,
+            table()?.into_array(),
+            Some(block_rows),
+        )?)?;
         let path = file
             .0
             .to_str()

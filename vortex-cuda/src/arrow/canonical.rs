@@ -2607,11 +2607,10 @@ mod tests {
         #[case] dtype: DType,
         #[values(DictionaryExport::Preserve, DictionaryExport::Decode)] policy: DictionaryExport,
     ) -> VortexResult<()> {
-        let session =
-            array_session().with_some(CudaSession::try_default()?.with_dictionary_export(policy));
         // Direct FSST varbin export must work when execute_cuda rejects standalone FSST,
         // ruling out eager canonicalization.
-        let mut ctx = CudaSession::create_execution_ctx(&session)?
+        let mut ctx = cuda_ctx_with_varbin_layout(VarBinExportLayout::VarBin)?
+            .with_dictionary_export(policy)
             .with_dispatch_mode(CudaDispatchMode::DynDispatchOnly);
         let fsst = fsst_array_from(&values, dtype.clone(), &mut ctx)?;
         // CUDA FSST needs a host symbol table. Upload codes and lengths to prevent CPU fallback.

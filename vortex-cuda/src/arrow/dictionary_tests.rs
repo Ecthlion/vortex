@@ -221,9 +221,8 @@ fn test_decode_mixed_dictionary_device_stream(
         .boxed()
         .export_device_array_stream(&session, &runtime)?;
     let schema = get_schema(&mut stream)?;
-    let mut plain = runtime.block_on(expected.clone().export_device_array_with_schema(&mut ctx))?;
-    assert_eq!(Field::try_from(&schema)?, Field::try_from(&plain.schema)?);
-    release_device_array(&mut plain.array);
+    let plain_schema = arrow_schema_for_array(&expected, &mut ctx)?;
+    assert_eq!(Field::try_from(&schema)?, Field::try_from(&plain_schema)?);
     for _ in 0..4 {
         let (status, mut array) = get_next(&mut stream);
         assert_eq!(status, 0, "{}", last_error(&mut stream)?);
@@ -280,8 +279,7 @@ async fn test_decode_non_contiguous_dictionary_list_view() -> VortexResult<()> {
 
 #[crate::test]
 async fn test_decode_unsupported_device_dictionary_does_not_fall_back_to_cpu() -> VortexResult<()> {
-    let cuda = CudaSession::try_default()?;
-    let session = vortex::array::array_session().with_some(cuda.clone());
+    let session = vortex::array::array_session().with_some(CudaSession::try_default()?);
     let mut ctx = CudaSession::create_execution_ctx(&session)?;
     // A dictionary of structs can be preserved, but has no CUDA gather kernel today.
     let (values, _) = values_and_expected(false);
@@ -291,9 +289,7 @@ async fn test_decode_unsupported_device_dictionary_does_not_fall_back_to_cpu() -
     assert!(!preserved.array.dictionary.is_null());
     release_device_array(&mut preserved);
 
-    let session = vortex::array::array_session()
-        .with_some(cuda.with_dictionary_export(DictionaryExport::Decode));
-    let mut ctx = CudaSession::create_execution_ctx(&session)?;
+    let mut ctx = ctx.with_dictionary_export(DictionaryExport::Decode);
     let error = match array.export_device_array_with_schema(&mut ctx).await {
         Ok(mut exported) => {
             release_device_array(&mut exported.array);
