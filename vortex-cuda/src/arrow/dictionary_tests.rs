@@ -193,6 +193,7 @@ fn test_decode_mixed_dictionary_device_stream(
     #[case] strings: bool,
     #[case] nested: bool,
     #[case] plain_first: bool,
+    #[values(false, true)] schema_first: bool,
 ) -> VortexResult<()> {
     let runtime = CurrentThreadRuntime::new();
     let session = vortex::array::array_session()
@@ -220,9 +221,11 @@ fn test_decode_mixed_dictionary_device_stream(
     let mut stream = ArrayStreamAdapter::new(expected.dtype().clone(), stream::iter(chunks))
         .boxed()
         .export_device_array_stream(&session, &runtime)?;
-    let schema = get_schema(&mut stream)?;
     let plain_schema = arrow_schema_for_array(&expected, &mut ctx)?;
-    assert_eq!(Field::try_from(&schema)?, Field::try_from(&plain_schema)?);
+    if schema_first {
+        let schema = get_schema(&mut stream)?;
+        assert_eq!(Field::try_from(&schema)?, Field::try_from(&plain_schema)?);
+    }
     for _ in 0..4 {
         let (status, mut array) = get_next(&mut stream);
         assert_eq!(status, 0, "{}", last_error(&mut stream)?);
@@ -231,10 +234,51 @@ fn test_decode_mixed_dictionary_device_stream(
         assert_arrays_eq!(actual, expected, ctx.execution_ctx());
         release_device_array(&mut array);
     }
+    let schema = get_schema(&mut stream)?;
+    assert_eq!(Field::try_from(&schema)?, Field::try_from(&plain_schema)?);
     let (status, eos) = get_next(&mut stream);
     assert_eq!(status, 0);
     assert!(eos.array.release.is_none());
     // SAFETY: This is the live stream's final use.
+    unsafe { stream.release.expect("missing release")(&raw mut stream) };
+    Ok(())
+}
+
+#[crate::test]
+fn test_decode_stream_validates_dtype_and_device() -> VortexResult<()> {
+    let runtime = CurrentThreadRuntime::new();
+    let session = vortex::array::array_session()
+        .with_some(CudaSession::try_default()?.with_dictionary_export(DictionaryExport::Decode));
+    let array = PrimitiveArray::from_iter([10i32, 20, 30]).into_array();
+    let mut stream = array
+        .clone()
+        .to_array_stream()
+        .boxed()
+        .export_device_array_stream(&session, &runtime)?;
+    // SAFETY: The stream is live and exclusively borrowed until the state is no longer used.
+    let state = unsafe { device_stream_private_data(&raw mut stream) }.expect("missing state");
+    let mut first = state.export_stream_array(array.clone())?;
+    release_device_array(&mut first);
+    assert!(state.schema.is_some());
+
+    let error = state
+        .export_stream_array(PrimitiveArray::from_iter([10u32, 20, 30]).into_array())
+        .err()
+        .expect("accepted a different dtype");
+    assert!(error.to_string().contains("stream array dtype changed"));
+    let error = state.check_device(&ArrowDeviceArray::empty()).unwrap_err();
+    assert!(error.to_string().contains("non-CUDA device type"));
+    state.device_id = -1;
+    let error = state
+        .export_stream_array(array)
+        .err()
+        .expect("accepted a different device");
+    assert!(
+        error
+            .to_string()
+            .contains("stream array moved from CUDA device")
+    );
+    // SAFETY: This is the live stream's final use; no state borrow remains.
     unsafe { stream.release.expect("missing release")(&raw mut stream) };
     Ok(())
 }

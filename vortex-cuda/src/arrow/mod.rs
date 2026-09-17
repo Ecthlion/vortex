@@ -407,6 +407,30 @@ impl DeviceArrayStreamPrivateData {
             array.dtype()
         );
 
+        if self.ctx.cuda_session().dictionary_export() == DictionaryExport::Decode {
+            // The canonical exporter uses only the dtype and fixed context settings in this mode.
+            // Avoid constructing and parsing a temporary C schema for every batch.
+            let schema = if self.schema.is_none() {
+                Some(ArrowDeviceStreamSchema::from_dtype(
+                    &self.dtype,
+                    &mut self.ctx,
+                )?)
+            } else {
+                None
+            };
+            let mut device_array = self
+                .runtime
+                .block_on(array.export_device_array(&mut self.ctx))?;
+            if let Err(error) = self.check_device(&device_array) {
+                release_device_array(&mut device_array);
+                return Err(error);
+            }
+            if let Some(schema) = schema {
+                self.schema = Some(schema);
+            }
+            return Ok(device_array);
+        }
+
         let ArrowDeviceArrayWithSchema {
             schema: mut ffi_schema,
             array: mut device_array,
@@ -431,12 +455,7 @@ impl DeviceArrayStreamPrivateData {
         Ok(device_array)
     }
 
-    /// Check that a freshly exported device array matches the stream schema and CUDA device.
-    fn check_stream_array(
-        &self,
-        ffi_schema: &FFI_ArrowSchema,
-        device_array: &ArrowDeviceArray,
-    ) -> VortexResult<ArrowDeviceStreamSchema> {
+    fn check_device(&self, device_array: &ArrowDeviceArray) -> VortexResult<()> {
         vortex_ensure!(
             device_array.device_type == ARROW_DEVICE_CUDA,
             "stream array exported on non-CUDA device type {}",
@@ -448,7 +467,16 @@ impl DeviceArrayStreamPrivateData {
             self.device_id,
             device_array.device_id
         );
+        Ok(())
+    }
 
+    /// Check that a freshly exported device array matches the stream schema and CUDA device.
+    fn check_stream_array(
+        &self,
+        ffi_schema: &FFI_ArrowSchema,
+        device_array: &ArrowDeviceArray,
+    ) -> VortexResult<ArrowDeviceStreamSchema> {
+        self.check_device(device_array)?;
         let exported_schema = ArrowDeviceStreamSchema::from_ffi(ffi_schema, &self.dtype)?;
         if let Some(stream_schema) = &self.schema {
             vortex_ensure!(
