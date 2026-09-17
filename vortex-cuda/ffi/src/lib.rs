@@ -539,8 +539,12 @@ mod tests {
     use vortex::array::validity::Validity;
     use vortex::error::VortexResult;
     use vortex_cuda::arrow::ARROW_DEVICE_CUDA;
+    use vortex_cuda::arrow::release_device_array;
+    use vortex_cuda::arrow::release_schema;
     use vortex_cuda_macros::cuda_not_available;
     use vortex_cuda_macros::test as cuda_test;
+    use vortex_ffi::vx_array_free as free_test_array;
+    use vortex_ffi::vx_session_free as free_test_session;
 
     use super::*;
 
@@ -614,14 +618,12 @@ mod tests {
                 ctx,
                 ffi_runtime(),
             );
-            let get_schema = stream.get_schema.expect("missing get_schema");
             let get_next = stream.get_next.expect("missing get_next");
             let release = stream.release.expect("missing release");
-            let mut schema = FFI_ArrowSchema::empty();
+            let schema = projection::stream_schema(&mut stream);
             let mut exported = empty_device_array();
-            // SAFETY: The live stream owns these callbacks, and both outputs are writable.
+            // SAFETY: The live stream owns the callback, and the output is writable.
             unsafe {
-                assert_eq!(get_schema(&raw mut stream, (&raw mut schema).cast()), 0);
                 assert_eq!(get_next(&raw mut stream, &raw mut exported), 0);
             }
             assert_eq!(Field::try_from(&schema)?.data_type(), &expected_type);
@@ -645,32 +647,8 @@ mod tests {
         Box::into_raw(Box::new(session)).cast::<vx_session>()
     }
 
-    unsafe fn free_test_session(session: *mut vx_session) {
-        unsafe { drop(Box::from_raw(session.cast::<VortexSession>())) };
-    }
-
     fn test_array(array: impl IntoArray) -> *const vx_array {
-        Arc::into_raw(Arc::new(array.into_array())).cast::<vx_array>()
-    }
-
-    unsafe fn free_test_array(array: *const vx_array) {
-        unsafe { Arc::decrement_strong_count(array.cast::<ArrayRef>()) };
-    }
-
-    unsafe fn release_schema(schema: &mut FFI_ArrowSchema) {
-        unsafe {
-            if let Some(release) = schema.release {
-                release(schema);
-            }
-        }
-    }
-
-    unsafe fn release_device_array(array: &mut ArrowDeviceArray) {
-        unsafe {
-            if let Some(release) = array.array.release {
-                release(&raw mut array.array);
-            }
-        }
+        Box::into_raw(Box::new(array.into_array())).cast::<vx_array>()
     }
 
     fn empty_device_array() -> ArrowDeviceArray {
@@ -683,14 +661,16 @@ mod tests {
         }
     }
 
-    #[cuda_test]
-    fn test_export_primitive_arrow_device() {
+    /// # Safety
+    /// `session` and `array` must be valid borrowed FFI handles for the duration of the call.
+    unsafe fn export_array(
+        session: *const vx_session,
+        array: *const vx_array,
+    ) -> (FFI_ArrowSchema, ArrowDeviceArray) {
         let mut error = ptr::null_mut();
-        let session = test_session(VortexSession::default());
-        let array = test_array(PrimitiveArray::from_iter(0u32..5));
         let mut schema = FFI_ArrowSchema::empty();
         let mut device_array = empty_device_array();
-
+        // SAFETY: The caller guarantees valid handles; all outputs are live and writable.
         let status = unsafe {
             vx_cuda_array_export_arrow_device(
                 session,
@@ -702,6 +682,15 @@ mod tests {
         };
         assert_eq!(status, VX_CUDA_OK);
         assert!(error.is_null());
+        (schema, device_array)
+    }
+
+    #[cuda_test]
+    fn test_export_primitive_arrow_device() {
+        let session = test_session(VortexSession::default());
+        let array = test_array(PrimitiveArray::from_iter(0u32..5));
+        // SAFETY: Both handles remain live until cleanup below.
+        let (mut schema, mut device_array) = unsafe { export_array(session, array) };
 
         let field = Field::try_from(&schema).expect("schema should be a field");
         assert_eq!(field.name(), "");
@@ -721,7 +710,6 @@ mod tests {
 
     #[cuda_test]
     fn test_export_struct_arrow_device_table() -> VortexResult<()> {
-        let mut error = ptr::null_mut();
         let session = test_session(VortexSession::default());
         let array = test_array(StructArray::try_new(
             ["ids", "values"].into(),
@@ -732,21 +720,8 @@ mod tests {
             3,
             Validity::NonNullable,
         )?);
-
-        let mut schema = FFI_ArrowSchema::empty();
-        let mut device_array = empty_device_array();
-
-        let status = unsafe {
-            vx_cuda_array_export_arrow_device(
-                session,
-                array,
-                &raw mut schema,
-                &raw mut device_array,
-                &raw mut error,
-            )
-        };
-        assert_eq!(status, VX_CUDA_OK);
-        assert!(error.is_null());
+        // SAFETY: Both handles remain live until cleanup below.
+        let (mut schema, mut device_array) = unsafe { export_array(session, array) };
 
         let arrow_schema = Schema::try_from(&schema)?;
         assert_eq!(arrow_schema.fields().len(), 2);
@@ -786,20 +761,8 @@ mod tests {
         assert!(!session.is_null());
 
         let array = test_array(PrimitiveArray::from_iter(0u32..5));
-        let mut schema = FFI_ArrowSchema::empty();
-        let mut device_array = empty_device_array();
-
-        let status = unsafe {
-            vx_cuda_array_export_arrow_device(
-                session,
-                array,
-                &raw mut schema,
-                &raw mut device_array,
-                &raw mut error,
-            )
-        };
-        assert_eq!(status, VX_CUDA_OK);
-        assert!(error.is_null());
+        // SAFETY: Both handles remain live until cleanup below.
+        let (mut schema, mut device_array) = unsafe { export_array(session, array) };
         assert_eq!(device_array.array.length, 5);
         assert_eq!(device_array.device_type, ARROW_DEVICE_CUDA);
 

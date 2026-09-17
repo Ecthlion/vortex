@@ -4,11 +4,11 @@
 use std::ffi::CStr;
 use std::io::Write;
 use std::mem::MaybeUninit;
-use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
 use futures::TryStreamExt;
+use tempfile::NamedTempFile;
 use vortex::array::VortexSessionExecute;
 use vortex::array::assert_arrays_eq;
 use vortex::buffer::ByteBuffer;
@@ -277,32 +277,6 @@ fn test_projection_ffi_validation_without_cuda() {
     );
 }
 
-struct LocalFile(PathBuf);
-
-impl LocalFile {
-    fn new(bytes: &[u8]) -> VortexResult<Self> {
-        static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "vortex-cuda-ffi-projection-{}-{}.vortex",
-            std::process::id(),
-            NEXT_ID.fetch_add(1, Ordering::Relaxed)
-        ));
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
-        let result = Self(path);
-        file.write_all(bytes)?;
-        Ok(result)
-    }
-}
-
-impl Drop for LocalFile {
-    fn drop(&mut self) {
-        drop(std::fs::remove_file(&self.0));
-    }
-}
-
 fn stream_error(stream: &mut ArrowDeviceArrayStream) -> String {
     // SAFETY: The callback and returned C string belong to this live stream.
     unsafe {
@@ -343,7 +317,7 @@ fn open_stream(
     unsafe { output.assume_init() }
 }
 
-fn stream_schema(stream: &mut ArrowDeviceArrayStream) -> FFI_ArrowSchema {
+pub(super) fn stream_schema(stream: &mut ArrowDeviceArrayStream) -> FFI_ArrowSchema {
     let mut schema = FFI_ArrowSchema::empty();
     let get_schema = stream.get_schema.expect("missing get_schema");
     // SAFETY: This live stream owns the callback; schema is writable.
@@ -374,8 +348,7 @@ fn batch_lengths(stream: &mut ArrowDeviceArrayStream) -> Vec<i64> {
         assert_eq!(array.device_type, ARROW_DEVICE_CUDA);
         assert_eq!(array.array.n_children, 2);
         lengths.push(array.array.length);
-        // SAFETY: Each live batch is released exactly once, before requesting the next one.
-        unsafe { release_device_array(&mut array) };
+        release_device_array(&mut array);
     }
     lengths
 }
@@ -384,13 +357,14 @@ fn batch_lengths(stream: &mut ArrowDeviceArrayStream) -> Vec<i64> {
 fn test_projection_gpu_local_file_schema_and_batch_boundaries() -> VortexResult<()> {
     for (block_rows, batch_rows) in [(0, 2), (2, 3)] {
         let session = session().with_some(CudaSession::try_default()?);
-        let file = LocalFile::new(&file_bytes(
+        let mut file = NamedTempFile::new()?;
+        file.write_all(&file_bytes(
             &session,
             table()?.into_array(),
             Some(block_rows),
         )?)?;
         let path = file
-            .0
+            .path()
             .to_str()
             .ok_or_else(|| vortex_err!("non-UTF-8 test path"))?;
         let options = vx_cuda_scan_options {

@@ -1,9 +1,10 @@
 # vortex-cuda-ffi
 
-CUDA-specific C FFI helpers for cuDF interop, keeping CUDA out of the base `vortex-ffi`
-crate. The public C API exports a borrowed `vx_array` as an `ArrowSchema + ArrowDeviceArray`
-pair, not cuDF objects. The caller passes these structs to cuDF and releases them after
-cuDF finishes importing.
+CUDA-specific C FFI helpers for cuDF interop.
+
+This crate keeps CUDA out of the base `vortex-ffi` crate. Its public C API exports a borrowed `vx_array` as an `ArrowSchema + ArrowDeviceArray` pair.
+
+It does not create cuDF objects itself. The caller passes the exported Arrow Device structs to cuDF and releases them after cuDF is done importing.
 
 Use this crate as the CUDA-enabled FFI artifact. Include both headers:
 

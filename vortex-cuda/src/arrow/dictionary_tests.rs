@@ -5,7 +5,6 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::task::Poll;
 
-use futures::future::BoxFuture;
 use futures::stream;
 use rstest::rstest;
 use vortex::array::IntoArray;
@@ -31,29 +30,24 @@ use crate::CudaSession;
 
 /// Preserve encodings while moving all buffers, including validity, to CUDA so unsupported
 /// decoding errors instead of falling back to the CPU.
-pub(super) fn upload(
-    array: ArrayRef,
-    ctx: &mut CudaExecutionCtx,
-) -> BoxFuture<'_, VortexResult<ArrayRef>> {
-    Box::pin(async move {
-        // Constants store scalar metadata, not replaceable data buffers.
-        if array.as_opt::<Constant>().is_some() {
-            return Ok(array);
-        }
-        let mut slots = Vec::new();
-        for slot in array.slots().iter() {
-            slots.push(match slot {
-                Some(child) => Some(upload(child.clone(), ctx).await?),
-                None => None,
-            });
-        }
-        let mut buffers = Vec::new();
-        for buffer in array.buffer_handles() {
-            buffers.push(ctx.ensure_on_device(buffer).await?);
-        }
-        // SAFETY: Slots and buffers are byte-for-byte copies; only their placement changes.
-        unsafe { array.with_slots(slots.into())?.with_buffers(buffers) }
-    })
+pub(super) fn upload(array: ArrayRef, ctx: &mut CudaExecutionCtx) -> VortexResult<ArrayRef> {
+    // Constants store scalar metadata, not replaceable data buffers.
+    if array.as_opt::<Constant>().is_some() {
+        return Ok(array);
+    }
+    let mut slots = Vec::new();
+    for slot in array.slots().iter() {
+        slots.push(match slot {
+            Some(child) => Some(upload(child.clone(), ctx)?),
+            None => None,
+        });
+    }
+    let mut buffers = Vec::new();
+    for buffer in array.buffer_handles() {
+        buffers.push(ctx.ensure_on_device_sync(buffer)?);
+    }
+    // SAFETY: Slots and buffers are byte-for-byte copies; only their placement changes.
+    unsafe { array.with_slots(slots.into())?.with_buffers(buffers) }
 }
 
 /// Copy a device buffer from a live, unreleased array produced by this exporter to the host.
@@ -90,12 +84,7 @@ fn read_plain(array: &ArrowArray, dtype: &DType) -> VortexResult<ArrayRef> {
         DType::Utf8(_) => {
             assert_eq!(array.n_buffers, 3);
             assert_eq!(array.n_children, 0);
-            let offsets = PrimitiveArray::from_byte_buffer(
-                buffer(array, 1)?,
-                PType::I32,
-                Validity::NonNullable,
-            )
-            .into_array();
+            let offsets = Buffer::<i32>::from_byte_buffer(buffer(array, 1)?).into_array();
             Ok(VarBinArray::try_new(
                 offsets,
                 buffer(array, 2)?.slice_unaligned(..),
@@ -175,13 +164,13 @@ fn get_next(stream: &mut ArrowDeviceArrayStream) -> (i32, ArrowDeviceArray) {
 }
 
 /// Upload chunks and synchronize before handing them to a separate export context.
-async fn upload_chunks(
+fn upload_chunks(
     chunks: Vec<ArrayRef>,
     ctx: &mut CudaExecutionCtx,
 ) -> VortexResult<Vec<VortexResult<ArrayRef>>> {
     let mut device_chunks = Vec::new();
     for chunk in chunks {
-        let chunk = upload(chunk, ctx).await?;
+        let chunk = upload(chunk, ctx)?;
         assert!(!chunk.is_host());
         device_chunks.push(Ok(chunk));
     }
@@ -221,7 +210,7 @@ fn test_decode_mixed_dictionary_device_stream(
     let wrap = |array| if nested { wrap_struct(array) } else { array };
     let expected = wrap(expected);
     let chunks = chunks.into_iter().map(wrap).collect();
-    let chunks = runtime.block_on(upload_chunks(chunks, &mut ctx))?;
+    let chunks = upload_chunks(chunks, &mut ctx)?;
     let mut stream = ArrayStreamAdapter::new(expected.dtype().clone(), stream::iter(chunks))
         .boxed()
         .export_device_array_stream(&session, &runtime)?;
@@ -359,7 +348,7 @@ async fn test_decode_non_contiguous_dictionary_list_view() -> VortexResult<()> {
     )
     .into_array();
     let expected = expected.take(PrimitiveArray::from_iter([2u32, 3, 0, 1]).into_array())?;
-    let array = upload(array, &mut ctx).await?;
+    let array = upload(array, &mut ctx)?;
     let mut exported = array.export_device_array_with_schema(&mut ctx).await?;
     assert_eq!(
         Field::try_from(&exported.schema)?,
@@ -389,7 +378,7 @@ async fn test_decode_unsupported_device_dictionary_does_not_fall_back_to_cpu() -
     let mut ctx = CudaSession::create_execution_ctx(&session)?;
     // A dictionary of structs can be preserved, but has no CUDA gather kernel today.
     let (values, _) = values_and_expected(false);
-    let array = upload(dictionary(wrap_struct(values), PType::U8)?, &mut ctx).await?;
+    let array = upload(dictionary(wrap_struct(values), PType::U8)?, &mut ctx)?;
     assert!(!array.is_host());
     let mut preserved = array.clone().export_device_array(&mut ctx).await?;
     assert!(!preserved.array.dictionary.is_null());
@@ -429,7 +418,7 @@ fn test_default_dictionary_device_stream(#[case] second_width: Option<PType>) ->
         Some(width) => dictionary(values, width)?,
         None => expected.clone(),
     };
-    let chunks = runtime.block_on(upload_chunks(vec![first, second], &mut ctx))?;
+    let chunks = upload_chunks(vec![first, second], &mut ctx)?;
     let mut stream = ArrayStreamAdapter::new(expected.dtype().clone(), stream::iter(chunks))
         .boxed()
         .export_device_array_stream(&session, &runtime)?;

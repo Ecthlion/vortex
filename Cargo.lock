@@ -10913,6 +10913,7 @@ dependencies = [
  "arrow-schema 59.3.0",
  "cbindgen",
  "futures",
+ "tempfile",
  "vortex",
  "vortex-cuda",
  "vortex-cuda-macros",

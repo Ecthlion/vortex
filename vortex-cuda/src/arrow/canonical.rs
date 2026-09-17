@@ -1767,28 +1767,14 @@ mod tests {
         array: &ArrowArray,
         buffer_idx: usize,
     ) -> VortexResult<Vec<i32>> {
-        let private_data = unsafe { &*array.private_data.cast::<PrivateData>() };
-        let buffer = private_data.buffers[buffer_idx]
-            .as_ref()
-            .vortex_expect("buffer should be present");
-        Ok(Buffer::<i32>::from_byte_buffer(buffer.to_host_sync())
-            .iter()
-            .copied()
-            .collect())
+        Ok(Buffer::<i32>::from_byte_buffer(private_data_buffer_bytes(array, buffer_idx)?).to_vec())
     }
 
     fn private_data_buffer_i16_values(
         array: &ArrowArray,
         buffer_idx: usize,
     ) -> VortexResult<Vec<i16>> {
-        let private_data = unsafe { &*array.private_data.cast::<PrivateData>() };
-        let buffer = private_data.buffers[buffer_idx]
-            .as_ref()
-            .vortex_expect("buffer should be present");
-        Ok(Buffer::<i16>::from_byte_buffer(buffer.to_host_sync())
-            .iter()
-            .copied()
-            .collect())
+        Ok(Buffer::<i16>::from_byte_buffer(private_data_buffer_bytes(array, buffer_idx)?).to_vec())
     }
 
     fn private_data_buffer_bytes(
@@ -2617,7 +2603,7 @@ mod tests {
         let mut slots = Vec::new();
         for slot in fsst.slots().iter() {
             slots.push(match slot {
-                Some(child) => Some(upload(child.clone(), &mut ctx).await?),
+                Some(child) => Some(upload(child.clone(), &mut ctx)?),
                 None => None,
             });
         }
