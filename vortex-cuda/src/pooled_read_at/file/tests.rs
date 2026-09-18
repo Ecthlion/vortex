@@ -3,37 +3,23 @@
 
 use std::future::Future;
 use std::io;
-use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Duration;
 
 use futures::poll;
 use parking_lot::Mutex;
 use rstest::rstest;
-use tokio::sync::Semaphore;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
-use vortex::array::buffer::BufferHandle;
-use vortex::buffer::Alignment;
-use vortex::error::VortexResult;
-use vortex::error::vortex_bail;
-use vortex::error::vortex_err;
-use vortex::io::VortexReadAt;
 use vortex::io::runtime::BlockingRuntime;
 use vortex::io::runtime::current::CurrentThreadRuntime;
 use vortex::io::session::RuntimeSessionExt;
 
-use super::DEFAULT_FILE_CONCURRENCY;
-use super::FILE_READ_CHUNK_BYTES;
-use super::FileReadBackend;
-use super::PooledFileReadAt;
-use super::PooledFileReadAtOptions;
-use super::PooledHostRead;
+use super::*;
 use crate::CudaSessionExt;
-use crate::pinned::PinnedByteBufferPool;
 
 const WAIT: Duration = Duration::from_secs(30);
 const FILE_OFFSET: u64 = (1 << 32) + 37;
@@ -89,11 +75,9 @@ impl FileReadBackend for FakeFileReadBackend {
         let prefix = usize::try_from(offset % alignment as u64)?;
         let source_len = (prefix + length).next_multiple_of(alignment);
         let mut buffer = pool.get(source_len)?;
-        buffer.as_mut_slice().fill(0xFF);
-        for (index, byte) in buffer.as_mut_slice()[prefix..prefix + length]
-            .iter_mut()
-            .enumerate()
-        {
+        let bytes = buffer.as_mut_slice();
+        bytes.fill(0xFF);
+        for (index, byte) in bytes[prefix..prefix + length].iter_mut().enumerate() {
             *byte = file_byte(offset + index as u64);
         }
 
@@ -311,10 +295,7 @@ async fn cancelled_reads_keep_slots_and_buffers_until_blocking_io_finishes() -> 
     first.finish().await;
     let resumed = tokio::select! {
         resumed = next_read(&mut blocked) => resumed,
-        result = &mut replacement => {
-            result?;
-            vortex_bail!("replacement completed before its backend was released");
-        }
+        result = &mut replacement => panic!("replacement completed before release: {result:?}"),
     };
     assert_eq!(resumed.offset, replacement_offset);
     assert_eq!(reader.read_slots.available_permits(), 0);
