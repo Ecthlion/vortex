@@ -608,6 +608,11 @@ mod tests {
     ) -> VortexResult<()> {
         let session = VortexSession::default();
         session.enable_edition(core)?;
+        let mut expected_editions = session.enabled_editions().editions();
+        assert!(expected_editions.contains(&core));
+        assert!(!expected_editions.contains(&CUDA_EDITION));
+        expected_editions.push(CUDA_EDITION);
+        expected_editions.sort_unstable();
         let kinds = [
             ComponentKind::Array,
             ComponentKind::Layout,
@@ -637,7 +642,7 @@ mod tests {
         }
         let mut enabled_editions = session.enabled_editions().editions();
         enabled_editions.sort_unstable();
-        assert_eq!(enabled_editions, [core, CUDA_EDITION]);
+        assert_eq!(enabled_editions, expected_editions);
         session.editions().validate()?;
         assert!(
             !VortexSession::default()

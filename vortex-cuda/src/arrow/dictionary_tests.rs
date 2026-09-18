@@ -302,7 +302,6 @@ fn test_decode_stream_validates_dtype_and_device() -> VortexResult<()> {
         .with_some(CudaSession::try_default()?.with_dictionary_export(DictionaryExport::Decode));
     let array = PrimitiveArray::from_iter([10i32, 20, 30]).into_array();
     let mut stream = array
-        .clone()
         .to_array_stream()
         .boxed()
         .export_device_array_stream(&session, &runtime)?;
@@ -314,16 +313,14 @@ fn test_decode_stream_validates_dtype_and_device() -> VortexResult<()> {
 
     let error = state
         .export_stream_array(PrimitiveArray::from_iter([10u32, 20, 30]).into_array())
-        .err()
-        .expect("accepted a different dtype");
+        .expect_err("accepted a different dtype");
     assert!(error.to_string().contains("stream array dtype changed"));
     let error = state.check_device(&ArrowDeviceArray::empty()).unwrap_err();
     assert!(error.to_string().contains("non-CUDA device type"));
     state.device_id = -1;
     let error = state
         .export_stream_array(array)
-        .err()
-        .expect("accepted a different device");
+        .expect_err("accepted a different device");
     assert!(
         error
             .to_string()
