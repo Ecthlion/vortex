@@ -57,6 +57,14 @@ impl PooledFileReadAtOptions {
         self.direct_io = true;
         self
     }
+
+    fn open(self, path: &Path) -> VortexResult<Arc<dyn FileReadBackend>> {
+        #[cfg(target_os = "linux")]
+        if self.direct_io {
+            return Ok(Arc::new(DirectFileReadBackend::open(path)?));
+        }
+        Ok(Arc::new(File::open(path)?))
+    }
 }
 
 struct PooledHostRead {
@@ -75,21 +83,9 @@ trait FileReadBackend: Send + Sync {
     ) -> VortexResult<PooledHostRead>;
 }
 
-struct BufferedFileReadBackend {
-    file: File,
-}
-
-impl BufferedFileReadBackend {
-    fn open(path: &Path) -> VortexResult<Self> {
-        Ok(Self {
-            file: File::open(path)?,
-        })
-    }
-}
-
-impl FileReadBackend for BufferedFileReadBackend {
+impl FileReadBackend for File {
     fn size(&self) -> VortexResult<u64> {
-        Ok(self.file.metadata()?.len())
+        Ok(self.metadata()?.len())
     }
 
     fn read(
@@ -99,32 +95,12 @@ impl FileReadBackend for BufferedFileReadBackend {
         length: usize,
     ) -> VortexResult<PooledHostRead> {
         let mut buffer = pool.get(length)?;
-        read_exact_at(&self.file, buffer.as_mut_slice(), offset)?;
+        read_exact_at(self, buffer.as_mut_slice(), offset)?;
         Ok(PooledHostRead {
             buffer,
             requested_range: 0..length,
         })
     }
-}
-
-#[cfg(target_os = "linux")]
-fn open_backend(
-    path: &Path,
-    options: PooledFileReadAtOptions,
-) -> VortexResult<Arc<dyn FileReadBackend>> {
-    if options.direct_io {
-        Ok(Arc::new(DirectFileReadBackend::open(path)?))
-    } else {
-        Ok(Arc::new(BufferedFileReadBackend::open(path)?))
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn open_backend(
-    path: &Path,
-    _options: PooledFileReadAtOptions,
-) -> VortexResult<Arc<dyn FileReadBackend>> {
-    Ok(Arc::new(BufferedFileReadBackend::open(path)?))
 }
 
 /// File reader that uses CUDA pinned host memory for I/O buffers and transfers
@@ -173,7 +149,7 @@ impl PooledFileReadAt {
     ) -> VortexResult<Self> {
         let path = path.as_ref();
         let uri = Arc::from(path.to_string_lossy().to_string());
-        let backend = open_backend(path, options)?;
+        let backend = options.open(path)?;
         Ok(Self {
             uri,
             backend,

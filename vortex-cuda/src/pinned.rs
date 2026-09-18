@@ -75,15 +75,6 @@ impl PinnedByteBuffer {
         })
     }
 
-    /// Returns the length of the buffer in bytes.
-    pub(crate) fn len(&self) -> usize {
-        self.logical_len
-    }
-
-    pub(crate) fn capacity(&self) -> usize {
-        self.capacity
-    }
-
     /// Returns the buffer as a mutable slice.
     pub(crate) fn as_mut_slice(&mut self) -> VortexResult<&mut [u8]> {
         self.event
@@ -227,13 +218,6 @@ impl PinnedByteBufferPool {
         Ok(PooledPinnedBuffer::new(inner, Arc::clone(self)))
     }
 
-    /// Defer returning a pinned buffer to the pool until the CUDA event completes.
-    fn put_inflight(&self, event: CudaEvent, buffer: PinnedByteBuffer) {
-        self.inflight
-            .lock()
-            .push(InflightPinnedBuffer { event, buffer });
-    }
-
     /// Snapshot pool reuse statistics.
     pub fn stats(&self) -> PinnedPoolStats {
         PinnedPoolStats {
@@ -272,7 +256,7 @@ impl PinnedByteBufferPool {
     }
 
     fn put(&self, buf: PinnedByteBuffer) {
-        let len = buf.capacity();
+        let len = buf.capacity;
         let overflow = {
             let mut buckets = self.buckets.lock();
             let bucket = buckets.entry(len).or_default();
@@ -336,7 +320,7 @@ impl PooledPinnedBuffer {
     #[cfg(target_os = "linux")]
     pub(crate) fn truncate(&mut self, len: usize) {
         let inner = self.inner.as_mut().vortex_expect("buffer already consumed");
-        assert!(len <= inner.len());
+        assert!(len <= inner.logical_len);
         inner.set_logical_len(len);
     }
 
@@ -349,7 +333,7 @@ impl PooledPinnedBuffer {
             .inner
             .as_ref()
             .vortex_expect("buffer already consumed")
-            .len();
+            .logical_len;
         let mut cuda_slice = stream.device_alloc::<u8>(len)?;
         self.copy_to_device(stream, 0..len, &mut cuda_slice.slice_mut(..))?;
         Ok(CudaDeviceBuffer::new(cuda_slice))
@@ -368,10 +352,10 @@ impl PooledPinnedBuffer {
     ) -> VortexResult<()> {
         let pinned = self.inner.as_mut().vortex_expect("buffer already consumed");
         vortex_ensure!(
-            range.start <= range.end && range.end <= pinned.len(),
+            range.start <= range.end && range.end <= pinned.logical_len,
             "invalid pinned host buffer range {:?} for length {}",
             range,
-            pinned.len()
+            pinned.logical_len
         );
         vortex_ensure!(
             range.len() == destination.len(),
@@ -396,7 +380,10 @@ impl PooledPinnedBuffer {
         // On earlier errors, Drop returns the buffer to the pool, but the HostSlice event still
         // gates access and freeing. On success, the inflight queue retains it until completion.
         let inner = self.inner.take().vortex_expect("buffer already consumed");
-        self.pool.put_inflight(event, inner);
+        self.pool.inflight.lock().push(InflightPinnedBuffer {
+            event,
+            buffer: inner,
+        });
         Ok(())
     }
 }

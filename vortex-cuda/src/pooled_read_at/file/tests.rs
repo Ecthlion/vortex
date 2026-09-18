@@ -63,6 +63,7 @@ struct BlockedRead {
 impl BlockedRead {
     async fn finish(self) {
         self.release.send(()).expect("failed to release fake read");
+        // This acknowledges the backend, not the outer job's result send or slot release.
         wait_for("fake read did not finish", self.finished)
             .await
             .expect("fake read dropped completion");
@@ -84,16 +85,9 @@ impl FileReadBackend for FakeFileReadBackend {
         let end = offset
             .checked_add(u64::try_from(length)?)
             .ok_or_else(|| vortex_err!("overflow reached fake backend"))?;
-        let prefix = if self.padded {
-            usize::try_from(offset % 4096)?
-        } else {
-            0
-        };
-        let source_len = if self.padded {
-            (prefix + length).next_multiple_of(4096)
-        } else {
-            length
-        };
+        let alignment = if self.padded { 4096 } else { 1 };
+        let prefix = usize::try_from(offset % alignment as u64)?;
+        let source_len = (prefix + length).next_multiple_of(alignment);
         let mut buffer = pool.get(source_len)?;
         buffer.as_mut_slice().fill(0xFF);
         for (index, byte) in buffer.as_mut_slice()[prefix..prefix + length]
@@ -181,22 +175,17 @@ async fn assert_slots_released(reader: &PooledFileReadAt, slots: u32) {
 async fn assert_bytes(buffer: BufferHandle, offset: u64, length: usize) -> VortexResult<()> {
     assert!(buffer.is_on_device());
     let host = buffer.try_to_host()?.await?;
-    let expected: Vec<_> = (0..length)
-        .map(|index| file_byte(offset + index as u64))
-        .collect();
+    let expected: Vec<_> = (offset..offset + length as u64).map(file_byte).collect();
     assert_eq!(host.as_ref(), expected.as_slice());
     Ok(())
 }
 
 #[test]
 fn pooled_file_read_options() {
-    assert!(!PooledFileReadAtOptions::default().direct_io);
+    let options = PooledFileReadAtOptions::default();
+    assert!(!options.direct_io);
     #[cfg(target_os = "linux")]
-    assert!(
-        PooledFileReadAtOptions::default()
-            .with_direct_io()
-            .direct_io
-    );
+    assert!(options.with_direct_io().direct_io);
 }
 
 #[rstest]
