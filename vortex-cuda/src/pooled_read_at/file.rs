@@ -10,10 +10,17 @@ use std::path::Path;
 use std::sync::Arc;
 
 use futures::FutureExt;
+use futures::StreamExt;
+use futures::TryFutureExt;
+use futures::TryStreamExt;
 use futures::future::BoxFuture;
+use futures::stream;
+use tokio::sync::Semaphore;
 use vortex::array::buffer::BufferHandle;
 use vortex::buffer::Alignment;
 use vortex::error::VortexResult;
+use vortex::error::vortex_ensure;
+use vortex::error::vortex_err;
 use vortex::io::CoalesceConfig;
 use vortex::io::VortexReadAt;
 use vortex::io::runtime::Handle;
@@ -21,12 +28,17 @@ use vortex::io::std_file::read_exact_at;
 
 #[cfg(target_os = "linux")]
 use self::direct::DirectFileReadBackend;
+use crate::CudaDeviceBuffer;
 use crate::pinned::PinnedByteBufferPool;
 use crate::pinned::PooledPinnedBuffer;
 use crate::stream::VortexCudaStream;
 
 /// Default number of concurrent requests to allow for local file I/O.
 pub const DEFAULT_FILE_CONCURRENCY: usize = 32;
+
+// Physical segments can exceed the coalescing limit. Split their I/O, not their encoding,
+// to limit blocking read sizes and start transfers before the whole segment is read.
+const FILE_READ_CHUNK_BYTES: usize = 4 << 20;
 
 /// Options controlling how [`PooledFileReadAt`] opens and reads a local file.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -118,8 +130,9 @@ fn open_backend(
 /// File reader that uses CUDA pinned host memory for I/O buffers and transfers
 /// directly to the GPU.
 ///
-/// Reads into a pooled pinned (page-locked) buffer, then submits a non-blocking
-/// H2D DMA transfer and returns a device `BufferHandle`.
+/// Stages reads in pooled pinned buffers for non-blocking H2D transfer. Large reads use the
+/// blocking I/O runtime, copying chunks into one device allocation as they finish. Concurrent
+/// host reads are bounded per open file.
 ///
 /// This is a data-plane reader. To open a complete local Vortex file, prefer
 /// [`crate::CudaOpenOptionsExt::with_cuda`], which keeps the footer and zone maps on the host.
@@ -130,6 +143,7 @@ pub struct PooledFileReadAt {
     handle: Handle,
     pool: Arc<PinnedByteBufferPool>,
     stream: VortexCudaStream,
+    read_slots: Arc<Semaphore>,
 }
 
 impl PooledFileReadAt {
@@ -166,7 +180,27 @@ impl PooledFileReadAt {
             handle,
             pool,
             stream,
+            read_slots: Arc::new(Semaphore::new(DEFAULT_FILE_CONCURRENCY)),
         })
+    }
+
+    /// Read into pinned memory under the file's shared concurrency limit.
+    /// The returned `requested_range` excludes any backend alignment padding.
+    async fn read_host(&self, offset: u64, length: usize) -> VortexResult<PooledHostRead> {
+        let backend = Arc::clone(&self.backend);
+        let pool = Arc::clone(&self.pool);
+        let permit = Arc::clone(&self.read_slots)
+            .acquire_owned()
+            .await
+            .map_err(|error| vortex_err!("file read semaphore closed: {error}"))?;
+        self.handle
+            .spawn_blocking(move || {
+                // A started blocking read cannot be cancelled. Keep its permit and buffer owners
+                // in the job even if the scan drops the awaiting future.
+                let _permit = permit;
+                backend.read(&pool, offset, length)
+            })
+            .await
     }
 }
 
@@ -194,38 +228,41 @@ impl VortexReadAt for PooledFileReadAt {
         length: usize,
         _alignment: Alignment,
     ) -> BoxFuture<'static, VortexResult<BufferHandle>> {
-        let backend = Arc::clone(&self.backend);
-        let handle = self.handle.clone();
-        let stream = self.stream.clone();
-        let pool = Arc::clone(&self.pool);
-
+        let reader = self.clone();
         async move {
-            let read = handle
-                .spawn_blocking(move || backend.read(&pool, offset, length))
-                .await?;
-            let cuda_buf = read.buffer.transfer_to_device(&stream)?;
-            Ok(BufferHandle::new_device(Arc::new(cuda_buf)).slice(read.requested_range))
+            vortex_ensure!(
+                offset.checked_add(u64::try_from(length)?).is_some(),
+                "file read range overflow: offset={offset}, length={length}"
+            );
+            if length <= FILE_READ_CHUNK_BYTES {
+                let read = reader.read_host(offset, length).await?;
+                let cuda_buf = read.buffer.transfer_to_device(&reader.stream)?;
+                return Ok(BufferHandle::new_device(Arc::new(cuda_buf)).slice(read.requested_range));
+            }
+
+            let mut output = reader.stream.device_alloc::<u8>(length)?;
+            let mut reads = stream::iter((0..length).step_by(FILE_READ_CHUNK_BYTES).map(|start| {
+                let size = (length - start).min(FILE_READ_CHUNK_BYTES);
+                reader
+                    .read_host(offset + start as u64, size)
+                    .map_ok(move |read| (start, read))
+            }))
+            .buffer_unordered(DEFAULT_FILE_CONCURRENCY);
+            while let Some((start, read)) = reads.try_next().await? {
+                let end = start + read.requested_range.len();
+                read.buffer.copy_to_device(
+                    &reader.stream,
+                    read.requested_range,
+                    &mut output.slice_mut(start..end),
+                )?;
+            }
+            Ok(BufferHandle::new_device(Arc::new(CudaDeviceBuffer::new(
+                output,
+            ))))
         }
         .boxed()
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pooled_file_read_options_default_to_buffered_io() {
-        assert!(!PooledFileReadAtOptions::default().direct_io);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn pooled_file_read_options_enable_direct_io() {
-        assert!(
-            PooledFileReadAtOptions::default()
-                .with_direct_io()
-                .direct_io
-        );
-    }
-}
+mod tests;
