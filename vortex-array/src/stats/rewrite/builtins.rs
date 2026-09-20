@@ -9,6 +9,7 @@ use vortex_error::VortexResult;
 use crate::aggregate_fn::AggregateFnRef;
 use crate::aggregate_fn::AggregateFnVTableExt;
 use crate::aggregate_fn::EmptyOptions as AggregateEmptyOptions;
+use crate::aggregate_fn::fns::all_nan::AllNan;
 use crate::aggregate_fn::fns::all_non_nan::AllNonNan;
 use crate::aggregate_fn::fns::all_non_null::AllNonNull;
 use crate::aggregate_fn::fns::all_null::AllNull;
@@ -38,6 +39,7 @@ use crate::scalar_fn::fns::binary::Binary;
 use crate::scalar_fn::fns::cast::Cast;
 use crate::scalar_fn::fns::dynamic::DynamicComparison;
 use crate::scalar_fn::fns::dynamic::DynamicComparisonExpr;
+use crate::scalar_fn::fns::is_nan::IsNan;
 use crate::scalar_fn::fns::is_not_null::IsNotNull;
 use crate::scalar_fn::fns::is_null::IsNull;
 use crate::scalar_fn::fns::like::Like;
@@ -63,6 +65,9 @@ pub(crate) fn register_builtins(session: &StatsSession) {
     session.register_rewrite(IsNotNullNullCountStatsRewrite);
     session.register_rewrite(IsNotNullAllNullStatsRewrite);
     session.register_rewrite(IsNotNullAllNonNullStatsRewrite);
+    session.register_rewrite(IsNanNaNCountStatsRewrite);
+    session.register_rewrite(IsNanAllNonNanStatsRewrite);
+    session.register_rewrite(IsNanAllNanStatsRewrite);
     session.register_rewrite(LikeStatsRewrite);
     session.register_rewrite(ListContainsNanCountStatsRewrite);
     session.register_rewrite(ListContainsAllNonNanStatsRewrite);
@@ -328,6 +333,65 @@ impl StatsRewriteRule for IsNotNullAllNonNullStatsRewrite {
 }
 
 #[derive(Debug)]
+struct IsNanNaNCountStatsRewrite;
+
+impl StatsRewriteRule for IsNanNaNCountStatsRewrite {
+    fn scalar_fn_id(&self) -> ScalarFnId {
+        IsNan.id()
+    }
+
+    fn falsify(
+        &self,
+        expr: &BoundExpression,
+        ctx: &StatsRewriteCtx<'_>,
+    ) -> VortexResult<Option<BoundExpression>> {
+        Ok(nan_count(expr.child(0), ctx).map(|nan_count| eq(nan_count, lit(0u64))))
+    }
+
+    fn satisfy(
+        &self,
+        expr: &BoundExpression,
+        ctx: &StatsRewriteCtx<'_>,
+    ) -> VortexResult<Option<BoundExpression>> {
+        Ok(nan_count(expr.child(0), ctx).map(|nan_count| eq(nan_count, row_count())))
+    }
+}
+
+#[derive(Debug)]
+struct IsNanAllNonNanStatsRewrite;
+
+impl StatsRewriteRule for IsNanAllNonNanStatsRewrite {
+    fn scalar_fn_id(&self) -> ScalarFnId {
+        IsNan.id()
+    }
+
+    fn falsify(
+        &self,
+        expr: &BoundExpression,
+        _ctx: &StatsRewriteCtx<'_>,
+    ) -> VortexResult<Option<BoundExpression>> {
+        Ok(Some(all_non_nan(expr.child(0))))
+    }
+}
+
+#[derive(Debug)]
+struct IsNanAllNanStatsRewrite;
+
+impl StatsRewriteRule for IsNanAllNanStatsRewrite {
+    fn scalar_fn_id(&self) -> ScalarFnId {
+        IsNan.id()
+    }
+
+    fn satisfy(
+        &self,
+        expr: &BoundExpression,
+        _ctx: &StatsRewriteCtx<'_>,
+    ) -> VortexResult<Option<BoundExpression>> {
+        Ok(Some(all_nan(expr.child(0))))
+    }
+}
+
+#[derive(Debug)]
 struct LikeStatsRewrite;
 
 impl StatsRewriteRule for LikeStatsRewrite {
@@ -530,12 +594,24 @@ fn null_count(expr: &BoundExpression, ctx: &StatsRewriteCtx<'_>) -> Option<Bound
     stat_expr(expr, Stat::NullCount, ctx)
 }
 
+fn nan_count(expr: &BoundExpression, ctx: &StatsRewriteCtx<'_>) -> Option<BoundExpression> {
+    stat_expr(expr, Stat::NaNCount, ctx)
+}
+
 fn all_null(expr: &BoundExpression) -> BoundExpression {
     stat_fn(expr.clone(), AllNull.bind(AggregateEmptyOptions))
 }
 
 fn all_non_null(expr: &BoundExpression) -> BoundExpression {
     stat_fn(expr.clone(), AllNonNull.bind(AggregateEmptyOptions))
+}
+
+fn all_nan(expr: &BoundExpression) -> BoundExpression {
+    stat_fn(expr.clone(), AllNan.bind(AggregateEmptyOptions))
+}
+
+fn all_non_nan(expr: &BoundExpression) -> BoundExpression {
+    stat_fn(expr.clone(), AllNonNan.bind(AggregateEmptyOptions))
 }
 
 enum NanCheck {
@@ -736,8 +812,10 @@ mod tests {
     use crate::expr::col;
     use crate::expr::dynamic;
     use crate::expr::eq;
+    use crate::expr::get_item;
     use crate::expr::gt;
     use crate::expr::gt_eq;
+    use crate::expr::is_nan;
     use crate::expr::is_not_null;
     use crate::expr::is_null;
     use crate::expr::like;
@@ -815,6 +893,14 @@ mod tests {
 
     fn all_non_null(expr: &Expression) -> Expression {
         crate::stats::all_non_null(expr.clone())
+    }
+
+    fn all_nan(expr: &Expression) -> Expression {
+        crate::stats::all_nan(expr.clone())
+    }
+
+    fn all_non_nan(expr: &Expression) -> Expression {
+        crate::stats::all_non_nan(expr.clone())
     }
 
     macro_rules! assert_rewrite_eq {
@@ -987,6 +1073,56 @@ mod tests {
             Some(or(
                 eq(stat(col("a"), Stat::NullCount), lit(0u64)),
                 all_non_null(&col("a")),
+            ))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rewrites_nan_falsifiers() -> VortexResult<()> {
+        assert_rewrite_eq!(
+            falsify(&is_nan(col("f")))?,
+            Some(or(
+                eq(stat(col("f"), Stat::NaNCount), lit(0u64)),
+                all_non_nan(&col("f")),
+            ))
+        );
+
+        // Nullable floats prune on nan_count just the same.
+        assert_rewrite_eq!(
+            falsify(&is_nan(get_item("x", col("n"))))?,
+            Some(or(
+                eq(stat(get_item("x", col("n")), Stat::NaNCount), lit(0u64)),
+                all_non_nan(&get_item("x", col("n"))),
+            ))
+        );
+
+        // NaN literals fold through the nan_count stat.
+        assert_rewrite_eq!(
+            falsify(&is_nan(lit(f32::NAN)))?,
+            Some(or(eq(lit(1u64), lit(0u64)), all_non_nan(&lit(f32::NAN))))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rewrites_nan_satisfiers() -> VortexResult<()> {
+        assert_rewrite_eq!(
+            satisfy(&is_nan(col("f")))?,
+            Some(or(
+                eq(
+                    stat(col("f"), Stat::NaNCount),
+                    RowCount.new_expr(EmptyOptions, [])
+                ),
+                all_nan(&col("f")),
+            ))
+        );
+
+        assert_rewrite_eq!(
+            satisfy(&is_nan(lit(f32::NAN)))?,
+            Some(or(
+                eq(lit(1u64), RowCount.new_expr(EmptyOptions, [])),
+                all_nan(&lit(f32::NAN)),
             ))
         );
         Ok(())

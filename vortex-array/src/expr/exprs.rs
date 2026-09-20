@@ -34,6 +34,7 @@ use crate::scalar_fn::fns::dynamic::Rhs;
 use crate::scalar_fn::fns::ext_storage::ExtStorage;
 use crate::scalar_fn::fns::fill_null::FillNull;
 use crate::scalar_fn::fns::get_item::GetItem;
+use crate::scalar_fn::fns::is_nan::IsNan;
 use crate::scalar_fn::fns::is_not_null::IsNotNull;
 use crate::scalar_fn::fns::is_null::IsNull;
 use crate::scalar_fn::fns::like::Like;
@@ -855,6 +856,28 @@ pub fn bound_is_null(child: BoundExpression) -> BoundExpression {
         .vortex_expect("is-null expressions are always well-typed")
 }
 
+// ---- IsNan ----
+
+/// Creates an expression that checks for NaN values.
+///
+/// The expression is strict: null inputs produce null outputs, so the output nullability
+/// follows the input. Only primitive float inputs are supported.
+///
+/// ```rust
+/// # use vortex_array::expr::{is_nan, root};
+/// let expr = is_nan(root());
+/// ```
+pub fn is_nan(child: Expression) -> Expression {
+    IsNan.new_expr(EmptyOptions, vec![child])
+}
+
+/// Creates a bound expression that checks for NaN values.
+pub fn bound_is_nan(child: BoundExpression) -> BoundExpression {
+    IsNan
+        .try_new_bound_expr(EmptyOptions, [child])
+        .vortex_expect("is-nan expressions are always well-typed")
+}
+
 // ---- IsNotNull ----
 
 /// Creates an expression that checks for non-null values.
@@ -1242,6 +1265,7 @@ pub mod bound {
     pub use super::bound_gt as gt;
     pub use super::bound_gt_eq as gt_eq;
     pub use super::bound_ilike as ilike;
+    pub use super::bound_is_nan as is_nan;
     pub use super::bound_is_not_null as is_not_null;
     pub use super::bound_is_null as is_null;
     pub use super::bound_like as like;
