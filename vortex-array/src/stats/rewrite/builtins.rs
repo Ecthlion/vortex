@@ -332,6 +332,8 @@ impl StatsRewriteRule for IsNotNullAllNonNullStatsRewrite {
     }
 }
 
+/// Rewrites `is_nan` using the `NaNCount` stat: the predicate is falsified when a zone
+/// contains no NaN values, and satisfied when every row in the zone is NaN.
 #[derive(Debug)]
 struct IsNanNaNCountStatsRewrite;
 
@@ -357,6 +359,8 @@ impl StatsRewriteRule for IsNanNaNCountStatsRewrite {
     }
 }
 
+/// Falsifies `is_nan` when the `AllNonNan` pruning stat proves that no value in the zone
+/// is NaN.
 #[derive(Debug)]
 struct IsNanAllNonNanStatsRewrite;
 
@@ -374,6 +378,8 @@ impl StatsRewriteRule for IsNanAllNonNanStatsRewrite {
     }
 }
 
+/// Satisfies `is_nan` when the `AllNan` pruning stat proves that every value in the zone
+/// is NaN.
 #[derive(Debug)]
 struct IsNanAllNanStatsRewrite;
 
