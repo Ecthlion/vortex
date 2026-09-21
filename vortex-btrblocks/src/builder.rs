@@ -36,8 +36,7 @@ pub const ALL_SCHEMES: &[&dyn Scheme] = &[
     &integer::RunEndScheme,
     &integer::SequenceScheme,
     &integer::IntRLEScheme,
-    // Prefer all other schemes above delta, for now (since its slower to decompress).
-    &integer::DeltaScheme::new(1.25),
+    // Delta is omitted here: see [`DELTA_SCHEME`].
     ////////////////////////////////////////////////////////////////////////////////////////////////
     // Float schemes.
     ////////////////////////////////////////////////////////////////////////////////////////////////
@@ -65,6 +64,13 @@ pub const ALL_SCHEMES: &[&dyn Scheme] = &[
     // Temporal schemes.
     &temporal::TemporalScheme,
 ];
+
+/// Delta, kept out of [`ALL_SCHEMES`] because it is slower to decompress than the schemes that
+/// would otherwise win. Callers that want it opt in with
+/// [`with_new_scheme`](BtrBlocksCompressorBuilder::with_new_scheme).
+///
+/// TODO(robert): Return it to [`ALL_SCHEMES`] once we have scheme filtering.
+pub static DELTA_SCHEME: integer::DeltaScheme = integer::DeltaScheme::new(1.25);
 
 /// Builder for creating configured [`BtrBlocksCompressor`] instances.
 ///
